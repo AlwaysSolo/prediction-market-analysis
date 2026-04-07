@@ -1,0 +1,32 @@
+{
+  "config": {
+    "edge_threshold_cents": 6.0,
+    "min_tau_minutes": 0.0,
+    "max_tau_minutes": 12.0,
+    "price_band_min_cents": 10,
+    "price_band_max_cents": 90,
+    "reserve_cash_pct": 30.0,
+    "starting_cash_dollars": 10000.0,
+    "contracts_per_order": 1,
+    "capital_pct_per_order": null,
+    "kelly_fraction_multiplier": null,
+    "kelly_fraction_cap_pct": null,
+    "slippage_pct": 1.0,
+    "allow_stacking": false,
+    "max_entries_per_ticker": null,
+    "require_price_improvement_for_stack": false
+  },
+  "objective": 6.067619783614458,
+  "trades": 246,
+  "net_pnl_dollars": 23.55449999999998,
+  "max_drawdown_dollars": 3.882000000001426,
+  "max_drawdown_pct": 0.03871682701222382,
+  "return_pct": 0.23554499999998146,
+  "log_loss": 0.5115894954549555,
+  "skipped_due_open_ticker": 144395,
+  "skipped_due_price_band": 588778,
+  "skipped_due_post_cost_edge": 1658487,
+  "selection_mode": "strict",
+  "met_validation_requirements": true,
+  "minimum_trades_required": 139
+}

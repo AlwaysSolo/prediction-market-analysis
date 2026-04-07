@@ -1,0 +1,846 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import httpx
+import numpy as np
+import pytest
+
+from src.indexers.kalshi.models import Market
+from src.live.kalshi import (
+    KalshiCollectorConfig,
+    KalshiCredentials,
+    KalshiEnvironment,
+    KalshiExecutionConfig,
+    KalshiExecutionEngine,
+    KalshiExecutionMode,
+    KalshiFeatureStateEngine,
+    KalshiLightGBMScorer,
+    KalshiMarketDataCollector,
+    KalshiSignalRiskEngine,
+    KalshiTickerState,
+    build_create_order_payload,
+    parse_fill_event,
+    parse_market_position_event,
+)
+from src.live.kalshi.scorer import LoadedLightGBMModel
+from src.live.kalshi.signal_risk import KalshiSignalRiskConfig
+from src.live.kalshi.types import KalshiTickerUpdate
+
+
+def _collector_config(tmp_path: Path) -> KalshiCollectorConfig:
+    return KalshiCollectorConfig(
+        environment=KalshiEnvironment.DEMO,
+        credentials=KalshiCredentials(api_key_id="demo-key", private_key_path=Path("tests/fixtures/demo.pem")),
+        log_dir=tmp_path / "logs",
+        series_tickers=("KXBTC15M",),
+        metadata_refresh_interval_seconds=3600.0,
+    )
+
+
+def _ticker_update(
+    *,
+    ticker: str = "KXBTC15M-TEST",
+    event_time: datetime | None = None,
+    last_yes_price_cents: int = 55,
+    previous_yes_price_cents: int | None = 54,
+    yes_bid_cents: int | None = None,
+    yes_ask_cents: int | None = None,
+    ticker_update_time: datetime | None = None,
+    close_time: datetime | None = None,
+    is_open: bool = True,
+) -> KalshiTickerUpdate:
+    event_time = event_time or datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    if close_time is None:
+        close_time = event_time + timedelta(minutes=7)
+    if yes_bid_cents is None:
+        yes_bid_cents = min(98, max(1, last_yes_price_cents - 1))
+    if yes_ask_cents is None:
+        yes_ask_cents = max(yes_bid_cents + 1, last_yes_price_cents)
+    if ticker_update_time is None:
+        ticker_update_time = event_time
+    return KalshiTickerUpdate(
+        ticker=ticker,
+        event_time=event_time,
+        last_yes_price_cents=last_yes_price_cents,
+        previous_yes_price_cents=previous_yes_price_cents,
+        close_time=close_time,
+        is_open=is_open,
+        market_prob=None,
+        previous_market_prob=None,
+        price_momentum=None,
+        tau_minutes=None,
+        yes_bid_cents=yes_bid_cents,
+        yes_ask_cents=yes_ask_cents,
+        ticker_update_time=ticker_update_time,
+    )
+
+
+class _PredictingBooster:
+    def __init__(self, prediction: float):
+        self.prediction = prediction
+
+    def predict(self, _feature_row: np.ndarray, num_iteration: int | None = None) -> np.ndarray:
+        return np.array([self.prediction], dtype=np.float64)
+
+
+def _fake_model(prediction: float) -> LoadedLightGBMModel:
+    return LoadedLightGBMModel(
+        booster=_PredictingBooster(prediction),  # type: ignore[arg-type]
+        model_file=Path("fake-model.txt"),
+        best_iteration=None,
+    )
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+        self.content = b"{}"
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _RecordingHttpClient:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def request(self, method: str, path: str, params=None, json=None, headers=None):
+        self.calls.append(
+            {"method": method, "path": path, "params": params, "json": json, "headers": headers}
+        )
+        return _FakeResponse({"ok": True})
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeRestClient:
+    def __init__(self, *, create_order_results: list | None = None):
+        self.create_order_results = list(create_order_results or [])
+        self.create_order_calls: list[dict] = []
+        self.orders: dict[str, dict] = {}
+        self.balance_cents = 1000
+        self.positions: list[dict] = []
+        self.market_results: dict[str, Market] = {}
+        self.balance_calls = 0
+        self.balance_subaccounts: list[int] = []
+        self.positions_calls = 0
+        self.positions_subaccounts: list[int] = []
+        self.get_orders_calls = 0
+        self.get_orders_subaccounts: list[int | None] = []
+        self.get_order_calls = 0
+        self.get_order_subaccounts: list[int | None] = []
+        self.get_market_calls = 0
+
+    def close(self) -> None:
+        return None
+
+    def create_order(self, payload: dict) -> dict:
+        self.create_order_calls.append(payload)
+        if self.create_order_results:
+            result = self.create_order_results.pop(0)
+        else:
+            result = {"order": self._build_order(payload, order_id="server-order", status="executed", fill_count=1)}
+        if isinstance(result, Exception):
+            raise result
+        order = result.get("order")
+        if isinstance(order, dict):
+            self.orders[order["order_id"]] = order
+            if order.get("status") in {"executed", "canceled"} and int(order.get("fill_count", 0)) > 0:
+                self.positions = [self._build_position(order)]
+        return result
+
+    def get_balance(self, *, subaccount: int = 0) -> dict:
+        self.balance_calls += 1
+        self.balance_subaccounts.append(subaccount)
+        return {"balance": self.balance_cents, "portfolio_value": self.balance_cents, "updated_ts": 1767225600}
+
+    def get_positions(self, *, subaccount: int = 0) -> list[dict]:
+        self.positions_calls += 1
+        self.positions_subaccounts.append(subaccount)
+        return list(self.positions)
+
+    def get_orders(
+        self,
+        *,
+        ticker: str | None = None,
+        min_ts: int | None = None,
+        subaccount: int | None = None,
+        **_: object,
+    ) -> list[dict]:
+        self.get_orders_calls += 1
+        self.get_orders_subaccounts.append(subaccount)
+        orders = list(self.orders.values())
+        if ticker is not None:
+            orders = [order for order in orders if order["ticker"] == ticker]
+        return orders
+
+    def get_order(self, order_id: str, *, subaccount: int | None = None) -> dict:
+        self.get_order_calls += 1
+        self.get_order_subaccounts.append(subaccount)
+        return {"order": self.orders[order_id]}
+
+    def get_market(self, ticker: str) -> Market:
+        self.get_market_calls += 1
+        return self.market_results[ticker]
+
+    def cancel_order(self, order_id: str) -> dict:
+        order = self.orders[order_id]
+        order["status"] = "canceled"
+        order["remaining_count"] = 0
+        return {"order": order, "reduced_by": 0}
+
+    def _build_order(
+        self,
+        payload: dict,
+        *,
+        order_id: str,
+        status: str,
+        fill_count: int,
+        remaining_count: int = 0,
+    ) -> dict:
+        yes_price = payload.get("yes_price")
+        no_price = payload.get("no_price")
+        if yes_price is None and no_price is not None:
+            yes_price = 100 - int(no_price)
+        if no_price is None and yes_price is not None:
+            no_price = 100 - int(yes_price)
+        return {
+            "order_id": order_id,
+            "user_id": "user-1",
+            "client_order_id": payload["client_order_id"],
+            "ticker": payload["ticker"],
+            "side": payload["side"],
+            "action": payload["action"],
+            "type": payload["type"],
+            "status": status,
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "fill_count": fill_count,
+            "remaining_count": remaining_count,
+            "initial_count": payload["count"],
+            "taker_fees_dollars": "0.0100",
+            "maker_fees_dollars": "0.0000",
+            "taker_fill_cost_dollars": "0.5500",
+            "maker_fill_cost_dollars": "0.0000",
+            "created_time": "2026-01-01T12:00:00Z",
+            "last_update_time": "2026-01-01T12:00:01Z",
+        }
+
+    def _build_position(self, order: dict) -> dict:
+        sign = "" if order["side"] == "yes" else "-"
+        price_dollars = f"{order['yes_price'] / 100:.4f}"
+        return {
+            "ticker": order["ticker"],
+            "position_fp": f"{sign}{order['fill_count']}.00",
+            "market_exposure_dollars": price_dollars,
+            "fees_paid_dollars": "0.0100",
+        }
+
+
+async def _noop_private_ws(self) -> None:
+    await self._stop_event.wait()
+
+
+async def _wait_for_status(queue: asyncio.Queue, status: str, *, timeout: float = 1.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError(f"Timed out waiting for status={status}")
+        update = await asyncio.wait_for(queue.get(), timeout=remaining)
+        if update.status == status:
+            return update
+
+
+def test_execution_config_from_env_uses_demo_override_and_shared_fallback(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("KALSHI_EXECUTION_MODE", "paper")
+    monkeypatch.setenv("KALSHI_EXECUTION_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("KALSHI_DEMO_EXECUTION_MODE", "live")
+    monkeypatch.setenv("KALSHI_DEMO_EXECUTION_ENABLE_LIVE_TRADING", "true")
+
+    demo_config = KalshiExecutionConfig.from_env(KalshiEnvironment.DEMO)
+    prod_config = KalshiExecutionConfig.from_env(KalshiEnvironment.PRODUCTION)
+
+    assert demo_config.mode is KalshiExecutionMode.LIVE
+    assert demo_config.enable_live_trading is True
+    assert prod_config.mode is KalshiExecutionMode.PAPER
+    assert prod_config.reconcile_interval_seconds == 15.0
+
+
+def test_build_create_order_payload_uses_side_specific_price_field():
+    yes_payload = build_create_order_payload(
+        type(
+            "Intent",
+            (),
+            {
+                "ticker": "TEST",
+                "decision_id": "id-1",
+                "side": "YES",
+                "contracts": 1,
+                "max_acceptable_entry_price_cents": 58,
+            },
+        )(),
+        subaccount=7,
+    )
+    no_payload = build_create_order_payload(
+        type(
+            "Intent",
+            (),
+            {
+                "ticker": "TEST",
+                "decision_id": "id-2",
+                "side": "NO",
+                "contracts": 1,
+                "max_acceptable_entry_price_cents": 41,
+            },
+        )(),
+        subaccount=7,
+    )
+
+    assert yes_payload["yes_price"] == 58
+    assert "no_price" not in yes_payload
+    assert yes_payload["subaccount"] == 7
+    assert no_payload["no_price"] == 41
+    assert "yes_price" not in no_payload
+    assert no_payload["subaccount"] == 7
+
+
+def test_live_rest_client_create_order_uses_post_and_auth_headers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.live.kalshi.client import KalshiLiveRestClient
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.live.kalshi.client.build_auth_headers",
+        lambda credentials, method, path, timestamp_ms: captured.update(
+            {"credentials": credentials, "method": method, "path": path, "timestamp_ms": timestamp_ms}
+        )
+        or {"KALSHI-ACCESS-KEY": "demo-key", "KALSHI-ACCESS-SIGNATURE": "sig"},
+    )
+    client = KalshiLiveRestClient(_collector_config(tmp_path))
+    recording_client = _RecordingHttpClient()
+    client.client = recording_client  # type: ignore[assignment]
+
+    client.create_order(
+        {"ticker": "TEST", "client_order_id": "abc", "side": "yes", "action": "buy", "count": 1},
+        subaccount=7,
+    )
+
+    call = recording_client.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/portfolio/orders"
+    assert call["json"]["client_order_id"] == "abc"
+    assert call["json"]["subaccount"] == 7
+    assert call["headers"]["KALSHI-ACCESS-KEY"] == "demo-key"
+    assert call["headers"]["Content-Type"] == "application/json"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/trade-api/v2/portfolio/orders"
+
+
+def test_execution_private_subscription_messages():
+    collector = KalshiMarketDataCollector(_collector_config(Path(".")))
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    engine = KalshiExecutionEngine(signal_engine)
+
+    assert engine._private_subscription_messages() == [
+        {
+            "id": 1,
+            "cmd": "subscribe",
+            "params": {"channels": ["user_orders", "fill", "market_positions"]},
+        }
+    ]
+
+
+def test_parse_fill_and_market_position_events():
+    fill = parse_fill_event(
+        {
+            "order_id": "order-1",
+            "client_order_id": "decision-1",
+            "market_ticker": "KXBTC15M-TEST",
+            "side": "yes",
+            "yes_price_dollars": "0.5500",
+            "count_fp": "1.00",
+            "fee_cost": "0.0100",
+            "ts": 1767225600,
+        }
+    )
+    position = parse_market_position_event(
+        {
+            "market_ticker": "KXBTC15M-TEST",
+            "position_fp": "-2.00",
+            "position_cost_dollars": "0.8000",
+            "fees_paid_dollars": "0.0200",
+        }
+    )
+
+    assert fill.price_cents == 55
+    assert fill.count == 1
+    assert position.side == "NO"
+    assert position.contracts == 2
+
+
+def test_simulated_live_fill_settles_to_market_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=False,
+            simulate_immediate_fills=True,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    ticker = "KXBTC15M-TEST"
+    fake_rest.market_results[ticker] = Market(
+        ticker=ticker,
+        event_ticker="KXBTC15M",
+        market_type="binary",
+        title="t",
+        yes_sub_title="y",
+        no_sub_title="n",
+        status="settled",
+        yes_bid=None,
+        yes_ask=None,
+        no_bid=None,
+        no_ask=None,
+        last_price=55,
+        volume=1,
+        volume_24h=1,
+        open_interest=1,
+        result="yes",
+        created_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        open_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+    )
+    execution_engine._rest_client = fake_rest
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(
+            _ticker_update(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+                close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            )
+        )
+
+        filled = await _wait_for_status(queue, "filled", timeout=2.5)
+        assert filled.fill_price_cents == 55
+
+        collector._states[ticker] = KalshiTickerState(
+            ticker=ticker,
+            last_yes_price_cents=55,
+            last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            previous_yes_price_cents=54,
+            close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            is_open=False,
+        )
+
+        settled = await _wait_for_status(queue, "settled", timeout=1.5)
+        assert settled.settlement_result == "YES"
+        assert settled.realized_pnl_dollars == pytest.approx(0.4245)
+        assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.4245)
+        assert execution_engine.get_portfolio_snapshot() is not None
+        assert execution_engine.get_portfolio_snapshot().available_cash_dollars == pytest.approx(10.4245)
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_simulated_live_fill_settles_when_close_time_passed_even_if_collector_state_is_stale_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=False,
+            simulate_immediate_fills=True,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    ticker = "KXBTC15M-TEST"
+    close_time = datetime(2026, 1, 1, 12, 7, tzinfo=UTC)
+    fake_rest.market_results[ticker] = Market(
+        ticker=ticker,
+        event_ticker="KXBTC15M",
+        market_type="binary",
+        title="t",
+        yes_sub_title="y",
+        no_sub_title="n",
+        status="settled",
+        yes_bid=None,
+        yes_ask=None,
+        no_bid=None,
+        no_ask=None,
+        last_price=55,
+        volume=1,
+        volume_24h=1,
+        open_interest=1,
+        result="yes",
+        created_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        open_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        close_time=close_time,
+    )
+    execution_engine._rest_client = fake_rest
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(
+            _ticker_update(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+                close_time=close_time,
+            )
+        )
+
+        await _wait_for_status(queue, "filled")
+
+        collector._states[ticker] = KalshiTickerState(
+            ticker=ticker,
+            last_yes_price_cents=55,
+            last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            previous_yes_price_cents=54,
+            close_time=datetime(2026, 1, 1, 11, 59, tzinfo=UTC),
+            is_open=True,
+        )
+
+        settled = await _wait_for_status(queue, "settled", timeout=1.5)
+        assert settled.settlement_result == "YES"
+        assert fake_rest.get_market_calls >= 1
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_paper_mode_full_fill_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer, KalshiSignalRiskConfig())
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(mode=KalshiExecutionMode.PAPER),
+    )
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update())
+
+        filled = await _wait_for_status(queue, "filled", timeout=5.0)
+        assert filled.side == "YES"
+        assert filled.filled_contracts == 1
+        assert filled.fill_price_cents == 55
+        assert signal_engine.get_portfolio_state().open_positions[0].ticker == "KXBTC15M-TEST"
+        snapshot = execution_engine.get_portfolio_snapshot()
+        assert snapshot is not None
+        assert snapshot.available_cash_dollars == pytest.approx(filled.available_cash_dollars)
+        assert snapshot.open_positions[0].ticker == "KXBTC15M-TEST"
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_live_submit_success_updates_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+    monkeypatch.setattr(KalshiExecutionEngine, "_private_ws_loop", _noop_private_ws)
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=True,
+            subaccount=7,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    execution_engine._rest_client = fake_rest
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update())
+
+        await asyncio.sleep(2.0)
+        updates: list = []
+        while not queue.empty():
+            updates.append(await queue.get())
+        filled = next((update for update in updates if update.status == "filled"), None)
+        assert filled is not None
+        assert filled.order_id == "server-order"
+        await asyncio.sleep(0.1)
+        snapshot = execution_engine.get_portfolio_snapshot()
+        assert snapshot is not None
+        assert snapshot.open_positions[0].ticker == "KXBTC15M-TEST"
+        assert fake_rest.positions_calls == 1
+        assert fake_rest.get_order_calls == 0
+        assert fake_rest.get_orders_calls == 1
+        assert fake_rest.create_order_calls[0]["subaccount"] == 7
+        assert fake_rest.balance_subaccounts
+        assert set(fake_rest.balance_subaccounts) == {7}
+        assert fake_rest.positions_subaccounts == [7]
+        assert fake_rest.get_orders_subaccounts == [7]
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_ambiguous_submit_reconciles_by_client_order_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+    monkeypatch.setattr(KalshiExecutionEngine, "_private_ws_loop", _noop_private_ws)
+
+    request = httpx.Request("POST", "https://demo-api.kalshi.co/trade-api/v2/portfolio/orders")
+    connect_error = httpx.ConnectError("network down", request=request)
+    fake_rest = _FakeRestClient(create_order_results=[connect_error])
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=True,
+            subaccount=7,
+            reconcile_interval_seconds=0.05,
+            order_reconcile_timeout_seconds=0.2,
+        ),
+    )
+    execution_engine._rest_client = fake_rest
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+
+        # Seed the recovered order on the fake REST side after the claim happens.
+        async def publish_and_seed() -> None:
+            await collector._publish_update(_ticker_update())
+            await asyncio.sleep(0.05)
+            claimed = execution_engine.snapshot_states()
+            assert claimed
+            decision_id = next(iter(claimed))
+            fake_rest.orders["recovered-order"] = fake_rest._build_order(
+                {
+                    "ticker": "KXBTC15M-TEST",
+                    "client_order_id": decision_id,
+                    "side": "yes",
+                    "action": "buy",
+                    "type": "limit",
+                    "count": 1,
+                    "yes_price": 55,
+                },
+                order_id="recovered-order",
+                status="executed",
+                fill_count=1,
+            )
+            fake_rest.positions = [fake_rest._build_position(fake_rest.orders["recovered-order"])]
+
+        await publish_and_seed()
+        await asyncio.sleep(2.0)
+        updates: list = []
+        while not queue.empty():
+            updates.append(await queue.get())
+        filled = next((update for update in updates if update.status == "filled"), None)
+        assert filled is not None
+        assert filled.order_id == "recovered-order"
+        assert len(fake_rest.create_order_calls) == 1
+        assert fake_rest.create_order_calls[0]["subaccount"] == 7
+        assert 7 in fake_rest.get_orders_subaccounts
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_shadow_mode_releases_reservation_without_submitting_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.SHADOW,
+            subaccount=7,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    execution_engine._rest_client = fake_rest
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update())
+
+        await asyncio.sleep(1.0)
+        updates: list = []
+        while not queue.empty():
+            updates.append(await queue.get())
+        filled = next((update for update in updates if update.status == "filled"), None)
+        assert filled is not None
+        assert filled.message == "shadow_fill"
+        assert not fake_rest.create_order_calls
+        assert fake_rest.balance_subaccounts
+        assert set(fake_rest.balance_subaccounts) == {7}
+        assert fake_rest.positions_subaccounts == [7]
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_live_fill_emits_settled_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+    monkeypatch.setattr(KalshiExecutionEngine, "_private_ws_loop", _noop_private_ws)
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=True,
+            subaccount=7,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    ticker = "KXBTC15M-TEST"
+    fake_rest.market_results[ticker] = Market(
+        ticker=ticker,
+        event_ticker="KXBTC15M",
+        market_type="binary",
+        title="t",
+        yes_sub_title="y",
+        no_sub_title="n",
+        status="settled",
+        yes_bid=None,
+        yes_ask=None,
+        no_bid=None,
+        no_ask=None,
+        last_price=55,
+        volume=1,
+        volume_24h=1,
+        open_interest=1,
+        result="yes",
+        created_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        open_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+    )
+    execution_engine._rest_client = fake_rest
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(
+            _ticker_update(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+                close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            )
+        )
+
+        await _wait_for_status(queue, "filled", timeout=1.5)
+        collector._states[ticker] = KalshiTickerState(
+            ticker=ticker,
+            last_yes_price_cents=55,
+            last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            previous_yes_price_cents=54,
+            close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            is_open=False,
+        )
+        settled = await _wait_for_status(queue, "settled", timeout=1.5)
+        assert settled.settlement_result == "YES"
+        assert settled.realized_pnl_dollars == pytest.approx(0.4245)
+        assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.4245)
+        assert fake_rest.get_market_calls >= 1
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())

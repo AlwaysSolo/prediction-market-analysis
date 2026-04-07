@@ -1,0 +1,33 @@
+{
+  "feature_order": [
+    "z_implied",
+    "tau_minutes",
+    "price_momentum",
+    "abs_price_momentum",
+    "price_direction",
+    "distance_from_mid",
+    "last_trade_count",
+    "last_trade_side_sign",
+    "last_trade_signed_count",
+    "time_since_last_trade_seconds",
+    "minutes_since_market_open",
+    "trade_count_30s",
+    "contracts_sum_30s",
+    "signed_contracts_sum_30s",
+    "yes_taker_share_30s",
+    "price_return_30s",
+    "price_volatility_30s",
+    "trade_count_120s",
+    "contracts_sum_120s",
+    "signed_contracts_sum_120s",
+    "yes_taker_share_120s",
+    "price_return_120s",
+    "price_volatility_120s",
+    "trade_count_300s",
+    "contracts_sum_300s",
+    "signed_contracts_sum_300s",
+    "yes_taker_share_300s",
+    "price_return_300s",
+    "price_volatility_300s"
+  ]
+}
