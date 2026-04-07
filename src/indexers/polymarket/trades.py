@@ -1,7 +1,7 @@
 """Indexer for Polymarket trades from the Polygon blockchain."""
 
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -115,7 +115,7 @@ class PolymarketTradesIndexer(Indexer):
 
         try:
             for chunk_start, chunk_end in ranges:
-                fetched_at = datetime.utcnow()
+                fetched_at = datetime.now(UTC)
 
                 # Fetch from both contracts for this block range
                 for contract_name, contract_address in contracts:

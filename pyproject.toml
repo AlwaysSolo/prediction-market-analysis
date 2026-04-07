@@ -20,8 +20,16 @@ dependencies = [
     "tenacity>=8.0.0",
     "tqdm>=4.67.1",
     "web3>=6.0.0",
+    "websockets>=15.0.1",
     "simple-term-menu>=1.6.0",
     "python-dotenv>=1.2.1",
+    "zstandard>=0.23.0",
+    "scikit-learn>=1.6.1",
+    "optuna>=4.3.0",
+    "xgboost>=2.1.4",
+    "lightgbm>=4.6.0",
+    "catboost>=1.2.10",
+    "pysr>=1.5.9",
 ]
 
 [dependency-groups]

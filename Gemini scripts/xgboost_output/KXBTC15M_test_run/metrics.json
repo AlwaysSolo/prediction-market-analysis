@@ -1,0 +1,27 @@
+{
+  "train_rows": 80000,
+  "test_rows": 20000,
+  "sample_rows": 100000,
+  "feature_names": [
+    "market_prob",
+    "tau_minutes",
+    "price_momentum",
+    "abs_price_momentum",
+    "price_direction",
+    "distance_from_mid",
+    "z_implied"
+  ],
+  "log_loss": 0.5055777672150578,
+  "brier_score": 0.16932107508182526,
+  "roc_auc": 0.8282551113323401,
+  "positive_rate_test": 0.5016,
+  "params": {
+    "n_estimators": 50,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "tree_method": "hist",
+    "random_seed": 42
+  }
+}

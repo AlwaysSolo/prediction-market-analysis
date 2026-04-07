@@ -1,0 +1,173 @@
+# Bagged-Lasso Live Kalshi Rollout V1
+
+## Summary
+Ship a **dedicated single-model live runner** for the current best setup: `bagged_lasso` + regime hard gate + bucket-ban policy, trading **real orders on production** from a **dedicated subaccount** with **fixed 1-contract sizing**, **hold-to-settlement**, and **full archive recording**.
+
+This v1 should **not** unlock generic regularized live trading everywhere. Keep the existing multi-model and generic regularized runners paper-only, and add one explicit, operator-safe path for the single approved live configuration.
+
+Chosen defaults:
+- Model: `bagged_lasso` only
+- Account: dedicated nonzero Kalshi subaccount only
+- Mode: production market data, shadow or live from the same dedicated runner
+- Live sizing: fixed `1` contract
+- Signal profile: bagged-lasso `policy.json` baseline plus `regime=true`, `bucket_ban=true`, `stacking=false`
+- Position management: hold to settlement
+- Logging: full live archive, plus existing signal/execution logs
+- Safety posture: minimal unblock, but with must-have correctness and preflight checks
+
+## Key Changes
+
+### 1. Dedicated live runner and fixed live profile
+Add a new runner dedicated to this rollout, for example `scripts/run_kalshi_bagged_lasso_live.py`.
+
+Behavior:
+- Uses only the bagged-lasso artifact and policy from `artifacts/kalshi/kxbtc15m_bagged_lasso/latest` or the selected approved run.
+- Supports two explicit operator modes:
+  - `shadow`: production data, no order submission
+  - `live`: real order submission
+- Requires `--confirm-live` when `live` mode is selected.
+- Refuses to run live unless:
+  - environment is `production`
+  - execution live-trading flag is enabled
+  - configured subaccount is nonzero
+  - credentials load successfully
+  - policy/model files resolve successfully
+
+Resolved signal profile for v1:
+- baseline from bagged-lasso `policy.json`
+- force:
+  - `apply_regime_hard_gate = true`
+  - `enable_bucket_ban_policy = true`
+  - `contracts_per_order = 1`
+  - `capital_pct_per_order = null`
+  - `kelly_fraction_multiplier = null`
+  - `kelly_fraction_cap_pct = null`
+  - `allow_stacking = false`
+- keep current bagged-lasso policy defaults for:
+  - edge threshold
+  - tau window
+  - price band
+  - reserve cash
+  - slippage
+
+Keep these runners paper-only in v1:
+- generic regularized execution runner
+- multi-model regularized execution runner
+
+### 2. Live-order correctness for subaccounts
+Fix the live execution path so a dedicated subaccount actually stays isolated.
+
+Public/interface changes:
+- `build_create_order_payload(...)` must include `subaccount`
+- `KalshiLiveRestClient.create_order(...)` must submit that field
+- `KalshiLiveRestClient.get_orders(...)` and reconcile helpers must support `subaccount`
+- any subaccount-sensitive order recovery path must query only the configured subaccount
+
+Why this is required:
+- the current execution stack already tracks `subaccount` for balances, positions, and private websocket filtering
+- but order submission and some REST reconciliation paths are not fully subaccount-aware yet
+- that is a must-fix before live rollout
+
+Operational behavior:
+- startup preflight should fetch balance and positions for the configured subaccount
+- runner should print resolved subaccount, mode, model, policy, and live profile at startup
+- runner should log subaccount in startup and execution metadata
+
+### 3. Full live archive on the execution path
+Extend the live execution path with the same archival discipline as research.
+
+Archive root:
+- `output/live/<run_name>/archive/`
+
+Live archive layers:
+- `raw_ws/`
+- `market_events/`
+- `feature_rows/`
+- `model_outputs/`
+- `strategy_events/`
+
+For live execution, `strategy_events` should include:
+- signal decisions
+- blocked decisions
+- approved intents
+- execution state transitions
+- fills / cancellations / rejections
+- settlements when known
+
+Requirements:
+- keep existing `signal/.../events.jsonl` and `execution/.../events.jsonl` unchanged for dashboard compatibility
+- archive is additive
+- same hourly rotation / staged compaction model used by research
+- live and shadow modes both write the full archive
+
+### 4. Live preflight and operator workflow
+Add a small but explicit operator-safe preflight layer.
+
+Preflight checks:
+- production credentials present
+- live mode explicitly confirmed
+- nonzero subaccount configured
+- subaccount balance request succeeds
+- model file and policy file exist
+- runner can resolve the bagged-lasso live profile
+- quote subscriptions for `KXBTC15M` start successfully before enabling live submission
+
+Operator workflow:
+1. Start in `shadow` mode on production data with the same runner/profile.
+2. Verify logs, dashboard, archive, and signal behavior.
+3. Switch to `live` with `--confirm-live`.
+4. Continue using the same runner and log structure.
+
+Documentation/runbook updates:
+- exact env vars required for production credentials and execution enablement
+- exact start/resume/stop commands
+- dedicated subaccount requirement
+- what counts as a safe live go/no-go check before flipping from shadow to live
+
+## Public Interfaces and Types
+Important additions or changes:
+- execution order payload adds `subaccount`
+- order query/recovery client methods accept `subaccount`
+- live runner adds explicit `shadow|live` mode plus `--confirm-live`
+- live archive manager subscribes to collector, feature, scorer, signal, and execution events
+- startup/live metadata should include:
+  - model family
+  - policy path
+  - execution mode
+  - subaccount
+  - live profile fields
+
+## Test Plan
+- Subaccount correctness:
+  - create-order payload includes configured subaccount
+  - get-orders/recovery queries include configured subaccount
+  - live reconciliation does not mix orders from other subaccounts
+- Live runner preflight:
+  - rejects missing confirm flag
+  - rejects zero/primary subaccount in live mode
+  - rejects missing credentials or missing policy/model
+  - allows `shadow` mode without live submission
+- Signal profile:
+  - bagged-lasso live runner resolves the expected fixed profile
+  - regime gate and bucket-ban policy are active
+  - fixed 1-contract sizing is enforced
+- Execution flow:
+  - IOC live order submission path still works
+  - filled / canceled / rejected updates reconcile correctly
+  - restart recovery restores subaccount-specific live state
+- Archive:
+  - live and shadow modes both write raw stream, market events, feature rows, model outputs, and strategy events
+  - existing trading dashboard logs remain intact
+- Acceptance scenario:
+  - production shadow run starts cleanly and emits archive + dashboard logs
+  - mocked live run submits a real create-order payload with subaccount and transitions through execution states correctly
+
+## Assumptions and Defaults
+- v1 uses the **current bagged-lasso artifact** without retraining
+- v1 is **single-model only**
+- v1 uses **hold-to-settlement**, not stop loss or custom exits
+- v1 uses **fixed 1-contract sizing**
+- v1 requires a **dedicated nonzero subaccount**
+- v1 includes **full live archive recording**
+- v1 does **not** add automated daily loss caps, max-open-position breakers, order-group throttles, or kill-switch automation
+- generic regularized live trading remains blocked outside this dedicated bagged-lasso live path

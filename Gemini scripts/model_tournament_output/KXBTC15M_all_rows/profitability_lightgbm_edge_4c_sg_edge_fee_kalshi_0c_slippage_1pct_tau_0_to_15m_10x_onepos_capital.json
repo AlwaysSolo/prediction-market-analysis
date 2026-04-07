@@ -1,0 +1,43 @@
+{
+  "series": "KXBTC15M",
+  "config": {
+    "starting_capital": 1000.0,
+    "contracts_per_trade": 10,
+    "edge_threshold_cents": 4.0,
+    "standard_gaussian_entry_mode": "edge",
+    "standard_gaussian_z_threshold": 0.10043372051146988,
+    "fee_mode": "kalshi",
+    "fee_per_contract_cents": 0.0,
+    "slippage_pct": 1.0,
+    "model_scope": "lightgbm",
+    "min_tau_minutes": 0.0,
+    "max_tau_minutes": 15.0,
+    "enforce_capital_constraint": true,
+    "allow_stacking": false
+  },
+  "results": [
+    {
+      "trades": 8183,
+      "yes_trades": 5656,
+      "no_trades": 2527,
+      "wins": 4150,
+      "losses": 4033,
+      "win_rate": 0.5071489673713797,
+      "gross_pnl_dollars": 4562.38112416921,
+      "total_fees_dollars": 1309.9999999999932,
+      "net_pnl_dollars": 3252.3811241689887,
+      "avg_pnl_per_trade_dollars": 0.3974558382217999,
+      "turnover_dollars": 36937.61887583045,
+      "ending_equity_dollars": 4252.381124168975,
+      "return_pct": 325.2381124168974,
+      "peak_equity_dollars": 4252.381124168975,
+      "max_drawdown_dollars": 129.73099719465154,
+      "max_drawdown_pct": 6.57372143986666,
+      "avg_hold_minutes": 13.133200002020402,
+      "skipped_due_capital": 0,
+      "skipped_due_open_ticker": 2280790,
+      "model": "LightGBM",
+      "log_loss": 0.49784010984342275
+    }
+  ]
+}

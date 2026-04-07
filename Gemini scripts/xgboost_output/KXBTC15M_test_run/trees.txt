@@ -1,0 +1,1696 @@
+booster[0]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=16183.0498,cover=17978.5664
+	1:[market_prob<0.230000004] yes=3,no=4,missing=4,gain=2045.82227,cover=7695.4209
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=186.774414,cover=3655.9624
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=10.8852539,cover=1762.98193
+				15:leaf=-0.0963022038,cover=1292.98669
+				16:leaf=-0.0860951543,cover=469.995178
+			8:[market_prob<0.189999998] yes=17,no=18,missing=18,gain=27.9489746,cover=1892.98059
+				17:leaf=-0.0750292167,cover=1307.73657
+				18:leaf=-0.0614288338,cover=585.244019
+		4:[market_prob<0.360000014] yes=9,no=10,missing=10,gain=154.527344,cover=4039.4585
+			9:[market_prob<0.280000001] yes=19,no=20,missing=20,gain=38.8898926,cover=2147.97803
+				19:leaf=-0.0487485938,cover=738.742432
+				20:leaf=-0.0344807431,cover=1409.2356
+			10:[market_prob<0.409999996] yes=21,no=22,missing=22,gain=23.6143188,cover=1891.48059
+				21:leaf=-0.0249188803,cover=1027.4895
+				22:leaf=-0.013672377,cover=863.99115
+	2:[market_prob<0.779999971] yes=5,no=6,missing=6,gain=3144.99365,cover=10283.1445
+		5:[market_prob<0.569999993] yes=11,no=12,missing=12,gain=570.584595,cover=6647.18164
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=44.2095184,cover=2853.7207
+				23:leaf=-0.00134352315,cover=1708.48254
+				24:leaf=0.0113488743,cover=1145.23828
+			12:[market_prob<0.689999998] yes=25,no=26,missing=26,gain=91.475708,cover=3793.46118
+				25:leaf=0.0273498036,cover=2382.47559
+				26:leaf=0.04344837,cover=1410.98547
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=251.136719,cover=3635.96265
+			13:[market_prob<0.829999983] yes=27,no=28,missing=28,gain=25.5581055,cover=1547.23413
+				27:leaf=0.055900272,cover=710.492737
+				28:leaf=0.0691827238,cover=836.741394
+			14:[market_prob<0.939999998] yes=29,no=30,missing=30,gain=28.1845703,cover=2088.72852
+				29:leaf=0.0816435963,cover=755.742249
+				30:leaf=0.0943963453,cover=1332.98633
+
+
+booster[1]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=14508.1934,cover=17978.0566
+	1:[market_prob<0.230000004] yes=3,no=4,missing=4,gain=1874.05664,cover=7697.43115
+		3:[market_prob<0.109999999] yes=7,no=8,missing=8,gain=170.15918,cover=3663.64111
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=17.2670898,cover=1938.42773
+				15:leaf=-0.0917439461,cover=1299.37268
+				16:leaf=-0.0808459595,cover=639.055115
+			8:[market_prob<0.200000003] yes=17,no=18,missing=18,gain=20.026123,cover=1725.21326
+				17:leaf=-0.0697151348,cover=1284.04736
+				18:leaf=-0.0568464175,cover=441.165924
+		4:[market_prob<0.379999995] yes=9,no=10,missing=10,gain=148.863403,cover=4033.78979
+			9:[market_prob<0.289999992] yes=19,no=20,missing=20,gain=45.2947998,cover=2531.35669
+				19:leaf=-0.0449693762,cover=905.134766
+				20:leaf=-0.0309416056,cover=1626.22192
+			10:[market_prob<0.430000007] yes=21,no=22,missing=22,gain=13.4558563,cover=1502.43323
+				21:leaf=-0.0191183966,cover=1065.93896
+				22:leaf=-0.0086659072,cover=436.494263
+	2:[market_prob<0.779999971] yes=5,no=6,missing=6,gain=2894.44434,cover=10280.627
+		5:[market_prob<0.610000014] yes=11,no=12,missing=12,gain=507.476685,cover=6669.83838
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=76.371727,cover=3725.15405
+				23:leaf=-0.000864220958,cover=1715.98901
+				24:leaf=0.0134965992,cover=2009.16504
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=42.5489502,cover=2944.68457
+				25:leaf=0.0301385168,cover=1892.33838
+				26:leaf=0.0427457057,cover=1052.34607
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=230.144531,cover=3610.78784
+			13:[market_prob<0.829999983] yes=27,no=28,missing=28,gain=24.715332,cover=1513.90796
+				27:leaf=0.0526709631,cover=700.819763
+				28:leaf=0.0658396706,cover=813.088196
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=27.6064453,cover=2096.87988
+				29:leaf=0.0805756077,cover=1270.48083
+				30:leaf=0.0929152891,cover=826.39917
+
+
+booster[2]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=13142.4092,cover=17935.7461
+	1:[market_prob<0.219999999] yes=3,no=4,missing=4,gain=1714.16553,cover=7662.51904
+		3:[market_prob<0.109999999] yes=7,no=8,missing=8,gain=140.785156,cover=3494.24854
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=13.6782227,cover=1915.19824
+				15:leaf=-0.0877320394,cover=1283.88037
+				16:leaf=-0.0778556988,cover=631.317932
+			8:[market_prob<0.180000007] yes=17,no=18,missing=18,gain=11.986084,cover=1579.05042
+				17:leaf=-0.0676954389,cover=998.962524
+				18:leaf=-0.0580653325,cover=580.08783
+		4:[market_prob<0.349999994] yes=9,no=10,missing=10,gain=162.714966,cover=4168.27002
+			9:[market_prob<0.280000001] yes=19,no=20,missing=20,gain=40.6220703,cover=2094.25098
+				19:leaf=-0.0458570234,cover=886.877075
+				20:leaf=-0.0316726081,cover=1207.3739
+			10:[market_prob<0.409999996] yes=21,no=22,missing=22,gain=19.9894409,cover=2074.01904
+				21:leaf=-0.0220556613,cover=1215.37036
+				22:leaf=-0.0120629342,cover=858.648743
+	2:[market_prob<0.779999971] yes=5,no=6,missing=6,gain=2682.01318,cover=10273.2275
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=457.148315,cover=6646.85645
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=42.2808838,cover=3070.09546
+				23:leaf=-0.0012759727,cover=1710.24243
+				24:leaf=0.0105334911,cover=1359.85315
+			12:[market_prob<0.689999998] yes=25,no=26,missing=26,gain=63.2020264,cover=3576.76074
+				25:leaf=0.0248776171,cover=2168.08789
+				26:leaf=0.0385158621,cover=1408.67285
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=213.42334,cover=3626.37134
+			13:[market_prob<0.819999993] yes=27,no=28,missing=28,gain=20.9349365,cover=1529.03955
+				27:leaf=0.0493908934,cover=566.625488
+				28:leaf=0.0618692227,cover=962.414062
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=24.0234375,cover=2097.33179
+				29:leaf=0.0773389563,cover=1264.91516
+				30:leaf=0.0888655707,cover=832.416626
+
+
+booster[3]
+0:[market_prob<0.460000008] yes=1,no=2,missing=2,gain=11900.0625,cover=17866.9746
+	1:[market_prob<0.219999999] yes=3,no=4,missing=4,gain=1656.55859,cover=7883.18457
+		3:[market_prob<0.109999999] yes=7,no=8,missing=8,gain=133.92627,cover=3464.09375
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=12.8422852,cover=1900.03467
+				15:leaf=-0.0840002522,cover=1272.27942
+				16:leaf=-0.0744184777,cover=627.75531
+			8:[market_prob<0.189999998] yes=17,no=18,missing=18,gain=14.7714844,cover=1564.05896
+				17:leaf=-0.0641012862,cover=1128.61707
+				18:leaf=-0.0527388752,cover=435.441895
+		4:[market_prob<0.379999995] yes=9,no=10,missing=10,gain=157.14563,cover=4419.09131
+			9:[market_prob<0.289999992] yes=19,no=20,missing=20,gain=47.2138672,cover=2667.65625
+				19:leaf=-0.0416562818,cover=1047.61438
+				20:leaf=-0.0279769599,cover=1620.04187
+			10:[market_prob<0.430000007] yes=21,no=22,missing=22,gain=16.0577393,cover=1751.43481
+				21:leaf=-0.0179207679,cover=1064.52161
+				22:leaf=-0.00809701253,cover=686.913208
+	2:[market_prob<0.790000021] yes=5,no=6,missing=6,gain=2340.95215,cover=9983.78906
+		5:[market_prob<0.610000014] yes=11,no=12,missing=12,gain=408.570435,cover=6540.51367
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=64.5199509,cover=3475.47266
+				23:leaf=-0.00113380677,cover=1466.49683
+				24:leaf=0.0126582114,cover=2008.97571
+			12:[market_prob<0.689999998] yes=25,no=26,missing=26,gain=36.161377,cover=3065.04126
+				25:leaf=0.0263747275,cover=1521.75049
+				26:leaf=0.0372941755,cover=1543.29077
+		6:[market_prob<0.879999995] yes=13,no=14,missing=14,gain=167.541504,cover=3443.27539
+			13:[tau_minutes<9.14999962] yes=27,no=28,missing=28,gain=15.8349609,cover=1250.67419
+				27:leaf=0.0586080141,cover=872.94281
+				28:leaf=0.0459120981,cover=377.731384
+			14:[market_prob<0.939999998] yes=29,no=30,missing=30,gain=30.4667969,cover=2192.60107
+				29:leaf=0.0703838691,cover=883.25824
+				30:leaf=0.0828635469,cover=1309.3429
+
+
+booster[4]
+0:[market_prob<0.5] yes=1,no=2,missing=2,gain=10893.8613,cover=17797.1309
+	1:[market_prob<0.230000004] yes=3,no=4,missing=4,gain=2002.45166,cover=8791.34766
+		3:[market_prob<0.109999999] yes=7,no=8,missing=8,gain=133.813965,cover=3586.45605
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=12.4287109,cover=1880.51843
+				15:leaf=-0.0807896182,cover=1255.39819
+				16:leaf=-0.0713665113,cover=625.120239
+			8:[market_prob<0.189999998] yes=17,no=18,missing=18,gain=17.59375,cover=1705.93774
+				17:leaf=-0.0619717725,cover=1126.745
+				18:leaf=-0.0508516505,cover=579.192749
+		4:[market_prob<0.389999986] yes=9,no=10,missing=10,gain=241.342285,cover=5204.89111
+			9:[market_prob<0.289999992] yes=19,no=20,missing=20,gain=44.038208,cover=2710.53271
+				19:leaf=-0.0393138379,cover=896.013977
+				20:leaf=-0.025716126,cover=1814.5188
+			10:[market_prob<0.430000007] yes=21,no=22,missing=22,gain=27.5347061,cover=2494.3584
+				21:leaf=-0.0159001928,cover=861.00415
+				22:leaf=-0.00484992517,cover=1633.35425
+	2:[market_prob<0.800000012] yes=5,no=6,missing=6,gain=1743.02051,cover=9005.7832
+		5:[market_prob<0.620000005] yes=11,no=12,missing=12,gain=278.361816,cover=5720.82373
+			11:[market_prob<0.560000002] yes=23,no=24,missing=24,gain=28.8753052,cover=2731.05347
+				23:leaf=0.00546823163,cover=1450.05725
+				24:leaf=0.0157742482,cover=1280.99609
+			12:[market_prob<0.720000029] yes=25,no=26,missing=26,gain=40.2816162,cover=2989.77026
+				25:leaf=0.0277159996,cover=1823.6521
+				26:leaf=0.0396721214,cover=1166.11804
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=130.424805,cover=3284.95972
+			13:[price_momentum<0.170000002] yes=27,no=28,missing=28,gain=11.6759033,cover=1247.59155
+				27:leaf=0.0550219789,cover=1242.66821
+				28:leaf=-0.0188619681,cover=4.92332697
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=22.1694336,cover=2037.36816
+				29:leaf=0.0709150359,cover=1231.81372
+				30:leaf=0.0821098387,cover=805.554504
+
+
+booster[5]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=9747.00586,cover=17704.2188
+	1:[market_prob<0.230000004] yes=3,no=4,missing=4,gain=1341.43262,cover=7537.15381
+		3:[market_prob<0.109999999] yes=7,no=8,missing=8,gain=126.972656,cover=3528.30713
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=13.8193359,cover=1838.77942
+				15:leaf=-0.0779612884,cover=1225.58105
+				16:leaf=-0.0680596828,cover=613.198425
+			8:[market_prob<0.180000007] yes=17,no=18,missing=18,gain=19.1799316,cover=1689.52783
+				17:leaf=-0.060215082,cover=982.653687
+				18:leaf=-0.0490802415,cover=706.874084
+		4:[market_prob<0.379999995] yes=9,no=10,missing=10,gain=95.288208,cover=4008.84668
+			9:[market_prob<0.289999992] yes=19,no=20,missing=20,gain=30.2419434,cover=2511.83374
+				19:leaf=-0.0366247185,cover=896.895813
+				20:leaf=-0.0251151714,cover=1614.93787
+			10:[market_prob<0.430000007] yes=21,no=22,missing=22,gain=8.81834412,cover=1497.01306
+				21:leaf=-0.0157420356,cover=1062.69519
+				22:leaf=-0.00726028252,cover=434.317902
+	2:[market_prob<0.75999999] yes=5,no=6,missing=6,gain=2071.75977,cover=10167.0654
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=296.742859,cover=6374.07178
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=35.1572914,cover=3071.74463
+				23:leaf=-0.00140587729,cover=1718.98474
+				24:leaf=0.00936636236,cover=1352.75977
+			12:[market_prob<0.620000005] yes=25,no=26,missing=26,gain=33.7056274,cover=3302.32715
+				25:leaf=0.0163790062,cover=859.22113
+				26:leaf=0.0279292949,cover=2443.10596
+		6:[market_prob<0.870000005] yes=13,no=14,missing=14,gain=229.76709,cover=3792.99365
+			13:[market_prob<0.810000002] yes=27,no=28,missing=28,gain=18.8634033,cover=1511.99023
+				27:leaf=0.0399209,cover=709.005737
+				28:leaf=0.0513528697,cover=802.984497
+			14:[market_prob<0.939999998] yes=29,no=30,missing=30,gain=35.7539062,cover=2281.00342
+				29:leaf=0.0639675781,cover=1007.29871
+				30:leaf=0.0769205391,cover=1273.70483
+
+
+booster[6]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=9001.30859,cover=17582.6016
+	1:[market_prob<0.230000004] yes=3,no=4,missing=4,gain=1245.46338,cover=7492.89941
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=131.249512,cover=3483.62573
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=8.6105957,cover=1656.71912
+				15:leaf=-0.0759223551,cover=1207.34033
+				16:leaf=-0.0668630376,cover=449.378723
+			8:[market_prob<0.150000006] yes=17,no=18,missing=18,gain=15.3757324,cover=1826.90662
+				17:leaf=-0.0599140823,cover=707.006287
+				18:leaf=-0.050152339,cover=1119.90027
+		4:[market_prob<0.379999995] yes=9,no=10,missing=10,gain=86.484375,cover=4009.27393
+			9:[market_prob<0.270000011] yes=19,no=20,missing=20,gain=27.2412109,cover=2503.1438
+				19:leaf=-0.0376845263,cover=574.667969
+				20:leaf=-0.0252194442,cover=1928.47583
+			10:[abs_price_momentum<0.0399999991] yes=21,no=22,missing=22,gain=8.1530304,cover=1506.13013
+				21:leaf=-0.0120662544,cover=1432.28503
+				22:leaf=-0.0290631801,cover=73.8451233
+	2:[market_prob<0.800000012] yes=5,no=6,missing=6,gain=1878.76245,cover=10089.7021
+		5:[market_prob<0.610000014] yes=11,no=12,missing=12,gain=381.348999,cover=6891.76123
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=59.0097351,cover=3718.5752
+				23:leaf=-0.00143996475,cover=1716.73267
+				24:leaf=0.0111922063,cover=2001.84253
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=40.4898682,cover=3173.18604
+				25:leaf=0.0242001042,cover=1864.86304
+				26:leaf=0.0357175134,cover=1308.32288
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=123.959473,cover=3197.94141
+			13:[tau_minutes<9.10000038] yes=27,no=28,missing=28,gain=10.2728271,cover=1226.12915
+				27:leaf=0.0530635603,cover=867.632202
+				28:leaf=0.0425356291,cover=358.496887
+			14:[market_prob<0.949999988] yes=29,no=30,missing=30,gain=21.8857422,cover=1971.81226
+				29:leaf=0.0641477928,cover=866.985291
+				30:leaf=0.075224705,cover=1104.82703
+
+
+booster[7]
+0:[market_prob<0.430000007] yes=1,no=2,missing=2,gain=8187.75537,cover=17510.5234
+	1:[market_prob<0.209999993] yes=3,no=4,missing=4,gain=997.690918,cover=7004.96045
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=90.5292969,cover=3159.18994
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=8.08007812,cover=1625.26917
+				15:leaf=-0.073277168,cover=1195.85327
+				16:leaf=-0.0643495247,cover=429.415894
+			8:[market_prob<0.140000001] yes=17,no=18,missing=18,gain=7.53356934,cover=1533.9209
+				17:leaf=-0.0587517992,cover=568.048279
+				18:leaf=-0.0509622991,cover=965.87262
+		4:[market_prob<0.300000012] yes=9,no=10,missing=10,gain=83.65448,cover=3845.77026
+			9:[market_prob<0.270000011] yes=19,no=20,missing=20,gain=7.26568604,cover=1324.13147
+				19:leaf=-0.0377582759,cover=852.287903
+				20:leaf=-0.0297763627,cover=471.843506
+			10:[market_prob<0.379999995] yes=21,no=22,missing=22,gain=25.3582764,cover=2521.63867
+				21:leaf=-0.0236904416,cover=1457.00256
+				22:leaf=-0.0135128545,cover=1064.63611
+	2:[market_prob<0.75999999] yes=5,no=6,missing=6,gain=1923.24121,cover=10505.5645
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=316.091156,cover=6798.82324
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=35.186615,cover=3519.74927
+				23:leaf=-0.00227252068,cover=2154.31689
+				24:leaf=0.00798389316,cover=1365.4325
+			12:[market_prob<0.639999986] yes=25,no=26,missing=26,gain=33.2843018,cover=3279.07422
+				25:leaf=0.0168430898,cover=1251.06519
+				26:leaf=0.0272435285,cover=2028.00891
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=202.355957,cover=3706.74048
+			13:[market_prob<0.829999983] yes=27,no=28,missing=28,gain=23.8435059,cover=1766.34216
+				27:leaf=0.0391676836,cover=962.411926
+				28:leaf=0.0510191694,cover=803.930237
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=22.2658691,cover=1940.39844
+				29:leaf=0.0635527074,cover=1183.05554
+				30:leaf=0.0749732032,cover=757.342896
+
+
+booster[8]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=7400.54395,cover=17365.1055
+	1:[market_prob<0.219999999] yes=3,no=4,missing=4,gain=1120.72852,cover=7370.40381
+		3:[market_prob<0.109999999] yes=7,no=8,missing=8,gain=105.864746,cover=3240.40942
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=13.9111328,cover=1743.8053
+				15:leaf=-0.0715588778,cover=1158.18237
+				16:leaf=-0.0614977293,cover=585.622986
+			8:[market_prob<0.189999998] yes=17,no=18,missing=18,gain=7.61962891,cover=1496.604
+				17:leaf=-0.0523233414,cover=1073.13806
+				18:leaf=-0.0439081527,cover=423.465881
+		4:[market_prob<0.360000014] yes=9,no=10,missing=10,gain=87.4786987,cover=4129.99414
+			9:[market_prob<0.280000001] yes=19,no=20,missing=20,gain=22.9366455,cover=2256.88086
+				19:leaf=-0.0335700288,cover=865.159119
+				20:leaf=-0.023141481,cover=1391.7218
+			10:[market_prob<0.409999996] yes=21,no=22,missing=22,gain=15.2971344,cover=1873.11328
+				21:leaf=-0.0166886579,cover=1012.93024
+				22:leaf=-0.00760782883,cover=860.183105
+	2:[market_prob<0.790000021] yes=5,no=6,missing=6,gain=1654.50854,cover=9994.70117
+		5:[market_prob<0.610000014] yes=11,no=12,missing=12,gain=286.98877,cover=6746.89111
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=44.598423,cover=3719.00659
+				23:leaf=-0.00111274875,cover=1713.7196
+				24:leaf=0.00987002254,cover=2005.28687
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=29.4966431,cover=3027.88477
+				25:leaf=0.0216067154,cover=1859.56921
+				26:leaf=0.0317854322,cover=1168.31555
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=134.726074,cover=3247.80981
+			13:[market_prob<0.839999974] yes=27,no=28,missing=28,gain=15.0551758,cover=1334.19812
+				27:leaf=0.0397181772,cover=657.256409
+				28:leaf=0.0506191663,cover=676.941711
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=21.2844238,cover=1913.61169
+				29:leaf=0.0616543181,cover=1166.63708
+				30:leaf=0.0728919953,cover=746.97467
+
+
+booster[9]
+0:[z_implied<0.0501535833] yes=1,no=2,missing=2,gain=6775.51221,cover=17256.2207
+	1:[distance_from_mid<0.270000011] yes=3,no=4,missing=4,gain=1557.49634,cover=9051.5
+		3:[distance_from_mid<0.100000001] yes=7,no=8,missing=8,gain=170.062134,cover=5558.77734
+			7:[distance_from_mid<0.0599999987] yes=15,no=16,missing=16,gain=11.0795708,cover=2570.36279
+				15:leaf=-0.00169882423,cover=1714.21338
+				16:leaf=-0.00866247341,cover=856.149353
+			8:[distance_from_mid<0.219999999] yes=17,no=18,missing=18,gain=29.1235962,cover=2988.41479
+				17:leaf=-0.0187076703,cover=2246.05176
+				18:leaf=-0.0301610231,cover=742.362976
+		4:[distance_from_mid<0.400000006] yes=9,no=10,missing=10,gain=136.519531,cover=3492.72266
+			9:[distance_from_mid<0.319999993] yes=19,no=20,missing=20,gain=19.869751,cover=1770.3186
+				19:leaf=-0.0395775847,cover=704.769836
+				20:leaf=-0.0506225936,cover=1065.54883
+			10:[distance_from_mid<0.439999998] yes=21,no=22,missing=22,gain=12.277832,cover=1722.40393
+				21:leaf=-0.0597421937,cover=579.822632
+				22:leaf=-0.0692829564,cover=1142.5813
+	2:[distance_from_mid<0.310000002] yes=5,no=6,missing=6,gain=1108.56421,cover=8204.7207
+		5:[distance_from_mid<0.150000006] yes=11,no=12,missing=12,gain=135.672546,cover=5294.3457
+			11:[distance_from_mid<0.0799999982] yes=23,no=24,missing=24,gain=21.6487579,cover=2788.7312
+				23:leaf=0.00708423927,cover=1359.53491
+				24:leaf=0.0159055423,cover=1429.19617
+			12:[distance_from_mid<0.219999999] yes=25,no=26,missing=26,gain=22.3986206,cover=2505.61475
+				25:leaf=0.0227444209,cover=1218.31091
+				26:leaf=0.0322633348,cover=1287.30383
+		6:[distance_from_mid<0.430000007] yes=13,no=14,missing=14,gain=92.5,cover=2910.37451
+			13:[distance_from_mid<0.370000005] yes=27,no=28,missing=28,gain=23.0664062,cover=1584.1936
+				27:leaf=0.0430688038,cover=775.216125
+				28:leaf=0.0553828068,cover=808.977478
+			14:[price_momentum<0.25] yes=29,no=30,missing=30,gain=10.572998,cover=1326.18079
+				29:leaf=0.0675861761,cover=1324.19971
+				30:leaf=-0.0344585851,cover=1.9811058
+
+
+booster[10]
+0:[market_prob<0.430000007] yes=1,no=2,missing=2,gain=6127.89551,cover=17072.4141
+	1:[market_prob<0.219999999] yes=3,no=4,missing=4,gain=834.536621,cover=6805.43164
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=105.719482,cover=3130.36426
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=9.33398438,cover=1517.58862
+				15:leaf=-0.067880176,cover=1105.85535
+				16:leaf=-0.0582987368,cover=411.733307
+			8:[market_prob<0.150000006] yes=17,no=18,missing=18,gain=10.6420898,cover=1612.77563
+				17:leaf=-0.0517956093,cover=672.612549
+				18:leaf=-0.0432312898,cover=940.163025
+		4:[market_prob<0.280000001] yes=9,no=10,missing=10,gain=49.9989624,cover=3675.06763
+			9:[price_momentum<-0.239999995] yes=19,no=20,missing=20,gain=2.28192139,cover=857.201782
+				19:leaf=0.0239473674,cover=1.1895622
+				20:leaf=-0.0313603319,cover=856.012268
+			10:[market_prob<0.379999995] yes=21,no=22,missing=22,gain=16.8068237,cover=2817.86572
+				21:leaf=-0.0204660092,cover=1751.32251
+				22:leaf=-0.0124788079,cover=1066.54321
+	2:[market_prob<0.779999971] yes=5,no=6,missing=6,gain=1516.7644,cover=10266.9824
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=251.509003,cover=7009.03711
+			11:[market_prob<0.5] yes=23,no=24,missing=24,gain=14.0803919,cover=3071.41602
+				23:leaf=-0.00267482898,cover=1632.4978
+				24:leaf=0.00410722801,cover=1438.91821
+			12:[market_prob<0.639999986] yes=25,no=26,missing=26,gain=42.9845581,cover=3937.62109
+				25:leaf=0.0134598538,cover=1660.5448
+				26:leaf=0.0240545236,cover=2277.07642
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=151.913818,cover=3257.94556
+			13:[market_prob<0.839999974] yes=27,no=28,missing=28,gain=11.8863525,cover=1433.58105
+				27:leaf=0.0360111073,cover=785.978821
+				28:leaf=0.0453991629,cover=647.602295
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=23.3029785,cover=1824.3645
+				29:leaf=0.0574375391,cover=1118.89209
+				30:leaf=0.0694116652,cover=705.47229
+
+
+booster[11]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=5589.43555,cover=16922.543
+	1:[market_prob<0.200000003] yes=3,no=4,missing=4,gain=908.212402,cover=7158.47461
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=80.1303711,cover=2785.47314
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=8.09765625,cover=1472.46399
+				15:leaf=-0.0683716536,cover=647.945129
+				16:leaf=-0.0601908676,cover=824.51886
+			8:[tau_minutes<1.66666663] yes=17,no=18,missing=18,gain=6.64038086,cover=1313.00916
+				17:leaf=-0.0618712194,cover=75.6939163
+				18:leaf=-0.0457446687,cover=1237.31531
+		4:[market_prob<0.300000012] yes=9,no=10,missing=10,gain=94.6254272,cover=4373.00146
+			9:[tau_minutes<5.80000019] yes=19,no=20,missing=20,gain=23.7716064,cover=1434.44141
+				19:leaf=-0.0400130153,cover=409.052521
+				20:leaf=-0.0256653037,cover=1025.38892
+			10:[market_prob<0.379999995] yes=21,no=22,missing=22,gain=19.4863434,cover=2938.55981
+				21:leaf=-0.0182695482,cover=1438.0365
+				22:leaf=-0.0101106083,cover=1500.52344
+	2:[market_prob<0.810000002] yes=5,no=6,missing=6,gain=1354.84619,cover=9764.06836
+		5:[market_prob<0.620000005] yes=11,no=12,missing=12,gain=243.728668,cover=6974.13232
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=35.3081512,cover=3904.8606
+				23:leaf=-0.000745182333,cover=1720.42761
+				24:leaf=0.0088302996,cover=2184.43311
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=30.6015625,cover=3069.27197
+				25:leaf=0.018761564,cover=1641.08411
+				26:leaf=0.0288033672,cover=1428.18774
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=91.4121094,cover=2789.93604
+			13:[market_prob<0.870000005] yes=27,no=28,missing=28,gain=18.1561279,cover=1669.17505
+				27:leaf=0.0406907909,cover=747.047424
+				28:leaf=0.0514197834,cover=922.127686
+			14:[abs_price_momentum<0.25] yes=29,no=30,missing=30,gain=11.473999,cover=1120.76111
+				29:leaf=0.0654272139,cover=1119.01672
+				30:leaf=-0.0442552492,cover=1.7442888
+
+
+booster[12]
+0:[z_implied<-0.176374167] yes=1,no=2,missing=2,gain=5141.63916,cover=16796.9043
+	1:[distance_from_mid<0.300000012] yes=3,no=4,missing=4,gain=752.733643,cover=6646.94971
+		3:[distance_from_mid<0.189999998] yes=7,no=8,missing=8,gain=56.0272827,cover=3760.03906
+			7:[tau_minutes<2.01666665] yes=15,no=16,missing=16,gain=10.190918,cover=2130.66895
+				15:leaf=-0.032388784,cover=73.3764572
+				16:leaf=-0.0134756211,cover=2057.29248
+			8:[tau_minutes<5.80000019] yes=17,no=18,missing=18,gain=16.9616089,cover=1629.37012
+				17:leaf=-0.0350127593,cover=431.57843
+				18:leaf=-0.023367947,cover=1197.79163
+		4:[distance_from_mid<0.409999996] yes=9,no=10,missing=10,gain=85.208252,cover=2886.91089
+			9:[distance_from_mid<0.360000014] yes=19,no=20,missing=20,gain=7.49438477,cover=1444.5769
+				19:leaf=-0.0413241535,cover=793.453247
+				20:leaf=-0.0489340723,cover=651.123718
+			10:[distance_from_mid<0.439999998] yes=21,no=22,missing=22,gain=8.87939453,cover=1442.33398
+				21:leaf=-0.0551291183,cover=395.609619
+				22:leaf=-0.0646443889,cover=1046.72437
+	2:[distance_from_mid<0.310000002] yes=5,no=6,missing=6,gain=1363.30713,cover=10149.9551
+		5:[distance_from_mid<0.0799999982] yes=11,no=12,missing=12,gain=248.295563,cover=7406.84521
+			11:[z_implied<0.0250689089] yes=23,no=24,missing=24,gain=18.1965141,cover=3514.44019
+				23:leaf=-0.00173519633,cover=1924.47522
+				24:leaf=0.00549129909,cover=1589.96484
+			12:[distance_from_mid<0.209999993] yes=25,no=26,missing=26,gain=47.3117065,cover=3892.40503
+				25:leaf=0.0156997144,cover=2481.82617
+				26:leaf=0.0271831639,cover=1410.57861
+		6:[distance_from_mid<0.439999998] yes=13,no=14,missing=14,gain=88.1113281,cover=2743.10962
+			13:[distance_from_mid<0.370000005] yes=27,no=28,missing=28,gain=17.4729004,cover=1651.47058
+				27:leaf=0.039264489,cover=746.363586
+				28:leaf=0.0498293228,cover=905.106934
+			14:[price_momentum<0.25] yes=29,no=30,missing=30,gain=12.6678467,cover=1091.63916
+				29:leaf=0.0637476891,cover=1089.42419
+				30:leaf=-0.0417815708,cover=2.21493292
+
+
+booster[13]
+0:[market_prob<0.409999996] yes=1,no=2,missing=2,gain=4598.70654,cover=16605.0801
+	1:[market_prob<0.209999993] yes=3,no=4,missing=4,gain=648.077393,cover=6155.43408
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=81.3320312,cover=2810.37866
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=9.02075195,cover=1400.82031
+				15:leaf=-0.0653872788,cover=615.308044
+				16:leaf=-0.0566770919,cover=785.512268
+			8:[market_prob<0.159999996] yes=17,no=18,missing=18,gain=7.63146973,cover=1409.55835
+				17:leaf=-0.0469307788,cover=765.966797
+				18:leaf=-0.0391941965,cover=643.591492
+		4:[market_prob<0.280000001] yes=9,no=10,missing=10,gain=40.8608093,cover=3345.05566
+			9:[tau_minutes<5.5666666] yes=19,no=20,missing=20,gain=11.4511719,cover=973.161926
+				19:leaf=-0.0369579308,cover=265.660858
+				20:leaf=-0.0246365555,cover=707.501099
+			10:[tau_minutes<2.01666665] yes=21,no=22,missing=22,gain=11.8366547,cover=2371.89355
+				21:leaf=-0.0342603847,cover=83.8418274
+				22:leaf=-0.0151610924,cover=2288.05176
+	2:[market_prob<0.790000021] yes=5,no=6,missing=6,gain=1373.28125,cover=10449.6455
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=232.358398,cover=7496.55469
+			11:[market_prob<0.5] yes=23,no=24,missing=24,gain=22.8421192,cover=3889.31079
+				23:leaf=-0.0033119265,cover=2040.02344
+				24:leaf=0.00435891468,cover=1849.28735
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=29.8364868,cover=3607.24365
+				25:leaf=0.0148795499,cover=2482.2312
+				26:leaf=0.0247130431,cover=1125.01245
+		6:[market_prob<0.910000026] yes=13,no=14,missing=14,gain=109.817383,cover=2953.09058
+			13:[market_prob<0.870000005] yes=27,no=28,missing=28,gain=17.6659546,cover=1521.42468
+				27:leaf=0.0357499123,cover=1013.13507
+				28:leaf=0.0473647378,cover=508.289612
+			14:[price_momentum<0.289999992] yes=29,no=30,missing=30,gain=17.6240234,cover=1431.66589
+				29:leaf=0.0592518859,cover=1429.67053
+				30:leaf=-0.0668630525,cover=1.99542785
+
+
+booster[14]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=4281.89111,cover=16519.1621
+	1:[market_prob<0.200000003] yes=3,no=4,missing=4,gain=766.569092,cover=6944.57568
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=69.1120605,cover=2601.4856
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=9.09350586,cover=1354.69299
+				15:leaf=-0.0641040877,cover=590.360657
+				16:leaf=-0.0552369058,cover=764.332397
+			8:[market_prob<0.140000001] yes=17,no=18,missing=18,gain=5.91485596,cover=1246.7926
+				17:leaf=-0.0471157916,cover=502.791321
+				18:leaf=-0.0396816842,cover=744.001343
+		4:[market_prob<0.300000012] yes=9,no=10,missing=10,gain=76.3641663,cover=4343.08984
+			9:[tau_minutes<5.80000019] yes=19,no=20,missing=20,gain=17.1169739,cover=1419.52869
+				19:leaf=-0.0352953523,cover=399.448029
+				20:leaf=-0.0229987372,cover=1020.08069
+			10:[market_prob<0.379999995] yes=21,no=22,missing=22,gain=17.6328888,cover=2923.56128
+				21:leaf=-0.0163163245,cover=1427.60547
+				22:leaf=-0.0085373139,cover=1495.95593
+	2:[market_prob<0.810000002] yes=5,no=6,missing=6,gain=1110.30139,cover=9574.58594
+		5:[market_prob<0.620000005] yes=11,no=12,missing=12,gain=176.407959,cover=6948.67383
+			11:[market_prob<0.560000002] yes=23,no=24,missing=24,gain=24.1371078,cover=3927.17358
+				23:leaf=0.00155970722,cover=2653.77783
+				24:leaf=0.00993235316,cover=1273.39563
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=22.9866333,cover=3021.5
+				25:leaf=0.0162937716,cover=1628.70117
+				26:leaf=0.0250711888,cover=1392.79883
+		6:[market_prob<0.920000017] yes=13,no=14,missing=14,gain=87.7106934,cover=2625.91211
+			13:[market_prob<0.870000005] yes=27,no=28,missing=28,gain=15.0206299,cover=1359.56445
+				27:leaf=0.0355635397,cover=734.414734
+				28:leaf=0.0463288277,cover=625.149719
+			14:[price_momentum<0.289999992] yes=29,no=30,missing=30,gain=16.8408203,cover=1266.34766
+				29:leaf=0.0591738038,cover=1264.30432
+				30:leaf=-0.0633430332,cover=2.04332137
+
+
+booster[15]
+0:[market_prob<0.449999988] yes=1,no=2,missing=2,gain=3860.3877,cover=16393.791
+	1:[market_prob<0.219999999] yes=3,no=4,missing=4,gain=749.390137,cover=6887.13623
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=95.137207,cover=2832.16602
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=11.050415,cover=1319.88721
+				15:leaf=-0.0609395579,cover=957.280457
+				16:leaf=-0.0500970446,cover=362.606689
+			8:[market_prob<0.150000006] yes=17,no=18,missing=18,gain=9.37176514,cover=1512.27893
+				17:leaf=-0.0444051959,cover=618.337524
+				18:leaf=-0.0361420475,cover=893.941345
+		4:[market_prob<0.360000014] yes=9,no=10,missing=10,gain=46.2815857,cover=4054.96997
+			9:[market_prob<0.270000011] yes=19,no=20,missing=20,gain=12.0250549,cover=2185.75806
+				19:leaf=-0.0251343939,cover=678.218506
+				20:leaf=-0.0170716923,cover=1507.53955
+			10:[tau_minutes<7.25] yes=21,no=22,missing=22,gain=5.03845596,cover=1869.21191
+				21:leaf=-0.0135509567,cover=438.803223
+				22:leaf=-0.00741308555,cover=1430.40869
+	2:[market_prob<0.779999971] yes=5,no=6,missing=6,gain=1045.57397,cover=9506.65527
+		5:[market_prob<0.620000005] yes=11,no=12,missing=12,gain=138.175339,cover=6529.56738
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=25.0861397,cover=3924.49219
+				23:leaf=-0.000932380848,cover=1719.87061
+				24:leaf=0.00712315459,cover=2204.62158
+			12:[market_prob<0.689999998] yes=25,no=26,missing=26,gain=9.76797485,cover=2605.07495
+				25:leaf=0.015298727,cover=1277.87988
+				26:leaf=0.0214633644,cover=1327.19519
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=128.717773,cover=2977.08813
+			13:[tau_minutes<9.10000038] yes=27,no=28,missing=28,gain=14.8205566,cover=1361.29041
+				27:leaf=0.0374025293,cover=942.982056
+				28:leaf=0.0259322356,cover=418.308411
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=25.5808105,cover=1615.79773
+				29:leaf=0.0497566313,cover=1001.83392
+				30:leaf=0.0630097687,cover=613.963806
+
+
+booster[16]
+0:[market_prob<0.430000007] yes=1,no=2,missing=2,gain=3586.72949,cover=16232.167
+	1:[market_prob<0.200000003] yes=3,no=4,missing=4,gain=616.571045,cover=6372.16455
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=71.9714355,cover=2504.89478
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=1.34240723,cover=929.235046
+				15:leaf=-0.0619893372,cover=556.075562
+				16:leaf=-0.0564248636,cover=373.159485
+			8:[market_prob<0.140000001] yes=17,no=18,missing=18,gain=9.65405273,cover=1575.65967
+				17:leaf=-0.0458650999,cover=853.922729
+				18:leaf=-0.0377311334,cover=721.736938
+		4:[market_prob<0.289999992] yes=9,no=10,missing=10,gain=50.3092346,cover=3867.26953
+			9:[market_prob<0.25] yes=19,no=20,missing=20,gain=5.80270386,cover=1242.97156
+				19:leaf=-0.0284401756,cover=658.902588
+				20:leaf=-0.0214529932,cover=584.06897
+			10:[market_prob<0.370000005] yes=21,no=22,missing=22,gain=8.55867004,cover=2624.2981
+				21:leaf=-0.0156581197,cover=1386.67578
+				22:leaf=-0.00991790928,cover=1237.62231
+	2:[market_prob<0.810000002] yes=5,no=6,missing=6,gain=1063.2572,cover=9860.00195
+		5:[market_prob<0.610000014] yes=11,no=12,missing=12,gain=178.727554,cover=7345.25439
+			11:[market_prob<0.5] yes=23,no=24,missing=24,gain=19.6135941,cover=4143.53271
+				23:leaf=-0.00202139677,cover=1631.18372
+				24:leaf=0.00501823938,cover=2512.34888
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=20.4038696,cover=3201.72217
+				25:leaf=0.0144930705,cover=1825.26965
+				26:leaf=0.0225785058,cover=1376.45239
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=88.364502,cover=2514.7478
+			13:[market_prob<0.870000005] yes=27,no=28,missing=28,gain=18.6908569,cover=1541.10339
+				27:leaf=0.0331821516,cover=709.079712
+				28:leaf=0.0444035083,cover=832.023743
+			14:[price_momentum<0.25] yes=29,no=30,missing=30,gain=8.64038086,cover=973.644409
+				29:leaf=0.0588148721,cover=971.638184
+				30:leaf=-0.0325742923,cover=2.0062201
+
+
+booster[17]
+0:[market_prob<0.430000007] yes=1,no=2,missing=2,gain=3219.26465,cover=16064.9922
+	1:[market_prob<0.200000003] yes=3,no=4,missing=4,gain=590.107788,cover=6283.50684
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=71.6286621,cover=2441.25439
+			7:[tau_minutes<11.833333] yes=15,no=16,missing=16,gain=5.59362793,cover=896.428955
+				15:leaf=-0.0589080565,cover=889.61731
+				16:leaf=-0.011492691,cover=6.81166506
+			8:[market_prob<0.129999995] yes=17,no=18,missing=18,gain=10.5670776,cover=1544.82532
+				17:leaf=-0.0452572815,cover=714.49585
+				18:leaf=-0.036713127,cover=830.329468
+		4:[market_prob<0.280000001] yes=9,no=10,missing=10,gain=48.1705933,cover=3842.2522
+			9:[tau_minutes<5.80000019] yes=19,no=20,missing=20,gain=8.6661377,cover=1071.83496
+				19:leaf=-0.0318013839,cover=319.18811
+				20:leaf=-0.0218437705,cover=752.646851
+			10:[tau_minutes<2.01666665] yes=21,no=22,missing=22,gain=13.3853302,cover=2770.41748
+				21:leaf=-0.0307047516,cover=95.2168961
+				22:leaf=-0.0116801672,cover=2675.20044
+	2:[market_prob<0.810000002] yes=5,no=6,missing=6,gain=988.822998,cover=9781.48535
+		5:[market_prob<0.620000005] yes=11,no=12,missing=12,gain=158.094452,cover=7317.63379
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=29.2143517,cover=4339.23975
+				23:leaf=-0.00164566829,cover=2152.31079
+				24:leaf=0.00655829022,cover=2186.92871
+			12:[market_prob<0.720000029] yes=25,no=26,missing=26,gain=15.0114136,cover=2978.39404
+				25:leaf=0.0144613106,cover=1752.07996
+				26:leaf=0.0217005443,cover=1226.31409
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=86.0472412,cover=2463.85156
+			13:[tau_minutes<11.5166664] yes=27,no=28,missing=28,gain=16.8966675,cover=1518.46069
+				27:leaf=0.0392515771,cover=1408.5166
+				28:leaf=0.0186462551,cover=109.944016
+			14:[price_momentum<0.25] yes=29,no=30,missing=30,gain=11.9484863,cover=945.390991
+				29:leaf=0.0573449321,cover=943.358276
+				30:leaf=-0.047333952,cover=2.03271461
+
+
+booster[18]
+0:[market_prob<0.519999981] yes=1,no=2,missing=2,gain=2966.35278,cover=15971.3086
+	1:[market_prob<0.230000004] yes=3,no=4,missing=4,gain=900.139038,cover=8385.24121
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=101.726318,cover=2788.90112
+			7:[market_prob<0.0700000003] yes=15,no=16,missing=16,gain=9.6739502,cover=1221.08032
+				15:leaf=-0.0576093085,cover=876.233826
+				16:leaf=-0.0471426509,cover=344.846527
+			8:[market_prob<0.159999996] yes=17,no=18,missing=18,gain=11.7831421,cover=1567.82068
+				17:leaf=-0.0402132906,cover=710.995117
+				18:leaf=-0.0313290842,cover=856.825623
+		4:[market_prob<0.379999995] yes=9,no=10,missing=10,gain=84.3110657,cover=5596.33984
+			9:[tau_minutes<5.8499999] yes=19,no=20,missing=20,gain=12.5493317,cover=2401.4458
+				19:leaf=-0.0227812026,cover=553.31543
+				20:leaf=-0.0141685922,cover=1848.13037
+			10:[market_prob<0.430000007] yes=21,no=22,missing=22,gain=6.90250778,cover=3194.89429
+				21:leaf=-0.0070907413,cover=1046.36487
+				22:leaf=-0.00213857903,cover=2148.5293
+	2:[market_prob<0.829999983] yes=5,no=6,missing=6,gain=659.503784,cover=7586.06738
+		5:[market_prob<0.689999998] yes=11,no=12,missing=12,gain=76.1659546,cover=5412.37988
+			11:[market_prob<0.579999983] yes=23,no=24,missing=24,gain=15.4704514,cover=3474.13867
+				23:leaf=0.00453587528,cover=1354.97815
+				24:leaf=0.0113810562,cover=2119.1604
+			12:[tau_minutes<2.13333344] yes=25,no=26,missing=26,gain=12.655426,cover=1938.24146
+				25:leaf=0.0377107598,cover=108.414452
+				26:leaf=0.0200827103,cover=1829.82703
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=67.3884277,cover=2173.68726
+			13:[price_momentum<0.270000011] yes=27,no=28,missing=28,gain=16.1997681,cover=1255.43848
+				27:leaf=0.0384432375,cover=1252.69543
+				28:leaf=-0.0675868317,cover=2.7429409
+			14:[price_momentum<0.25] yes=29,no=30,missing=30,gain=11.4355469,cover=918.248901
+				29:leaf=0.0563607626,cover=916.192749
+				30:leaf=-0.0457047448,cover=2.05610347
+
+
+booster[19]
+0:[market_prob<0.409999996] yes=1,no=2,missing=2,gain=2678.13306,cover=15784.6924
+	1:[market_prob<0.200000003] yes=3,no=4,missing=4,gain=484.948608,cover=5725.2417
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=74.0778809,cover=2316.83447
+			7:[tau_minutes<11.833333] yes=15,no=16,missing=16,gain=5.89758301,cover=836.727539
+				15:leaf=-0.0571113639,cover=830.34375
+				16:leaf=-0.00757389888,cover=6.38378859
+			8:[market_prob<0.140000001] yes=17,no=18,missing=18,gain=12.9248657,cover=1480.10706
+				17:leaf=-0.0424326733,cover=796.825562
+				18:leaf=-0.0328594446,cover=683.281433
+		4:[market_prob<0.270000011] yes=9,no=10,missing=10,gain=39.5950928,cover=3408.40698
+			9:[price_momentum<0.100000001] yes=19,no=20,missing=20,gain=6.3757019,cover=924.279541
+				19:leaf=-0.0242136586,cover=922.283447
+				20:leaf=0.0501502343,cover=1.99604678
+			10:[tau_minutes<2.01666665] yes=21,no=22,missing=22,gain=13.764389,cover=2484.12744
+				21:leaf=-0.0314001068,cover=86.3455353
+				22:leaf=-0.0111521631,cover=2397.78198
+	2:[market_prob<0.790000021] yes=5,no=6,missing=6,gain=920.823853,cover=10059.4502
+		5:[market_prob<0.569999993] yes=11,no=12,missing=12,gain=117.322388,cover=7457.47656
+			11:[market_prob<0.479999989] yes=23,no=24,missing=24,gain=9.63794136,cover=3711.57642
+				23:leaf=-0.0025815689,cover=1549.88757
+				24:leaf=0.00258346042,cover=2161.68896
+			12:[market_prob<0.639999986] yes=25,no=26,missing=26,gain=20.3392334,cover=3745.90015
+				25:leaf=0.00826707575,cover=1428.62268
+				26:leaf=0.015862545,cover=2317.27734
+		6:[market_prob<0.920000017] yes=13,no=14,missing=14,gain=106.907104,cover=2601.97388
+			13:[market_prob<0.850000024] yes=27,no=28,missing=28,gain=16.9029541,cover=1500.07996
+				27:leaf=0.0267869178,cover=700.899109
+				28:leaf=0.037550047,cover=799.180908
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=14.5708008,cover=1101.89392
+				29:leaf=0.0472088344,cover=561.105408
+				30:leaf=0.0591358952,cover=540.788513
+
+
+booster[20]
+0:[market_prob<0.430000007] yes=1,no=2,missing=2,gain=2489.6731,cover=15653.8115
+	1:[market_prob<0.200000003] yes=3,no=4,missing=4,gain=519.34314,cover=6075.57959
+		3:[market_prob<0.100000001] yes=7,no=8,missing=8,gain=71.744873,cover=2273.39697
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=10.1298828,cover=1139.22546
+				15:leaf=-0.0585426986,cover=482.3078
+				16:leaf=-0.0484984592,cover=656.917664
+			8:[tau_minutes<1.66666663] yes=17,no=18,missing=18,gain=4.29077148,cover=1134.17151
+				17:leaf=-0.048083514,cover=63.9616966
+				18:leaf=-0.0341170542,cover=1070.20984
+		4:[market_prob<0.280000001] yes=9,no=10,missing=10,gain=42.1419067,cover=3802.18262
+			9:[tau_minutes<12.4333334] yes=19,no=20,missing=20,gain=7.42897034,cover=1059.07764
+				19:leaf=-0.0205862839,cover=932.841431
+				20:leaf=-0.033633966,cover=126.236237
+			10:[tau_minutes<2.01666665] yes=21,no=22,missing=22,gain=8.65939331,cover=2743.10498
+				21:leaf=-0.0253114309,cover=93.7235031
+				22:leaf=-0.00988744106,cover=2649.38135
+	2:[market_prob<0.810000002] yes=5,no=6,missing=6,gain=813.008911,cover=9578.23242
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=116.841751,cover=7280.33398
+			11:[market_prob<0.519999981] yes=23,no=24,missing=24,gain=11.2941952,cover=3496.5271
+				23:leaf=-0.00111476192,cover=2154.59741
+				24:leaf=0.00472694263,cover=1341.92993
+			12:[market_prob<0.720000029] yes=25,no=26,missing=26,gain=21.7026978,cover=3783.80664
+				25:leaf=0.0112064825,cover=2577.06299
+				26:leaf=0.0193428975,cover=1206.74353
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=82.8890381,cover=2297.89844
+			13:[market_prob<0.870000005] yes=27,no=28,missing=28,gain=17.9074097,cover=1439.16907
+				27:leaf=0.0283748507,cover=670.550476
+				28:leaf=0.0396947414,cover=768.61853
+			14:[abs_price_momentum<0.25] yes=29,no=30,missing=30,gain=10.887146,cover=858.729248
+				29:leaf=0.0544368327,cover=856.661926
+				30:leaf=-0.0448771231,cover=2.06735682
+
+
+booster[21]
+0:[z_implied<-0.125661343] yes=1,no=2,missing=2,gain=2263.09375,cover=15539.9941
+	1:[distance_from_mid<0.319999993] yes=3,no=4,missing=4,gain=530.795654,cover=6457.12109
+		3:[distance_from_mid<0.219999999] yes=7,no=8,missing=8,gain=52.4473572,cover=4350.73145
+			7:[distance_from_mid<0.140000001] yes=15,no=16,missing=16,gain=10.3598328,cover=3043.74609
+				15:leaf=-0.00652914727,cover=1677.48474
+				16:leaf=-0.0124015007,cover=1366.26135
+			8:[tau_minutes<5.61666679] yes=17,no=18,missing=18,gain=10.8477936,cover=1306.98523
+				17:leaf=-0.0284509994,cover=368.296387
+				18:leaf=-0.0182538833,cover=938.688843
+		4:[distance_from_mid<0.439999998] yes=9,no=10,missing=10,gain=70.5705566,cover=2106.39014
+			9:[distance_from_mid<0.400000006] yes=19,no=20,missing=20,gain=10.1757202,cover=1320.98438
+				19:leaf=-0.0330130868,cover=878.254028
+				20:leaf=-0.0425373726,cover=442.730316
+			10:[tau_minutes<11.9499998] yes=21,no=22,missing=22,gain=4.128479,cover=785.405701
+				21:leaf=-0.0555757247,cover=779.238464
+				22:leaf=-0.0121872528,cover=6.16725445
+	2:[distance_from_mid<0.340000004] yes=5,no=6,missing=6,gain=726.786438,cover=9082.87305
+		5:[distance_from_mid<0.140000001] yes=11,no=12,missing=12,gain=110.930374,cover=7160.73047
+			11:[distance_from_mid<0.0599999987] yes=23,no=24,missing=24,gain=21.9482193,cover=4280.60742
+				23:leaf=0.000716448703,cover=2648.3208
+				24:leaf=0.00808656868,cover=1632.28674
+			12:[distance_from_mid<0.219999999] yes=25,no=26,missing=26,gain=14.0981445,cover=2880.12305
+				25:leaf=0.0124994339,cover=1358.59778
+				26:leaf=0.0195307042,cover=1521.52527
+		6:[distance_from_mid<0.439999998] yes=13,no=14,missing=14,gain=61.8740234,cover=1922.1427
+			13:[abs_price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=13.645813,cover=1088.30469
+				27:leaf=0.0360193662,cover=1072.38794
+				28:leaf=-0.0100599211,cover=15.9167967
+			14:[distance_from_mid<0.469999999] yes=29,no=30,missing=30,gain=7.53533936,cover=833.838013
+				29:leaf=0.0471964255,cover=331.031128
+				30:leaf=0.0576095395,cover=502.806854
+
+
+booster[22]
+0:[market_prob<0.409999996] yes=1,no=2,missing=2,gain=2035.06726,cover=15414.0273
+	1:[market_prob<0.180000007] yes=3,no=4,missing=4,gain=419.724365,cover=5543.75586
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=58.5164795,cover=1940.92761
+			7:[price_momentum<-0.159999996] yes=15,no=16,missing=16,gain=2.35845947,cover=755.504456
+				15:leaf=-0.00603864808,cover=2.82934999
+				16:leaf=-0.0540991612,cover=752.67511
+			8:[market_prob<0.109999999] yes=17,no=18,missing=18,gain=8.69445801,cover=1185.4231
+				17:leaf=-0.0417923369,cover=432.991486
+				18:leaf=-0.0326467715,cover=752.43158
+		4:[market_prob<0.270000011] yes=9,no=10,missing=10,gain=40.5126038,cover=3602.82812
+			9:[abs_price_momentum<0.0900000036] yes=19,no=20,missing=20,gain=5.21856689,cover=1127.01819
+				19:leaf=-0.0223487709,cover=1117.25464
+				20:leaf=0.0132775223,cover=9.76365471
+			10:[price_momentum<0] yes=21,no=22,missing=22,gain=7.18225861,cover=2475.80981
+				21:leaf=-0.00634583412,cover=715.031738
+				22:leaf=-0.0123030525,cover=1760.77808
+	2:[market_prob<0.819999993] yes=5,no=6,missing=6,gain=751.239075,cover=9870.27148
+		5:[market_prob<0.620000005] yes=11,no=12,missing=12,gain=125.671448,cover=7793.90527
+			11:[market_prob<0.5] yes=23,no=24,missing=24,gain=17.2685394,cover=4755.46191
+				23:leaf=-0.00207898347,cover=2050.11279
+				24:leaf=0.00400388474,cover=2705.34912
+			12:[market_prob<0.720000029] yes=25,no=26,missing=26,gain=15.0158386,cover=3038.44336
+				25:leaf=0.011343562,cover=1736.92236
+				26:leaf=0.0184639152,cover=1301.52112
+		6:[market_prob<0.920000017] yes=13,no=14,missing=14,gain=73.5522461,cover=2076.36646
+			13:[price_momentum<0.129999995] yes=27,no=28,missing=28,gain=8.8465271,cover=1075.71973
+				27:leaf=0.0315108858,cover=1069.72375
+				28:leaf=-0.0261224508,cover=5.99587059
+			14:[price_momentum<0.289999992] yes=29,no=30,missing=30,gain=17.3007812,cover=1000.64673
+				29:leaf=0.0504099242,cover=998.368469
+				30:leaf=-0.0679260716,cover=2.278265
+
+
+booster[23]
+0:[z_implied<-0.227544978] yes=1,no=2,missing=2,gain=1898.12891,cover=15275.168
+	1:[distance_from_mid<0.310000002] yes=3,no=4,missing=4,gain=395.812378,cover=5464.13916
+		3:[distance_from_mid<0.239999995] yes=7,no=8,missing=8,gain=20.1591797,cover=3351.10034
+			7:[tau_minutes<2.3499999] yes=15,no=16,missing=16,gain=13.40345,cover=2457.04077
+				15:leaf=-0.0276038926,cover=108.786057
+				16:leaf=-0.00970046688,cover=2348.25464
+			8:[tau_minutes<12.4333334] yes=17,no=18,missing=18,gain=7.16757202,cover=894.059509
+				17:leaf=-0.0176118743,cover=789.706604
+				18:leaf=-0.0316383429,cover=104.352943
+		4:[distance_from_mid<0.439999998] yes=9,no=10,missing=10,gain=69.9230957,cover=2113.03882
+			9:[distance_from_mid<0.400000006] yes=19,no=20,missing=20,gain=10.4820557,cover=1380.50903
+				19:leaf=-0.0308384504,cover=959.359375
+				20:leaf=-0.0404954888,cover=421.149628
+			10:[tau_minutes<13.166667] yes=21,no=22,missing=22,gain=5.72711182,cover=732.529907
+				21:leaf=-0.0532484166,cover=730.34375
+				22:leaf=0.0202206858,cover=2.18610978
+	2:[distance_from_mid<0.330000013] yes=5,no=6,missing=6,gain=709.855469,cover=9811.0293
+		5:[distance_from_mid<0.119999997] yes=11,no=12,missing=12,gain=125.514297,cover=7882.16455
+			11:[z_implied<0.075269863] yes=23,no=24,missing=24,gain=18.9910946,cover=4751.37207
+				23:leaf=-0.00117970177,cover=2810.65186
+				24:leaf=0.0052498607,cover=1940.72021
+			12:[distance_from_mid<0.25999999] yes=25,no=26,missing=26,gain=15.4387512,cover=3130.79272
+				25:leaf=0.0121917045,cover=2283.65283
+				26:leaf=0.0201121829,cover=847.139832
+		6:[distance_from_mid<0.439999998] yes=13,no=14,missing=14,gain=67.3122559,cover=1928.8645
+			13:[price_momentum<0.270000011] yes=27,no=28,missing=28,gain=15.8763123,cover=1148.1698
+				27:leaf=0.0329499803,cover=1145.60852
+				28:leaf=-0.0741923302,cover=2.56134963
+			14:[price_momentum<0.0799999982] yes=29,no=30,missing=30,gain=10.5405273,cover=780.694641
+				29:leaf=0.0522267111,cover=775.689392
+				30:leaf=-0.017565351,cover=5.00522518
+
+
+booster[24]
+0:[market_prob<0.430000007] yes=1,no=2,missing=2,gain=1711.57422,cover=15172.4736
+	1:[market_prob<0.159999996] yes=3,no=4,missing=4,gain=417.568848,cover=5833.05957
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=44.9443359,cover=1649.0354
+			7:[tau_minutes<11.833333] yes=15,no=16,missing=16,gain=5.78063965,cover=707.662537
+				15:leaf=-0.0525607467,cover=701.680359
+				16:leaf=-0.00273004849,cover=5.98211861
+			8:[tau_minutes<2.98333335] yes=17,no=18,missing=18,gain=7.67092896,cover=941.372925
+				17:leaf=-0.0449491031,cover=177.159073
+				18:leaf=-0.0330605544,cover=764.213867
+		4:[market_prob<0.270000011] yes=9,no=10,missing=10,gain=55.2020569,cover=4184.02393
+			9:[market_prob<0.219999999] yes=19,no=20,missing=20,gain=6.31237793,cover=1316.62012
+				19:leaf=-0.024733955,cover=678.548035
+				20:leaf=-0.0177126359,cover=638.072021
+			10:[tau_minutes<2.01666665] yes=21,no=22,missing=22,gain=11.2193298,cover=2867.40381
+				21:leaf=-0.02515902,cover=102.500198
+				22:leaf=-0.00836776942,cover=2764.90356
+	2:[market_prob<0.829999983] yes=5,no=6,missing=6,gain=635.082153,cover=9339.41406
+		5:[market_prob<0.629999995] yes=11,no=12,missing=12,gain=88.2825012,cover=7456.22119
+			11:[market_prob<0.540000021] yes=23,no=24,missing=24,gain=18.3024216,cover=4536.12744
+				23:leaf=-0.000378082419,cover=2634.90112
+				24:leaf=0.00605756836,cover=1901.22644
+			12:[market_prob<0.74000001] yes=25,no=26,missing=26,gain=13.2506866,cover=2920.09351
+				25:leaf=0.0108020967,cover=1802.46631
+				26:leaf=0.0177479293,cover=1117.62732
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=66.2330322,cover=1883.19324
+			13:[tau_minutes<10.6333332] yes=27,no=28,missing=28,gain=12.168457,cover=1127.68787
+				27:leaf=0.0332987644,cover=1001.49023
+				28:leaf=0.0166175105,cover=126.197639
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=9.80938721,cover=755.505371
+				29:leaf=0.0432181805,cover=299.618073
+				30:leaf=0.0554405339,cover=455.887299
+
+
+booster[25]
+0:[market_prob<0.430000007] yes=1,no=2,missing=2,gain=1545.81091,cover=15032.8311
+	1:[market_prob<0.170000002] yes=3,no=4,missing=4,gain=407.689514,cover=5767.16309
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=49.8643799,cover=1702.23254
+			7:[tau_minutes<11.9499998] yes=15,no=16,missing=16,gain=5.60858154,cover=686.397034
+				15:leaf=-0.0518362224,cover=680.413635
+				16:leaf=-0.00274194567,cover=5.98342896
+			8:[tau_minutes<2.95000005] yes=17,no=18,missing=18,gain=9.72808838,cover=1015.83545
+				17:leaf=-0.0445059873,cover=182.172607
+				18:leaf=-0.0314853676,cover=833.662842
+		4:[market_prob<0.239999995] yes=9,no=10,missing=10,gain=42.6187439,cover=4064.93066
+			9:[tau_minutes<0.800000012] yes=19,no=20,missing=20,gain=5.31521606,cover=811.386353
+				19:leaf=-0.0609183013,cover=8.01272297
+				20:leaf=-0.0216059182,cover=803.373657
+			10:[tau_minutes<2.61666656] yes=21,no=22,missing=22,gain=11.5249405,cover=3253.54419
+				21:leaf=-0.0217799172,cover=173.358597
+				22:leaf=-0.00854669791,cover=3080.18555
+	2:[market_prob<0.850000024] yes=5,no=6,missing=6,gain=604.019226,cover=9265.66797
+		5:[market_prob<0.639999986] yes=11,no=12,missing=12,gain=97.4191132,cover=7614.72998
+			11:[market_prob<0.560000002] yes=23,no=24,missing=24,gain=17.3806324,cover=4682.37646
+				23:leaf=-0.000102578291,cover=3057.44971
+				24:leaf=0.00629550591,cover=1624.92676
+			12:[market_prob<0.74000001] yes=25,no=26,missing=26,gain=17.8692322,cover=2932.35352
+				25:leaf=0.0102398628,cover=1629.98999
+				26:leaf=0.0181091689,cover=1302.36365
+		6:[market_prob<0.949999988] yes=13,no=14,missing=14,gain=53.5611572,cover=1650.93811
+			13:[price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=14.2616577,cover=1007.88715
+				27:leaf=0.0333146378,cover=997.079529
+				28:leaf=-0.0227817129,cover=10.8076038
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=6.63299561,cover=643.050964
+				29:leaf=0.043134246,cover=202.305893
+				30:leaf=0.0548792072,cover=440.745056
+
+
+booster[26]
+0:[market_prob<0.379999995] yes=1,no=2,missing=2,gain=1418.85583,cover=14901.6357
+	1:[market_prob<0.150000006] yes=3,no=4,missing=4,gain=291.807251,cover=4645.07861
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=39.2290039,cover=1438.19495
+			7:[tau_minutes<11.833333] yes=15,no=16,missing=16,gain=4.95648193,cover=654.54126
+				15:leaf=-0.0511549711,cover=648.14502
+				16:leaf=-0.00592549518,cover=6.39624691
+			8:[tau_minutes<2.95000005] yes=17,no=18,missing=18,gain=5.78390503,cover=783.653625
+				17:leaf=-0.0431113467,cover=149.763458
+				18:leaf=-0.0317903347,cover=633.890198
+		4:[market_prob<0.25] yes=9,no=10,missing=10,gain=35.6942749,cover=3206.88354
+			9:[market_prob<0.200000003] yes=19,no=20,missing=20,gain=4.21247864,cover=1132.97766
+				19:leaf=-0.0250013825,cover=525.444824
+				20:leaf=-0.0187585354,cover=607.532898
+			10:[tau_minutes<5.25] yes=21,no=22,missing=22,gain=10.0239029,cover=2073.90576
+				21:leaf=-0.0178390499,cover=391.145355
+				22:leaf=-0.00894284528,cover=1682.76038
+	2:[market_prob<0.829999983] yes=5,no=6,missing=6,gain=620.467529,cover=10256.5566
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=114.538002,cover=8468.49414
+			11:[market_prob<0.460000008] yes=23,no=24,missing=24,gain=10.9994774,cover=4534.60303
+				23:leaf=-0.00385118066,cover=1718.21716
+				24:leaf=0.00122382748,cover=2816.38599
+			12:[market_prob<0.74000001] yes=25,no=26,missing=26,gain=21.0565338,cover=3933.89111
+				25:leaf=0.00865234341,cover=2818.75244
+				26:leaf=0.0167753156,cover=1115.13867
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=69.3051147,cover=1788.06274
+			13:[price_momentum<0.270000011] yes=27,no=28,missing=28,gain=11.1341858,cover=1089.20288
+				27:leaf=0.029476542,cover=1086.13428
+				28:leaf=-0.0546486564,cover=3.06866765
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=9.25769043,cover=698.859802
+				29:leaf=0.042057205,cover=283.754822
+				30:leaf=0.054358881,cover=415.10498
+
+
+booster[27]
+0:[market_prob<0.379999995] yes=1,no=2,missing=2,gain=1294.83801,cover=14806.4785
+	1:[market_prob<0.140000001] yes=3,no=4,missing=4,gain=273.086914,cover=4605.97559
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=35.8612061,cover=1302.51733
+			7:[tau_minutes<11.833333] yes=15,no=16,missing=16,gain=4.87585449,cover=635.874695
+				15:leaf=-0.0504122153,cover=629.524475
+				16:leaf=-0.00545783667,cover=6.35025215
+			8:[tau_minutes<2.9000001] yes=17,no=18,missing=18,gain=5.00698853,cover=666.642639
+				17:leaf=-0.0425635688,cover=124.626404
+				18:leaf=-0.0310093667,cover=542.016235
+		4:[market_prob<0.239999995] yes=9,no=10,missing=10,gain=39.8222656,cover=3303.45825
+			9:[tau_minutes<14.0166664] yes=19,no=20,missing=20,gain=2.71652222,cover=1096.8031
+				19:leaf=-0.0219124835,cover=1087.17542
+				20:leaf=-0.0482181869,cover=9.62764263
+			10:[tau_minutes<5.25] yes=21,no=22,missing=22,gain=11.4435349,cover=2206.65503
+				21:leaf=-0.0179664474,cover=418.339691
+				22:leaf=-0.00877198856,cover=1788.31543
+	2:[market_prob<0.800000012] yes=5,no=6,missing=6,gain=593.697754,cover=10200.5029
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=80.4610901,cover=8092.1582
+			11:[tau_minutes<0.383333325] yes=23,no=24,missing=24,gain=6.86634064,cover=4102.09424
+				23:leaf=-0.0673378855,cover=2.91996622
+				24:leaf=-0.00112888624,cover=4099.17432
+			12:[market_prob<0.649999976] yes=25,no=26,missing=26,gain=15.3584061,cover=3990.06372
+				25:leaf=0.00536620663,cover=1807.74207
+				26:leaf=0.0116025498,cover=2182.32153
+		6:[market_prob<0.889999986] yes=13,no=14,missing=14,gain=85.1157227,cover=2108.34473
+			13:[tau_minutes<9.21666622] yes=27,no=28,missing=28,gain=11.6421967,cover=950.310303
+				27:leaf=0.0259034988,cover=676.989441
+				28:leaf=0.0135912616,cover=273.320831
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=27.2370605,cover=1158.0343
+				29:leaf=0.0368893817,cover=753.768921
+				30:leaf=0.0531718135,cover=404.265381
+
+
+booster[28]
+0:[market_prob<0.349999994] yes=1,no=2,missing=2,gain=1173.28308,cover=14653.2646
+	1:[market_prob<0.109999999] yes=3,no=4,missing=4,gain=233.098633,cover=3994.94678
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=19.5476685,cover=992.761902
+			7:[tau_minutes<12.583333] yes=15,no=16,missing=16,gain=10.4230347,cover=363.305054
+				15:leaf=-0.053805735,cover=362.232544
+				16:leaf=0.0645937622,cover=1.07251179
+			8:[abs_price_momentum<0.0599999987] yes=17,no=18,missing=18,gain=5.41015625,cover=629.456848
+				17:leaf=-0.0389711447,cover=621.497192
+				18:leaf=0.00224065548,cover=7.9596839
+		4:[market_prob<0.230000004] yes=9,no=10,missing=10,gain=42.9303894,cover=3002.18481
+			9:[market_prob<0.159999996] yes=19,no=20,missing=20,gain=6.79455566,cover=1242.22205
+				19:leaf=-0.027785575,cover=481.715027
+				20:leaf=-0.0200850107,cover=760.507019
+			10:[tau_minutes<5.5666666] yes=21,no=22,missing=22,gain=11.5247421,cover=1759.96277
+				21:leaf=-0.0185430851,cover=388.352509
+				22:leaf=-0.00877659116,cover=1371.61023
+	2:[market_prob<0.870000005] yes=5,no=6,missing=6,gain=572.136353,cover=10658.3174
+		5:[market_prob<0.629999995] yes=11,no=12,missing=12,gain=128.004562,cover=9343.53809
+			11:[market_prob<0.5] yes=23,no=24,missing=24,gain=24.5553017,cover=6081.30127
+				23:leaf=-0.00280299829,cover=3206.63232
+				24:leaf=0.00355983782,cover=2874.6687
+			12:[market_prob<0.790000021] yes=25,no=26,missing=26,gain=21.1217804,cover=3262.23706
+				25:leaf=0.0100787571,cover=2409.15063
+				26:leaf=0.0192429107,cover=853.086304
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=40.645752,cover=1314.77942
+			13:[price_momentum<0.270000011] yes=27,no=28,missing=28,gain=14.3930054,cover=925.693726
+				27:leaf=0.0342980437,cover=922.998535
+				28:leaf=-0.0661470741,cover=2.69514585
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=7.97506714,cover=389.085693
+				29:leaf=0.0538996831,cover=386.693848
+				30:leaf=-0.0283984151,cover=2.39185357
+
+
+booster[29]
+0:[market_prob<0.360000014] yes=1,no=2,missing=2,gain=1074.7229,cover=14616.7871
+	1:[market_prob<0.119999997] yes=3,no=4,missing=4,gain=239.643188,cover=4138.8623
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=24.6779175,cover=1051.5813
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=9.36962891,cover=349.407806
+				15:leaf=-0.053521961,cover=348.168732
+				16:leaf=0.0550441444,cover=1.23909414
+			8:[market_prob<0.0700000003] yes=17,no=18,missing=18,gain=4.30938721,cover=702.173462
+				17:leaf=-0.042180147,cover=241.331711
+				18:leaf=-0.0334532261,cover=460.841736
+		4:[market_prob<0.239999995] yes=9,no=10,missing=10,gain=46.2011871,cover=3087.28076
+			9:[tau_minutes<1.60000002] yes=19,no=20,missing=20,gain=7.50891113,cover=1262.68652
+				19:leaf=-0.0395893008,cover=56.5566902
+				20:leaf=-0.020872945,cover=1206.12976
+			10:[tau_minutes<5.1833334] yes=21,no=22,missing=22,gain=11.7010193,cover=1824.59424
+				21:leaf=-0.0175430141,cover=347.484375
+				22:leaf=-0.00734306825,cover=1477.10986
+	2:[market_prob<0.839999974] yes=5,no=6,missing=6,gain=534.920532,cover=10477.9248
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=96.1107941,cover=8889.84961
+			11:[market_prob<0.430000007] yes=23,no=24,missing=24,gain=7.67007017,cover=4489.32666
+				23:leaf=-0.004325449,cover=1398.59875
+				24:leaf=0.00013596403,cover=3090.72778
+			12:[market_prob<0.720000029] yes=25,no=26,missing=26,gain=24.7859192,cover=4400.52344
+				25:leaf=0.00650689518,cover=2949.33105
+				26:leaf=0.0144917816,cover=1451.19214
+		6:[market_prob<0.949999988] yes=13,no=14,missing=14,gain=59.8486938,cover=1588.07507
+			13:[abs_price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=12.6706238,cover=1032.22485
+				27:leaf=0.0288840476,cover=1017.5329
+				28:leaf=-0.0169548653,cover=14.6920376
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=8.71655273,cover=555.850159
+				29:leaf=0.0491513684,cover=552.202942
+				30:leaf=-0.0232425705,cover=3.64720774
+
+
+booster[30]
+0:[market_prob<0.360000014] yes=1,no=2,missing=2,gain=995.424377,cover=14509.4365
+	1:[market_prob<0.129999995] yes=3,no=4,missing=4,gain=228.365601,cover=4089.36865
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=30.3532715,cover=1111.19336
+			7:[tau_minutes<11.833333] yes=15,no=16,missing=16,gain=6.09954834,cover=573.326111
+				15:leaf=-0.0488390438,cover=566.712769
+				16:leaf=-0.000470064784,cover=6.61339664
+			8:[tau_minutes<13.2166662] yes=17,no=18,missing=18,gain=3.20559692,cover=537.867188
+				17:leaf=-0.0319614448,cover=532.86322
+				18:leaf=0.00699408865,cover=5.00393867
+		4:[market_prob<0.230000004] yes=9,no=10,missing=10,gain=33.3890076,cover=2978.17529
+			9:[tau_minutes<14.0166664] yes=19,no=20,missing=20,gain=3.40644836,cover=1041.11023
+				19:leaf=-0.020608006,cover=1033.42224
+				20:leaf=-0.052842956,cover=7.68793344
+			10:[tau_minutes<1.60000002] yes=21,no=22,missing=22,gain=7.47129822,cover=1937.06506
+				21:leaf=-0.0284754243,cover=51.27071
+				22:leaf=-0.00926297065,cover=1885.79443
+	2:[market_prob<0.810000002] yes=5,no=6,missing=6,gain=481.930969,cover=10420.0684
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=66.9722137,cover=8577.5459
+			11:[distance_from_mid<0.0500000007] yes=23,no=24,missing=24,gain=8.51148987,cover=4486.73145
+				23:leaf=0.00125043734,cover=2171.01709
+				24:leaf=-0.00310645602,cover=2315.71436
+			12:[market_prob<0.720000029] yes=25,no=26,missing=26,gain=12.9078369,cover=4090.81421
+				25:leaf=0.00609604595,cover=2949.84253
+				26:leaf=0.0123624858,cover=1140.97156
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=74.8864136,cover=1842.52271
+			13:[tau_minutes<11.5166664] yes=27,no=28,missing=28,gain=14.5371094,cover=1230.44666
+				27:leaf=0.0257869791,cover=1139.75635
+				28:leaf=0.00492675742,cover=90.6902695
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=10.7764282,cover=612.076111
+				29:leaf=0.0375215374,cover=256.074554
+				30:leaf=0.0514575802,cover=356.001587
+
+
+booster[31]
+0:[market_prob<0.409999996] yes=1,no=2,missing=2,gain=915.96167,cover=14419.707
+	1:[market_prob<0.140000001] yes=3,no=4,missing=4,gain=282.558167,cover=5038.12646
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=33.3165894,cover=1175.6709
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=4.74023438,cover=550.543396
+				15:leaf=-0.0516633652,cover=326.990417
+				16:leaf=-0.0413750932,cover=223.552963
+			8:[tau_minutes<2.9000001] yes=17,no=18,missing=18,gain=6.54237366,cover=625.127502
+				17:leaf=-0.0413290523,cover=118.660172
+				18:leaf=-0.0279667731,cover=506.467346
+		4:[market_prob<0.239999995] yes=9,no=10,missing=10,gain=38.6490021,cover=3862.45581
+			9:[tau_minutes<13.9666662] yes=19,no=20,missing=20,gain=3.08488464,cover=1059.22668
+				19:leaf=-0.0183910336,cover=1048.17566
+				20:leaf=-0.0444035493,cover=11.051115
+			10:[tau_minutes<2.01666665] yes=21,no=22,missing=22,gain=12.0751762,cover=2803.229
+				21:leaf=-0.0242843796,cover=102.259964
+				22:leaf=-0.00684633199,cover=2700.96899
+	2:[market_prob<0.870000005] yes=5,no=6,missing=6,gain=440.868286,cover=9381.58008
+		5:[market_prob<0.649999976] yes=11,no=12,missing=12,gain=77.725708,cover=8166.40479
+			11:[market_prob<0.560000002] yes=23,no=24,missing=24,gain=16.1220036,cover=5289.47168
+				23:leaf=-0.000449544517,cover=3482.37085
+				24:leaf=0.00536973681,cover=1807.10071
+			12:[tau_minutes<2.13333344] yes=25,no=26,missing=26,gain=19.0399475,cover=2876.93311
+				25:leaf=0.028385086,cover=161.682968
+				26:leaf=0.010749436,cover=2715.25024
+		6:[market_prob<0.949999988] yes=13,no=14,missing=14,gain=36.673645,cover=1215.17529
+			13:[price_momentum<0.270000011] yes=27,no=28,missing=28,gain=12.5744019,cover=700.588684
+				27:leaf=0.0302995984,cover=698.329102
+				28:leaf=-0.0695199892,cover=2.25955892
+			14:[price_momentum<0.25] yes=29,no=30,missing=30,gain=6.02838135,cover=514.586548
+				29:leaf=0.0478886068,cover=513.086121
+				30:leaf=-0.0355649218,cover=1.50045133
+
+
+booster[32]
+0:[market_prob<0.280000001] yes=1,no=2,missing=2,gain=813.278259,cover=14266.4346
+	1:[market_prob<0.100000001] yes=3,no=4,missing=4,gain=134.590759,cover=2686.63159
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=14.4955444,cover=772.994568
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=10.0279236,cover=311.359436
+				15:leaf=-0.0515132435,cover=310.282745
+				16:leaf=0.0642661601,cover=1.07667601
+			8:[price_momentum<-0.0500000007] yes=17,no=18,missing=18,gain=6.0914917,cover=461.635132
+				17:leaf=0.0194189623,cover=4.22974205
+				18:leaf=-0.0371852405,cover=457.405396
+		4:[market_prob<0.200000003] yes=9,no=10,missing=10,gain=17.0781097,cover=1913.63708
+			9:[tau_minutes<1.66666663] yes=19,no=20,missing=20,gain=3.96238708,cover=941.740601
+				19:leaf=-0.0363094024,cover=50.5234909
+				20:leaf=-0.0216890108,cover=891.217102
+			10:[tau_minutes<5.80000019] yes=21,no=22,missing=22,gain=6.02859497,cover=971.896484
+				21:leaf=-0.0191656034,cover=284.314209
+				22:leaf=-0.0104734777,cover=687.582275
+	2:[market_prob<0.810000002] yes=5,no=6,missing=6,gain=485.055359,cover=11579.8027
+		5:[market_prob<0.519999981] yes=11,no=12,missing=12,gain=89.8296432,cover=9808.00293
+			11:[tau_minutes<2.01666665] yes=23,no=24,missing=24,gain=11.7501507,cover=4836.94336
+				23:leaf=-0.0171438102,cover=152.0121
+				24:leaf=-0.00306074857,cover=4684.93115
+			12:[market_prob<0.680000007] yes=25,no=26,missing=26,gain=14.1295929,cover=4971.05957
+				25:leaf=0.00410155905,cover=3227.04517
+				26:leaf=0.00968887471,cover=1744.01453
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=79.1777954,cover=1771.79944
+			13:[tau_minutes<2.3499999] yes=27,no=28,missing=28,gain=13.1000977,cover=1198.19788
+				27:leaf=0.0366484486,cover=143.108276
+				28:leaf=0.0204548612,cover=1055.0896
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=10.6937256,cover=573.601562
+				29:leaf=0.0366707966,cover=241.223724
+				30:leaf=0.0509885624,cover=332.377838
+
+
+booster[33]
+0:[market_prob<0.379999995] yes=1,no=2,missing=2,gain=766.392517,cover=14254.8506
+	1:[market_prob<0.109999999] yes=3,no=4,missing=4,gain=211.029236,cover=4314.08105
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=18.5817871,cover=843.91748
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=3.984375,cover=510.938507
+				15:leaf=-0.0500460155,cover=299.104492
+				16:leaf=-0.0401976928,cover=211.834015
+			8:[abs_price_momentum<0.0599999987] yes=17,no=18,missing=18,gain=3.68265533,cover=332.978973
+				17:leaf=-0.0312688053,cover=328.187103
+				18:leaf=0.0109437089,cover=4.7918539
+		4:[market_prob<0.219999999] yes=9,no=10,missing=10,gain=38.326004,cover=3470.16333
+			9:[market_prob<0.180000007] yes=19,no=20,missing=20,gain=3.69761658,cover=1058.81897
+				19:leaf=-0.0225226339,cover=632.520691
+				20:leaf=-0.0163743515,cover=426.29834
+			10:[price_momentum<0] yes=21,no=22,missing=22,gain=4.78261566,cover=2411.34448
+				21:leaf=-0.00512912218,cover=692.463196
+				22:leaf=-0.0100631909,cover=1718.88123
+	2:[market_prob<0.879999995] yes=5,no=6,missing=6,gain=386.040649,cover=9940.76953
+		5:[market_prob<0.610000014] yes=11,no=12,missing=12,gain=85.6307831,cover=8874.11621
+			11:[market_prob<0.5] yes=23,no=24,missing=24,gain=8.86095905,cover=5180.71387
+				23:leaf=-0.00192185852,cover=2685.59619
+				24:leaf=0.00221580663,cover=2495.11768
+			12:[market_prob<0.779999971] yes=25,no=26,missing=26,gain=17.2597656,cover=3693.40283
+				25:leaf=0.00791675877,cover=2672.67285
+				26:leaf=0.0155657148,cover=1020.73004
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=36.0449219,cover=1066.65271
+			13:[price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=8.01638794,cover=747.465698
+				27:leaf=0.0305067953,cover=739.317566
+				28:leaf=-0.0176282078,cover=8.14813519
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=7.82250977,cover=319.186981
+				29:leaf=0.0508361459,cover=316.894684
+				30:leaf=-0.0314492807,cover=2.29232025
+
+
+booster[34]
+0:[market_prob<0.349999994] yes=1,no=2,missing=2,gain=704.083557,cover=14120.8545
+	1:[market_prob<0.100000001] yes=3,no=4,missing=4,gain=184.275269,cover=3722.88794
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=15.0204773,cover=733.440918
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=9.71160889,cover=291.306549
+				15:leaf=-0.050567992,cover=290.20874
+				16:leaf=0.0627881214,cover=1.09781456
+			8:[tau_minutes<2.98333335] yes=17,no=18,missing=18,gain=3.56776428,cover=442.134369
+				17:leaf=-0.0426415317,cover=122.097588
+				18:leaf=-0.0319653936,cover=320.036774
+		4:[market_prob<0.200000003] yes=9,no=10,missing=10,gain=30.8868103,cover=2989.44702
+			9:[tau_minutes<1.66666663] yes=19,no=20,missing=20,gain=5.94865417,cover=913.058777
+				19:leaf=-0.0377437845,cover=48.6296692
+				20:leaf=-0.0196897704,cover=864.429077
+			10:[tau_minutes<1.60000002] yes=21,no=22,missing=22,gain=8.8809967,cover=2076.38818
+				21:leaf=-0.0283429474,cover=60.8764305
+				22:leaf=-0.00907169934,cover=2015.51184
+	2:[market_prob<0.839999974] yes=5,no=6,missing=6,gain=397.337708,cover=10397.9658
+		5:[market_prob<0.540000021] yes=11,no=12,missing=12,gain=71.0364838,cover=8980.58398
+			11:[abs_price_momentum<0.0199999996] yes=23,no=24,missing=24,gain=6.7749505,cover=4178.51953
+				23:leaf=-0.000782608986,cover=3247.32007
+				24:leaf=-0.00561874732,cover=931.199585
+			12:[market_prob<0.689999998] yes=25,no=26,missing=26,gain=15.6834183,cover=4802.06445
+				25:leaf=0.0047666817,cover=2930.27832
+				26:leaf=0.0106280288,cover=1871.78601
+		6:[market_prob<0.939999998] yes=13,no=14,missing=14,gain=54.5740356,cover=1417.3822
+			13:[abs_price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=9.44067383,cover=879.531128
+				27:leaf=0.0243206806,cover=865.745605
+				28:leaf=-0.0164466184,cover=13.7855253
+			14:[market_prob<0.970000029] yes=29,no=30,missing=30,gain=8.66915894,cover=537.851074
+				29:leaf=0.0361444615,cover=227.661713
+				30:leaf=0.049525287,cover=310.189331
+
+
+booster[35]
+0:[market_prob<0.25] yes=1,no=2,missing=2,gain=649.836365,cover=14073.0029
+	1:[market_prob<0.0900000036] yes=3,no=4,missing=4,gain=98.4398193,cover=2185.89209
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=10.9187317,cover=633.752686
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=11.6911926,cover=278.52774
+				15:leaf=-0.049862653,cover=277.06012
+				16:leaf=0.0638446584,cover=1.4676137
+			8:[abs_price_momentum<0.0599999987] yes=17,no=18,missing=18,gain=3.22859192,cover=355.224976
+				17:leaf=-0.0359071419,cover=351.684662
+				18:leaf=0.00969795603,cover=3.54030252
+		4:[market_prob<0.140000001] yes=9,no=10,missing=10,gain=10.2604675,cover=1552.13928
+			9:[tau_minutes<1.66666663] yes=19,no=20,missing=20,gain=5.52420807,cover=422.782501
+				19:leaf=-0.0456569269,cover=29.4366436
+				20:leaf=-0.0230652951,cover=393.345856
+			10:[tau_minutes<9.80000019] yes=21,no=22,missing=22,gain=4.40096283,cover=1129.35681
+				21:leaf=-0.0175923295,cover=795.456177
+				22:leaf=-0.0106863007,cover=333.900635
+	2:[market_prob<0.879999995] yes=5,no=6,missing=6,gain=399.278839,cover=11887.1104
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=102.729095,cover=10866.4004
+			11:[market_prob<0.409999996] yes=23,no=24,missing=24,gain=19.8816814,cover=6151.95215
+				23:leaf=-0.00554072298,cover=2660.66577
+				24:leaf=0.000196011839,cover=3491.28638
+			12:[market_prob<0.74000001] yes=25,no=26,missing=26,gain=21.0954132,cover=4714.44824
+				25:leaf=0.00522371801,cover=3204.03711
+				26:leaf=0.0123933451,cover=1510.41113
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=37.1246338,cover=1020.71021
+			13:[abs_price_momentum<0.379999995] yes=27,no=28,missing=28,gain=4.82803345,cover=724.523254
+				27:leaf=0.0286850613,cover=723.346924
+				28:leaf=-0.0483632013,cover=1.17631102
+			14:[abs_price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=5.58068848,cover=296.186981
+				29:leaf=0.0501978286,cover=294.137482
+				30:leaf=-0.0235246979,cover=2.04951549
+
+
+booster[36]
+0:[market_prob<0.349999994] yes=1,no=2,missing=2,gain=596.356567,cover=13985.4766
+	1:[market_prob<0.109999999] yes=3,no=4,missing=4,gain=170.270996,cover=3645.71924
+		3:[market_prob<0.0700000003] yes=7,no=8,missing=8,gain=19.1999817,cover=775.312622
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=3.28121948,cover=460.290344
+				15:leaf=-0.04883736,cover=265.754486
+				16:leaf=-0.0393221304,cover=194.535858
+			8:[tau_minutes<13.2166662] yes=17,no=18,missing=18,gain=5.05079651,cover=315.022247
+				17:leaf=-0.0292428117,cover=312.754364
+				18:leaf=0.0352360383,cover=2.26789188
+		4:[market_prob<0.209999993] yes=9,no=10,missing=10,gain=26.5529022,cover=2870.40674
+			9:[tau_minutes<1.66666663] yes=19,no=20,missing=20,gain=4.85717773,cover=917.719482
+				19:leaf=-0.0349686183,cover=45.2553177
+				20:leaf=-0.0180984549,cover=872.464172
+			10:[tau_minutes<1.60000002] yes=21,no=22,missing=22,gain=9.00456619,cover=1952.68713
+				21:leaf=-0.0283655822,cover=55.4015732
+				22:leaf=-0.00805913936,cover=1897.28564
+	2:[market_prob<0.879999995] yes=5,no=6,missing=6,gain=329.010742,cover=10339.7568
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=70.6834717,cover=9343.08789
+			11:[market_prob<0.449999988] yes=23,no=24,missing=24,gain=7.86355782,cover=5079.01562
+				23:leaf=-0.00337768276,cover=2023.69666
+				24:leaf=0.000640093058,cover=3055.31909
+			12:[market_prob<0.75999999] yes=25,no=26,missing=26,gain=20.3131256,cover=4264.07178
+				25:leaf=0.0055710501,cover=3035.7793
+				26:leaf=0.0131935272,cover=1228.29236
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=38.1083374,cover=996.669312
+			13:[price_momentum<0.379999995] yes=27,no=28,missing=28,gain=6.21882629,cover=712.725586
+				27:leaf=0.02723209,cover=711.298645
+				28:leaf=-0.0547955893,cover=1.42697334
+			14:[price_momentum<0.0199999996] yes=29,no=30,missing=30,gain=6.04974365,cover=283.943695
+				29:leaf=0.0503900163,cover=270.334625
+				30:leaf=0.0148679195,cover=13.6090603
+
+
+booster[37]
+0:[market_prob<0.230000004] yes=1,no=2,missing=2,gain=531.360596,cover=13912.8232
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=84.9800415,cover=1884.09924
+		3:[tau_minutes<11.833333] yes=7,no=8,missing=8,gain=7.50842285,cover=441.265564
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=3.20755005,cover=435.928162
+				15:leaf=-0.0485900603,cover=251.809937
+				16:leaf=-0.0389148407,cover=184.11824
+			8:[market_prob<0.0500000007] yes=17,no=18,missing=18,gain=2.21605706,cover=5.33740854
+				17:leaf=0.0395430624,cover=2.60061669
+				18:leaf=-0.0161369778,cover=2.73679185
+		4:[market_prob<0.159999996] yes=9,no=10,missing=10,gain=9.48468018,cover=1442.83374
+			9:[tau_minutes<13.2166662] yes=19,no=20,missing=20,gain=7.69767761,cover=738.397217
+				19:leaf=-0.0233327243,cover=729.607727
+				20:leaf=0.0218968224,cover=8.78949738
+			10:[tau_minutes<2.4000001] yes=21,no=22,missing=22,gain=3.18215561,cover=704.436523
+				21:leaf=-0.00377287692,cover=62.6345596
+				22:leaf=-0.015650142,cover=641.801941
+	2:[market_prob<0.870000005] yes=5,no=6,missing=6,gain=347.256409,cover=12028.7246
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=96.5093231,cover=10976.4844
+			11:[market_prob<0.379999995] yes=23,no=24,missing=24,gain=21.4433594,cover=6394.67041
+				23:leaf=-0.00664064754,cover=2268.92944
+				24:leaf=-0.000589830743,cover=4125.74121
+			12:[market_prob<0.74000001] yes=25,no=26,missing=26,gain=17.2945175,cover=4581.81396
+				25:leaf=0.00473084068,cover=3183.75757
+				26:leaf=0.0114036975,cover=1398.05652
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=41.5692444,cover=1052.23975
+			13:[price_momentum<0.270000011] yes=27,no=28,missing=28,gain=9.87423706,cover=778.734558
+				27:leaf=0.0257135332,cover=775.759888
+				28:leaf=-0.0543155335,cover=2.97467113
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=5.95739746,cover=273.505188
+				29:leaf=0.0487000681,cover=271.671509
+				30:leaf=-0.0296032485,cover=1.83369446
+
+
+booster[38]
+0:[market_prob<0.340000004] yes=1,no=2,missing=2,gain=501.916626,cover=13830.2891
+	1:[market_prob<0.100000001] yes=3,no=4,missing=4,gain=138.997925,cover=3403.22949
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=15.5540466,cover=646.397278
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=8.73861694,cover=247.389282
+				15:leaf=-0.0482203439,cover=246.21286
+				16:leaf=0.0574551225,cover=1.17642236
+			8:[price_momentum<-0.0399999991] yes=17,no=18,missing=18,gain=5.00544739,cover=399.007965
+				17:leaf=0.0146382079,cover=5.32014227
+				18:leaf=-0.0319289416,cover=393.687836
+		4:[market_prob<0.200000003] yes=9,no=10,missing=10,gain=26.5664368,cover=2756.83228
+			9:[tau_minutes<1.18333328] yes=19,no=20,missing=20,gain=4.5978241,cover=870.591431
+				19:leaf=-0.0408234969,cover=23.1802025
+				20:leaf=-0.0183674581,cover=847.411194
+			10:[tau_minutes<1.60000002] yes=21,no=22,missing=22,gain=8.23900604,cover=1886.24084
+				21:leaf=-0.0278044026,cover=52.5656548
+				22:leaf=-0.0078764027,cover=1833.67517
+	2:[market_prob<0.879999995] yes=5,no=6,missing=6,gain=299.904022,cover=10427.0596
+		5:[market_prob<0.649999976] yes=11,no=12,missing=12,gain=61.8900604,cover=9476.7627
+			11:[market_prob<0.479999989] yes=23,no=24,missing=24,gain=16.4564514,cover=6594.11279
+				23:leaf=-0.00279257237,cover=2857.36816
+				24:leaf=0.0022472851,cover=3736.74438
+			12:[tau_minutes<2.13333344] yes=25,no=26,missing=26,gain=21.3740158,cover=2882.64966
+				25:leaf=0.0261430051,cover=167.347641
+				26:leaf=0.00776981143,cover=2715.302
+		6:[market_prob<0.949999988] yes=13,no=14,missing=14,gain=33.7775879,cover=950.29718
+			13:[price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=5.75234222,cover=541.969238
+				27:leaf=0.0244780164,cover=536.008911
+				28:leaf=-0.0221700389,cover=5.96037483
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=4.96017456,cover=408.327942
+				29:leaf=0.0435927995,cover=404.620911
+				30:leaf=-0.0117478827,cover=3.7070055
+
+
+booster[39]
+0:[market_prob<0.270000011] yes=1,no=2,missing=2,gain=457.316986,cover=13752.8076
+	1:[market_prob<0.100000001] yes=3,no=4,missing=4,gain=104.951019,cover=2305.99585
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=12.7653198,cover=623.603882
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=8.47914124,cover=235.084625
+				15:leaf=-0.0478713848,cover=233.881332
+				16:leaf=0.0556833819,cover=1.20329571
+			8:[market_prob<0.0700000003] yes=17,no=18,missing=18,gain=3.14204407,cover=388.519226
+				17:leaf=-0.0371564887,cover=177.721085
+				18:leaf=-0.0275852662,cover=210.798141
+		4:[market_prob<0.180000007] yes=9,no=10,missing=10,gain=8.88646698,cover=1682.39197
+			9:[tau_minutes<3.0999999] yes=19,no=20,missing=20,gain=6.46921539,cover=677.738525
+				19:leaf=-0.0293980986,cover=108.907639
+				20:leaf=-0.016014332,cover=568.830872
+			10:[tau_minutes<12.4333334] yes=21,no=22,missing=22,gain=6.87263489,cover=1004.65344
+				21:leaf=-0.00931505393,cover=896.767639
+				22:leaf=-0.0226614326,cover=107.885757
+	2:[market_prob<0.889999986] yes=5,no=6,missing=6,gain=304.069458,cover=11446.8115
+		5:[market_prob<0.639999986] yes=11,no=12,missing=12,gain=76.2276154,cover=10604.6074
+			11:[market_prob<0.449999988] yes=23,no=24,missing=24,gain=19.932579,cover=7483.83447
+				23:leaf=-0.00386871258,cover=3240.20312
+				24:leaf=0.00133846537,cover=4243.63135
+			12:[tau_minutes<2.13333344] yes=25,no=26,missing=26,gain=15.8241272,cover=3120.77319
+				25:leaf=0.0225266684,cover=185.266663
+				26:leaf=0.00748477876,cover=2935.50635
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=28.9729614,cover=842.204346
+			13:[price_momentum<0.0399999991] yes=27,no=28,missing=28,gain=6.06417847,cover=587.801208
+				27:leaf=0.0275935531,cover=574.890747
+				28:leaf=-0.00659860997,cover=12.9104948
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=7.10786438,cover=254.403122
+				29:leaf=0.0479779914,cover=252.067902
+				30:leaf=-0.0299371239,cover=2.33522129
+
+
+booster[40]
+0:[market_prob<0.330000013] yes=1,no=2,missing=2,gain=417.418915,cover=13709.7646
+	1:[market_prob<0.109999999] yes=3,no=4,missing=4,gain=129.991333,cover=3181.89893
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=17.4732056,cover=697.61554
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=11.1985626,cover=228.724304
+				15:leaf=-0.0474716797,cover=227.295792
+				16:leaf=0.064539656,cover=1.42851698
+			8:[abs_price_momentum<0.0599999987] yes=17,no=18,missing=18,gain=3.89178467,cover=468.891205
+				17:leaf=-0.029985372,cover=462.108643
+				18:leaf=0.00721833482,cover=6.78257179
+		4:[market_prob<0.230000004] yes=9,no=10,missing=10,gain=10.5516434,cover=2484.28345
+			9:[tau_minutes<1.66666663] yes=19,no=20,missing=20,gain=4.01707458,cover=1094.85913
+				19:leaf=-0.0280256104,cover=50.9962349
+				20:leaf=-0.0136415828,cover=1043.86292
+			10:[tau_minutes<5.25] yes=21,no=22,missing=22,gain=8.85639954,cover=1389.42432
+				21:leaf=-0.0155597897,cover=287.875275
+				22:leaf=-0.00571143115,cover=1101.54907
+	2:[market_prob<0.870000005] yes=5,no=6,missing=6,gain=258.240601,cover=10527.8662
+		5:[market_prob<0.639999986] yes=11,no=12,missing=12,gain=52.6526413,cover=9547.72559
+			11:[market_prob<0.449999988] yes=23,no=24,missing=24,gain=10.7113457,cover=6595.90186
+				23:leaf=-0.00308328308,cover=2331.21436
+				24:leaf=0.00113093702,cover=4264.6875
+			12:[tau_minutes<2.13333344] yes=25,no=26,missing=26,gain=16.5668411,cover=2951.82422
+				25:leaf=0.0229974352,cover=165.629211
+				26:leaf=0.00675573712,cover=2786.19482
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=40.1232605,cover=980.139954
+			13:[price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=7.79159546,cover=735.814026
+				27:leaf=0.0237506852,cover=727.012756
+				28:leaf=-0.0217423718,cover=8.80128765
+			14:[price_momentum<0.0599999987] yes=29,no=30,missing=30,gain=5.32923889,cover=244.325912
+				29:leaf=0.0474721789,cover=241.159058
+				30:leaf=-0.0140165435,cover=3.16686654
+
+
+booster[41]
+0:[market_prob<0.209999993] yes=1,no=2,missing=2,gain=367.904358,cover=13659.8252
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=68.8850403,cover=1550.21362
+		3:[tau_minutes<11.833333] yes=7,no=8,missing=8,gain=6.5111084,cover=387.247437
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=4.74215698,cover=381.778564
+				15:leaf=-0.0471484661,cover=216.145599
+				16:leaf=-0.0351301394,cover=165.632965
+			8:[market_prob<0.0299999993] yes=17,no=18,missing=18,gain=3.49609089,cover=5.46889305
+				17:leaf=0.06581413,cover=1.03797245
+				18:leaf=-0.0114534954,cover=4.4309206
+		4:[market_prob<0.119999997] yes=9,no=10,missing=10,gain=8.74711609,cover=1162.96619
+			9:[tau_minutes<1.26666665] yes=19,no=20,missing=20,gain=4.92494202,cover=368.131866
+				19:leaf=-0.0487510972,cover=17.7345181
+				20:leaf=-0.0218687505,cover=350.397339
+			10:[tau_minutes<14.0166664] yes=21,no=22,missing=22,gain=2.80756378,cover=794.83429
+				21:leaf=-0.0136531219,cover=790.41864
+				22:leaf=-0.0502713323,cover=4.41561413
+	2:[market_prob<0.850000024] yes=5,no=6,missing=6,gain=260.210693,cover=12109.6123
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=59.0790634,cover=10958.7002
+			11:[market_prob<0.430000007] yes=23,no=24,missing=24,gain=14.5114517,cover=6577.22803
+				23:leaf=-0.0047216895,cover=3501.76831
+				24:leaf=-1.49560892e-05,cover=3075.45972
+			12:[market_prob<0.709999979] yes=25,no=26,missing=26,gain=11.1631889,cover=4381.47168
+				25:leaf=0.00305787963,cover=2782.95508
+				26:leaf=0.00830160547,cover=1598.51672
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=47.5618896,cover=1150.91211
+			13:[abs_price_momentum<0.310000002] yes=27,no=28,missing=28,gain=12.5337067,cover=915.968201
+				27:leaf=0.0206271242,cover=913.157654
+				28:leaf=-0.0708358139,cover=2.81054783
+			14:[abs_price_momentum<0.0199999996] yes=29,no=30,missing=30,gain=6.88313293,cover=234.943909
+				29:leaf=0.0475765094,cover=221.958038
+				30:leaf=0.00931074377,cover=12.9858761
+
+
+booster[42]
+0:[market_prob<0.219999999] yes=1,no=2,missing=2,gain=352.810364,cover=13563.7969
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=72.9320068,cover=1629.00854
+		3:[tau_minutes<6.4666667] yes=7,no=8,missing=8,gain=3.84664917,cover=373.226685
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=2.86575317,cover=323.938721
+				15:leaf=-0.0473542772,cover=198.58696
+				16:leaf=-0.0365489833,cover=125.351768
+			8:[tau_minutes<13.3666668] yes=17,no=18,missing=18,gain=2.13025284,cover=49.2879562
+				17:leaf=-0.0291235633,cover=47.7596321
+				18:leaf=0.0210458357,cover=1.52832365
+		4:[tau_minutes<1.66666663] yes=9,no=10,missing=10,gain=8.15745544,cover=1255.78174
+			9:[market_prob<0.180000007] yes=19,no=20,missing=20,gain=3.66678047,cover=71.1895447
+				19:leaf=-0.0387442447,cover=54.3288269
+				20:leaf=-0.0112490728,cover=16.8607159
+			10:[market_prob<0.109999999] yes=21,no=22,missing=22,gain=6.73286438,cover=1184.59229
+				21:leaf=-0.0222015567,cover=259.03952
+				22:leaf=-0.0130357938,cover=925.552734
+	2:[market_prob<0.889999986] yes=5,no=6,missing=6,gain=253.075958,cover=11934.7881
+		5:[market_prob<0.560000002] yes=11,no=12,missing=12,gain=64.9374924,cover=11151.4854
+			11:[market_prob<0.389999986] yes=23,no=24,missing=24,gain=12.9200249,cover=6445.51904
+				23:leaf=-0.00501514552,cover=2553.0752
+				24:leaf=-0.000438489311,cover=3892.4436
+			12:[market_prob<0.810000002] yes=25,no=26,missing=26,gain=14.1335182,cover=4705.9668
+				25:leaf=0.00431842217,cover=3998.52271
+				26:leaf=0.0119838957,cover=707.444275
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=30.0866394,cover=783.302429
+			13:[abs_price_momentum<0.0399999991] yes=27,no=28,missing=28,gain=4.7409668,cover=555.218811
+				27:leaf=0.0248684119,cover=537.651855
+				28:leaf=-0.00144683104,cover=17.5669575
+			14:[price_momentum<0.0199999996] yes=29,no=30,missing=30,gain=3.69917297,cover=228.083618
+				29:leaf=0.047212325,cover=216.126099
+				30:leaf=0.016776504,cover=11.9575157
+
+
+booster[43]
+0:[market_prob<0.189999998] yes=1,no=2,missing=2,gain=323.524963,cover=13517.4072
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=51.4649658,cover=1302.56165
+		3:[tau_minutes<11.833333] yes=7,no=8,missing=8,gain=6.61456299,cover=362.246124
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=5.25317383,cover=357.013031
+				15:leaf=-0.0459851064,cover=200.098969
+				16:leaf=-0.03306669,cover=156.914062
+			8:[market_prob<0.0299999993] yes=17,no=18,missing=18,gain=2.99625659,cover=5.23309183
+				17:leaf=0.0634102449,cover=1.06943321
+				18:leaf=-0.0085872123,cover=4.16365862
+		4:[tau_minutes<2.98333335] yes=9,no=10,missing=10,gain=6.76641846,cover=940.315552
+			9:[market_prob<0.150000006] yes=19,no=20,missing=20,gain=4.11476898,cover=152.049332
+				19:leaf=-0.0325516872,cover=105.519867
+				20:leaf=-0.0142439902,cover=46.5294724
+			10:[price_momentum<-0.0500000007] yes=21,no=22,missing=22,gain=8.41034698,cover=788.266174
+				21:leaf=0.0486921966,cover=4.13203382
+				22:leaf=-0.0158892423,cover=784.134155
+	2:[market_prob<0.839999974] yes=5,no=6,missing=6,gain=241.577972,cover=12214.8457
+		5:[market_prob<0.5] yes=11,no=12,missing=12,gain=58.8007088,cover=11030.0947
+			11:[tau_minutes<1.11666667] yes=23,no=24,missing=24,gain=12.8106346,cover=5318.54834
+				23:leaf=-0.0274923984,cover=53.9633827
+				24:leaf=-0.00322320615,cover=5264.58496
+			12:[market_prob<0.689999998] yes=25,no=26,missing=26,gain=8.88665009,cover=5711.5459
+				25:leaf=0.00248602289,cover=3900.99243
+				26:leaf=0.00672505191,cover=1810.55359
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=48.0368347,cover=1184.75085
+			13:[tau_minutes<11.0666666] yes=27,no=28,missing=28,gain=9.03451538,cover=968.421448
+				27:leaf=0.0206027776,cover=899.192749
+				28:leaf=0.00183067878,cover=69.2287064
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=6.70059204,cover=216.329453
+				29:leaf=0.0462877899,cover=213.970184
+				30:leaf=-0.0290986057,cover=2.35927248
+
+
+booster[44]
+0:[market_prob<0.200000003] yes=1,no=2,missing=2,gain=306.439514,cover=13456.0781
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=54.5654907,cover=1365.70642
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=6.5408783,cover=349.083344
+			7:[tau_minutes<12.4333334] yes=15,no=16,missing=16,gain=9.1726532,cover=194.252792
+				15:leaf=-0.0465588644,cover=192.553711
+				16:leaf=0.0503271595,cover=1.69907665
+			8:[price_momentum<-0.0399999991] yes=17,no=18,missing=18,gain=3.37004089,cover=154.830551
+				17:leaf=0.0221488606,cover=2.26635671
+				18:leaf=-0.0320227928,cover=152.564194
+		4:[tau_minutes<1.18333328] yes=9,no=10,missing=10,gain=6.73264313,cover=1016.62305
+			9:[market_prob<0.180000007] yes=19,no=20,missing=20,gain=0.446657181,cover=31.3634892
+				19:leaf=-0.0412799679,cover=27.6287823
+				20:leaf=-0.0160701815,cover=3.73470688
+			10:[abs_price_momentum<0.0599999987] yes=21,no=22,missing=22,gain=9.54481506,cover=985.259521
+				21:leaf=-0.0160368774,cover=974.479736
+				22:leaf=0.0294689424,cover=10.7798157
+	2:[market_prob<0.889999986] yes=5,no=6,missing=6,gain=210.505371,cover=12090.3711
+		5:[market_prob<0.5] yes=11,no=12,missing=12,gain=61.3855743,cover=11348.7588
+			11:[tau_minutes<6.08333349] yes=23,no=24,missing=24,gain=10.6343174,cover=5221.92383
+				23:leaf=-0.00725680077,cover=1081.69727
+				24:leaf=-0.00169043976,cover=4140.22705
+			12:[market_prob<0.75999999] yes=25,no=26,missing=26,gain=21.0011635,cover=6126.83496
+				25:leaf=0.00304561364,cover=4871.55615
+				26:leaf=0.010297385,cover=1255.27893
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=27.629715,cover=741.612427
+			13:[price_momentum<0.0700000003] yes=27,no=28,missing=28,gain=5.7128067,cover=536.463989
+				27:leaf=0.0231542643,cover=529.971985
+				28:leaf=-0.0215899386,cover=6.49201155
+			14:[price_momentum<0.0900000036] yes=29,no=30,missing=30,gain=6.70091248,cover=205.148407
+				29:leaf=0.0452229939,cover=202.870819
+				30:leaf=-0.0309144296,cover=2.27758813
+
+
+booster[45]
+0:[market_prob<0.25] yes=1,no=2,missing=2,gain=269.675018,cover=13402.9648
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=72.1939392,cover=1890.31665
+		3:[market_prob<0.0399999991] yes=7,no=8,missing=8,gain=6.35144043,cover=342.640808
+			7:[tau_minutes<12.583333] yes=15,no=16,missing=16,gain=4.32278442,cover=188.628799
+				15:leaf=-0.0454244763,cover=187.448425
+				16:leaf=0.0316415876,cover=1.18038189
+			8:[price_momentum<-0.0399999991] yes=17,no=18,missing=18,gain=2.68484879,cover=154.011993
+				17:leaf=0.015382411,cover=2.57301927
+				18:leaf=-0.0313890725,cover=151.43898
+		4:[market_prob<0.140000001] yes=9,no=10,missing=10,gain=10.1638412,cover=1547.67578
+			9:[tau_minutes<1.26666665] yes=19,no=20,missing=20,gain=6.74150085,cover=497.217041
+				19:leaf=-0.0466729477,cover=20.4730816
+				20:leaf=-0.0177296977,cover=476.743958
+			10:[tau_minutes<12.4833336] yes=21,no=22,missing=22,gain=5.30162811,cover=1050.45874
+				21:leaf=-0.00923756603,cover=964.960999
+				22:leaf=-0.0222102236,cover=85.4978104
+	2:[market_prob<0.889999986] yes=5,no=6,missing=6,gain=194.604568,cover=11512.6475
+		5:[market_prob<0.620000005] yes=11,no=12,missing=12,gain=41.895031,cover=10785.4463
+			11:[market_prob<0.409999996] yes=23,no=24,missing=24,gain=9.52527714,cover=7345.08545
+				23:leaf=-0.00359216193,cover=2630.78857
+				24:leaf=0.000162744676,cover=4714.29688
+			12:[tau_minutes<2.13333344] yes=25,no=26,missing=26,gain=13.757843,cover=3440.36108
+				25:leaf=0.0184901785,cover=191.626221
+				26:leaf=0.0047313082,cover=3248.73486
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=28.9479065,cover=727.201172
+			13:[price_momentum<0.289999992] yes=27,no=28,missing=28,gain=6.32971191,cover=527.108582
+				27:leaf=0.021795487,cover=525.408813
+				28:leaf=-0.0560651794,cover=1.69972456
+			14:[price_momentum<0.0599999987] yes=29,no=30,missing=30,gain=6.84295654,cover=200.092621
+				29:leaf=0.0450584777,cover=196.808563
+				30:leaf=-0.0222912021,cover=3.28405714
+
+
+booster[46]
+0:[market_prob<0.25] yes=1,no=2,missing=2,gain=249.965988,cover=13339.1875
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=71.786911,cover=1860.74097
+		3:[tau_minutes<11.833333] yes=7,no=8,missing=8,gain=5.15611267,cover=326.604401
+			7:[tau_minutes<2.83333325] yes=15,no=16,missing=16,gain=4.01780701,cover=321.906342
+				15:leaf=-0.0452213474,cover=150.128693
+				16:leaf=-0.0332478583,cover=171.777664
+			8:[tau_minutes<12.583333] yes=17,no=18,missing=18,gain=1.35373211,cover=4.69803619
+				17:leaf=0.0378689878,cover=1.68462205
+				18:leaf=-0.00877640583,cover=3.01341414
+		4:[market_prob<0.159999996] yes=9,no=10,missing=10,gain=8.54975891,cover=1534.1366
+			9:[tau_minutes<2.95000005] yes=19,no=20,missing=20,gain=5.56232452,cover=650.14209
+				19:leaf=-0.0269332416,cover=111.548767
+				20:leaf=-0.0145909814,cover=538.593323
+			10:[tau_minutes<12.4833336] yes=21,no=22,missing=22,gain=4.92826843,cover=883.994507
+				21:leaf=-0.00800054427,cover=807.258606
+				22:leaf=-0.0212263614,cover=76.7359009
+	2:[market_prob<0.879999995] yes=5,no=6,missing=6,gain=173.661377,cover=11478.4463
+		5:[market_prob<0.629999995] yes=11,no=12,missing=12,gain=36.5065308,cover=10683.1328
+			11:[market_prob<0.349999994] yes=23,no=24,missing=24,gain=9.4142561,cover=7528.59033
+				23:leaf=-0.00433294615,cover=1478.57104
+				24:leaf=0.000116446266,cover=6050.01904
+			12:[tau_minutes<2.13333344] yes=25,no=26,missing=26,gain=13.871376,cover=3154.54248
+				25:leaf=0.0195334852,cover=169.288406
+				26:leaf=0.00485506607,cover=2985.25415
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=34.311264,cover=795.313965
+			13:[market_prob<0.939999998] yes=27,no=28,missing=28,gain=5.08590698,cover=601.600708
+				27:leaf=0.016296586,cover=420.567505
+				28:leaf=0.026443569,cover=181.033203
+			14:[abs_price_momentum<0.0599999987] yes=29,no=30,missing=30,gain=4.73155212,cover=193.713242
+				29:leaf=0.0446353033,cover=190.537567
+				30:leaf=-0.0133115072,cover=3.17567325
+
+
+booster[47]
+0:[market_prob<0.209999993] yes=1,no=2,missing=2,gain=236.463791,cover=13323.6807
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=54.5475769,cover=1403.08093
+		3:[tau_minutes<6.51666689] yes=7,no=8,missing=8,gain=4.71429443,cover=318.021759
+			7:[market_prob<0.0399999991] yes=15,no=16,missing=16,gain=3.73757935,cover=275.449524
+				15:leaf=-0.0451634638,cover=163.178177
+				16:leaf=-0.0323846713,cover=112.271324
+			8:[market_prob<0.0599999987] yes=17,no=18,missing=18,gain=4.59038448,cover=42.5722351
+				17:leaf=-0.0104214242,cover=30.62644
+				18:leaf=-0.0464477688,cover=11.9457941
+		4:[market_prob<0.109999999] yes=9,no=10,missing=10,gain=8.31529236,cover=1085.05908
+			9:[abs_price_momentum<0.0599999987] yes=19,no=20,missing=20,gain=3.82816315,cover=263.234497
+				19:leaf=-0.0226301234,cover=259.131683
+				20:leaf=0.0221732631,cover=4.10282803
+			10:[tau_minutes<14.0166664] yes=21,no=22,missing=22,gain=2.8676796,cover=821.824646
+				21:leaf=-0.0113547575,cover=817.592957
+				22:leaf=-0.0488379039,cover=4.23167658
+	2:[market_prob<0.889999986] yes=5,no=6,missing=6,gain=180.047134,cover=11920.5996
+		5:[market_prob<0.579999983] yes=11,no=12,missing=12,gain=41.6837616,cover=11220.9727
+			11:[market_prob<0.389999986] yes=23,no=24,missing=24,gain=13.3216114,cover=6964.88965
+				23:leaf=-0.00449469127,cover=2637.47314
+				24:leaf=1.29127875e-05,cover=4327.4165
+			12:[market_prob<0.75999999] yes=25,no=26,missing=26,gain=11.7701874,cover=4256.08301
+				25:leaf=0.00289029605,cover=3008.05981
+				26:leaf=0.0086662434,cover=1248.02307
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=28.3999939,cover=699.627441
+			13:[abs_price_momentum<0.0399999991] yes=27,no=28,missing=28,gain=5.3092041,cover=514.283142
+				27:leaf=0.0216557924,cover=496.526489
+				28:leaf=-0.00587548688,cover=17.756628
+			14:[price_momentum<0.0199999996] yes=29,no=30,missing=30,gain=5.75758362,cover=185.344284
+				29:leaf=0.0457106009,cover=175.103088
+				30:leaf=0.00645450642,cover=10.2411947
+
+
+booster[48]
+0:[market_prob<0.180000007] yes=1,no=2,missing=2,gain=223.626831,cover=13234.5332
+	1:[market_prob<0.0500000007] yes=3,no=4,missing=4,gain=37.6350708,cover=1105.06128
+		3:[price_momentum<-0.159999996] yes=7,no=8,missing=8,gain=4.70166016,cover=213.73703
+			7:leaf=0.0374823958,cover=1.19004309
+			8:[market_prob<0.0199999996] yes=15,no=16,missing=16,gain=2.29013062,cover=212.546982
+				15:leaf=-0.0485395044,cover=78.8159409
+				16:leaf=-0.0363836028,cover=133.731033
+		4:[market_prob<0.100000001] yes=9,no=10,missing=10,gain=7.90361023,cover=891.324219
+			9:[price_momentum<0.00999999978] yes=17,no=18,missing=18,gain=1.76718903,cover=272.652588
+				17:leaf=-0.0218320601,cover=211.664688
+				18:leaf=-0.0320412517,cover=60.9879074
+			10:[price_momentum<0.0199999996] yes=19,no=20,missing=20,gain=2.68559265,cover=618.671631
+				19:leaf=-0.0129109817,cover=567.25708
+				20:leaf=-0.0249091294,cover=51.4145317
+	2:[market_prob<0.819999993] yes=5,no=6,missing=6,gain=165.406097,cover=12129.4717
+		5:[market_prob<0.519999981] yes=11,no=12,missing=12,gain=33.7468987,cover=10850.5742
+			11:[market_prob<0.280000001] yes=21,no=22,missing=22,gain=10.3150539,cover=5894.49463
+				21:leaf=-0.00711936643,cover=1095.7627
+				22:leaf=-0.00174408394,cover=4798.73193
+			12:[market_prob<0.620000005] yes=23,no=24,missing=24,gain=3.5035305,cover=4956.07959
+				23:leaf=0.00132953015,cover=2143.93091
+				24:leaf=0.00401350483,cover=2812.14868
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=48.8647766,cover=1278.89758
+			13:[abs_price_momentum<0.0700000003] yes=25,no=26,missing=26,gain=10.3816605,cover=1098.80176
+				25:leaf=0.015464914,cover=1080.91394
+				26:leaf=-0.0220844354,cover=17.8878078
+			14:[price_momentum<0.0199999996] yes=27,no=28,missing=28,gain=6.98780823,cover=180.095779
+				27:leaf=0.0453356728,cover=169.642181
+				28:leaf=0.00293074548,cover=10.4535923
+
+
+booster[49]
+0:[market_prob<0.180000007] yes=1,no=2,missing=2,gain=209.977402,cover=13193.4785
+	1:[market_prob<0.0700000003] yes=3,no=4,missing=4,gain=43.1730499,cover=1094.48877
+		3:[market_prob<0.0199999996] yes=7,no=8,missing=8,gain=5.83558655,cover=297.775208
+			7:[tau_minutes<5.38333321] yes=15,no=16,missing=16,gain=1.19004059,cover=76.6995087
+				15:leaf=-0.0507826582,cover=73.9907303
+				16:leaf=-0.0116888871,cover=2.7087779
+			8:[tau_minutes<11.833333] yes=17,no=18,missing=18,gain=4.48120117,cover=221.075699
+				17:leaf=-0.0340533555,cover=215.507217
+				18:leaf=0.00983770657,cover=5.56849003
+		4:[tau_minutes<1.66666663] yes=9,no=10,missing=10,gain=8.58750153,cover=796.713562
+			9:[price_momentum<0.0799999982] yes=19,no=20,missing=20,gain=3.84155273,cover=48.4823875
+				19:leaf=-0.03778271,cover=47.1832047
+				20:leaf=0.0324487202,cover=1.29918146
+			10:[price_momentum<-0.0500000007] yes=21,no=22,missing=22,gain=4.74979019,cover=748.231201
+				21:leaf=0.0331561081,cover=4.46609497
+				22:leaf=-0.0139893694,cover=743.765137
+	2:[market_prob<0.920000017] yes=5,no=6,missing=6,gain=151.72821,cover=12098.9902
+		5:[market_prob<0.479999989] yes=11,no=12,missing=12,gain=52.825798,cover=11635.6318
+			11:[market_prob<0.300000012] yes=23,no=24,missing=24,gain=9.97129822,cover=4864.54541
+				23:leaf=-0.00697800005,cover=1367.28931
+				24:leaf=-0.00194253307,cover=3497.25586
+			12:[market_prob<0.779999971] yes=25,no=26,missing=26,gain=16.9273834,cover=6771.08691
+				25:leaf=0.00230754353,cover=5567.74951
+				26:leaf=0.00884587783,cover=1203.33728
+		6:[market_prob<0.970000029] yes=13,no=14,missing=14,gain=18.2824402,cover=463.357971
+			13:[tau_minutes<12.8833332] yes=27,no=28,missing=28,gain=4.77069473,cover=292.627655
+				27:leaf=0.0226303656,cover=290.611115
+				28:leaf=-0.0418434553,cover=2.01656628
+			14:[price_momentum<0.0199999996] yes=29,no=30,missing=30,gain=5.59406281,cover=170.730301
+				29:leaf=0.0450745337,cover=160.340836
+				30:leaf=0.00653074449,cover=10.3894558

@@ -1,0 +1,2 @@
+uv run python -m http.server 8765
+http://localhost:8765/tools/live_trading_dashboard.html

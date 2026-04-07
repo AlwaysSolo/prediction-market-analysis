@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
-from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
 
 load_dotenv()
 
@@ -38,6 +36,22 @@ ORDER_FILLED_ABI = {
 
 # Public Polygon RPC
 POLYGON_RPC = os.getenv("POLYGON_RPC", "")
+
+
+def _web3_cls():
+    from web3 import Web3
+
+    return Web3
+
+
+def _extra_data_to_poa_middleware():
+    from web3.middleware import ExtraDataToPOAMiddleware
+
+    return ExtraDataToPOAMiddleware
+
+
+def _to_checksum_address(address: str) -> str:
+    return _web3_cls().to_checksum_address(address)
 
 
 @dataclass
@@ -104,13 +118,14 @@ class PolygonClient:
 
     def __init__(self, rpc_url: Optional[str] = None):
         self.rpc_url = rpc_url or POLYGON_RPC
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 30}))
-        self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        web3_cls = _web3_cls()
+        self.w3 = web3_cls(web3_cls.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 30}))
+        self.w3.middleware_onion.inject(_extra_data_to_poa_middleware(), layer=0)
 
         # Create contract instances for decoding
-        self.ctf_exchange = self.w3.eth.contract(address=Web3.to_checksum_address(CTF_EXCHANGE), abi=[ORDER_FILLED_ABI])
+        self.ctf_exchange = self.w3.eth.contract(address=_to_checksum_address(CTF_EXCHANGE), abi=[ORDER_FILLED_ABI])
         self.negrisk_exchange = self.w3.eth.contract(
-            address=Web3.to_checksum_address(NEGRISK_CTF_EXCHANGE),
+            address=_to_checksum_address(NEGRISK_CTF_EXCHANGE),
             abi=[ORDER_FILLED_ABI],
         )
 
@@ -153,7 +168,7 @@ class PolygonClient:
 
         logs = self.w3.eth.get_logs(
             {
-                "address": Web3.to_checksum_address(contract_address),
+                "address": _to_checksum_address(contract_address),
                 "topics": [ORDER_FILLED_TOPIC],
                 "fromBlock": from_block,
                 "toBlock": to_block,

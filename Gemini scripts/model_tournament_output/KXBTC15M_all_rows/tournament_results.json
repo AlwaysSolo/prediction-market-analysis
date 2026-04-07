@@ -1,0 +1,57 @@
+{
+  "metadata": {
+    "series": "KXBTC15M",
+    "sample_rows": 11934913,
+    "train_rows": 7638344,
+    "validation_rows": 1909586,
+    "test_rows": 2386983,
+    "using_sample": false,
+    "feature_names": [
+      "z_implied",
+      "tau_minutes",
+      "price_momentum",
+      "abs_price_momentum",
+      "price_direction",
+      "distance_from_mid"
+    ]
+  },
+  "results": [
+    {
+      "model": "7. LightGBM",
+      "log_loss": 0.4990234934369504
+    },
+    {
+      "model": "8. CatBoost",
+      "log_loss": 0.5002915547575966
+    },
+    {
+      "model": "6. Gradient Boosted Trees (XGBoost)",
+      "log_loss": 0.5004461431439409
+    },
+    {
+      "model": "1. Standard Gaussian (The Market)",
+      "log_loss": 0.5026901117496136
+    },
+    {
+      "model": "5. Machine Learning (Logistic Regression)",
+      "log_loss": 0.5028357590151408
+    },
+    {
+      "model": "4. Momentum-Adjusted Gaussian",
+      "log_loss": 0.5037542190525781
+    },
+    {
+      "model": "2. Fat Tails (Student-T, df=5)",
+      "log_loss": 0.5058349050349684
+    },
+    {
+      "model": "9. PySR (Symbolic Regression)",
+      "log_loss": 0.5077033684672679
+    },
+    {
+      "model": "3. Extreme Fat Tails (Student-T, df=3)",
+      "log_loss": 0.5090620453312498
+    }
+  ],
+  "best_model": "7. LightGBM"
+}

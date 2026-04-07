@@ -1,0 +1,32 @@
+[
+  {
+    "market_side":"NO-leaning",
+    "sample_size":1177664,
+    "best_model":"LightGBM",
+    "best_log_loss":0.4928873165,
+    "Standard Gaussian":0.4976872239,
+    "Student-T df=5":0.5012500063,
+    "Student-T df=3":0.5047037586,
+    "Momentum-Adjusted Gaussian":0.4987591715,
+    "Machine Learning (Logistic Regression)":0.4976178544,
+    "XGBoost":0.4948982796,
+    "LightGBM":0.4928873165,
+    "CatBoost":0.4947345889,
+    "PySR (Symbolic Regression)":0.5034479297
+  },
+  {
+    "market_side":"YES-leaning",
+    "sample_size":1209319,
+    "best_model":"LightGBM",
+    "best_log_loss":0.5039917996,
+    "Standard Gaussian":0.5080303574,
+    "Student-T df=5":0.5106654322,
+    "Student-T df=3":0.5136301532,
+    "Momentum-Adjusted Gaussian":0.5091735898,
+    "Machine Learning (Logistic Regression)":0.5082679193,
+    "XGBoost":0.5059568334,
+    "LightGBM":0.5039917996,
+    "CatBoost":0.5057568697,
+    "PySR (Symbolic Regression)":0.5124745972
+  }
+]

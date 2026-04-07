@@ -1,7 +1,7 @@
 """Indexer for Polymarket markets data."""
 
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -43,7 +43,7 @@ class PolymarketMarketsIndexer(Indexer):
 
         for markets, next_offset in client.iter_markets(offset=offset):
             if markets:
-                fetched_at = datetime.utcnow()
+                fetched_at = datetime.now(UTC)
                 for market in markets:
                     record = asdict(market)
                     record["_fetched_at"] = fetched_at

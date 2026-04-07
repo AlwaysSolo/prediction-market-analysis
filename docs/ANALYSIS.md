@@ -5,10 +5,10 @@ Analysis scripts live in `src/analysis/{kalshi,polymarket}/` and extend the `Ana
 ## Running Analyses
 
 ```bash
-make analyze
+uv run main.py analyze
 ```
 
-This opens an interactive menu to select which analysis to run. You can run all analyses or select a specific one. Output files (PNG, PDF, CSV, JSON) are saved to `output/`.
+This opens an interactive menu to select which analysis to run. On terminals where the arrow-key menu is unavailable, the CLI falls back to a numbered prompt. You can run all analyses with `uv run main.py analyze all` or a specific one with `uv run main.py analyze <analysis_name>`. Output files (PNG, PDF, CSV, JSON) are saved to `output/`.
 
 ## Basic Template
 

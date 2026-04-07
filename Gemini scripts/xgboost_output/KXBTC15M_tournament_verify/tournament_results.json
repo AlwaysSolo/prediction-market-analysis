@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "model": "1. Standard Gaussian (The Market)",
+      "log_loss": 0.5000006695702476
+    },
+    {
+      "model": "2. Fat Tails (Student-T, df=5)",
+      "log_loss": 0.503686973485411
+    },
+    {
+      "model": "3. Extreme Fat Tails (Student-T, df=3)",
+      "log_loss": 0.5071542939161984
+    },
+    {
+      "model": "4. Momentum-Adjusted Gaussian",
+      "log_loss": 0.50021819524676
+    },
+    {
+      "model": "5. Machine Learning (Logistic Regression)",
+      "log_loss": 0.500346874776278
+    },
+    {
+      "model": "6. Gradient Boosted Trees (XGBoost)",
+      "log_loss": 0.5000039339065552
+    }
+  ],
+  "best_model": "1. Standard Gaussian (The Market)"
+}

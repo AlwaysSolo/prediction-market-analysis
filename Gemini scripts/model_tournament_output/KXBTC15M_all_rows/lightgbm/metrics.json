@@ -1,0 +1,58 @@
+{
+  "validation_log_loss": 0.4992255716039058,
+  "best_iteration": 1600,
+  "best_params": {
+    "n_estimators": 1600,
+    "learning_rate": 0.02,
+    "num_leaves": 127,
+    "max_depth": -1,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "min_child_samples": 300,
+    "reg_lambda": 2.0
+  },
+  "candidates": [
+    {
+      "candidate": 1,
+      "params": {
+        "n_estimators": 1200,
+        "learning_rate": 0.03,
+        "num_leaves": 63,
+        "max_depth": -1,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "min_child_samples": 200,
+        "reg_lambda": 1.0
+      },
+      "validation_log_loss": 0.49968754952748895
+    },
+    {
+      "candidate": 2,
+      "params": {
+        "n_estimators": 1600,
+        "learning_rate": 0.02,
+        "num_leaves": 127,
+        "max_depth": -1,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_samples": 300,
+        "reg_lambda": 2.0
+      },
+      "validation_log_loss": 0.4992255716039058
+    }
+  ],
+  "series": "KXBTC15M",
+  "sample_rows": 11934913,
+  "train_rows": 7638344,
+  "validation_rows": 1909586,
+  "test_rows": 2386983,
+  "feature_names": [
+    "z_implied",
+    "tau_minutes",
+    "price_momentum",
+    "abs_price_momentum",
+    "price_direction",
+    "distance_from_mid"
+  ],
+  "log_loss_test": 0.4990234934369504
+}

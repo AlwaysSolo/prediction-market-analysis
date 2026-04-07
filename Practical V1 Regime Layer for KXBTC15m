@@ -1,0 +1,160 @@
+
+# Practical V1 Regime Layer for KXBTC15M
+
+## Summary
+Add a **policy-layer regime classifier** above the current models, not a new model first. The v1 regime must use only **KXBTC15M features already present in offline training, live scoring, and research/archive data**, so it works everywhere without retraining or requiring hourly context.
+
+Chosen behavior:
+- Primary use: **hard gate**
+- In detected **downtrend**, **block YES trades**
+- In `neutral` and `uptrend`, keep the current model/policy behavior unchanged
+- Do **not** symmetrically block `NO` in uptrend in v1
+- Do **not** depend on `KXBTCD` hourly context in v1, because current live/archive runs do not consistently have it
+
+Reason for this shape:
+- In the current research archive, a simple bearish composite already isolates the main failure mode:
+  - `price_momentum <= -0.02`
+  - `signed_contracts_sum_300s <= -5`
+  - `yes_taker_share_300s <= 0.40`
+  - with **2-of-3 bearish votes**, YES trades were roughly `20%` win rate and deeply negative, while NO trades in the same states remained positive
+- This makes the first regime layer a **protective filter**, not a full routing system
+
+## Regime Definition
+Use a **3-state label** per scoreable feature state:
+
+- `downtrend`
+- `neutral`
+- `uptrend`
+
+Use these existing KXBTC15M features only:
+- `price_momentum`
+- `signed_contracts_sum_300s`
+- `yes_taker_share_300s`
+
+Define votes:
+
+**Bearish vote conditions**
+- `price_momentum <= -0.02`
+- `signed_contracts_sum_300s <= -5`
+- `yes_taker_share_300s <= 0.40`
+
+**Bullish vote conditions**
+- `price_momentum >= +0.02`
+- `signed_contracts_sum_300s >= +5`
+- `yes_taker_share_300s >= 0.60`
+
+**Classification**
+- `downtrend` if bearish votes `>= 2`
+- `uptrend` if bullish votes `>= 2`
+- otherwise `neutral`
+
+Explicit v1 decisions:
+- Do **not** use `price_return_300s` directly in the regime label. It looked too noisy / mean-reverting in the archive for a first hard-gate rule.
+- Do **not** add an oversold rebound exception in v1. Prefer protection over catching knife-bounce reversals.
+- Do **not** add model-specific regime definitions in v1. One shared regime label should apply to all current regularized models.
+
+**Trading behavior**
+- If regime is `downtrend` and chosen side is `YES`: block trade with a dedicated reason like `blocked_by_regime_downtrend`
+- If regime is `downtrend` and chosen side is `NO`: allow normal policy evaluation
+- If regime is `neutral` or `uptrend`: no regime-side blocking in v1
+
+## Implementation Changes
+Add one small reusable subsystem, then thread it through offline evaluation and live/research logging.
+
+### 1. New regime evaluator
+Create a small regime utility in the Kalshi live stack that:
+- accepts a scoreable feature state
+- computes bearish vote count, bullish vote count, and final regime label
+- returns a compact structured result such as:
+  - `regime_label`
+  - `bearish_vote_count`
+  - `bullish_vote_count`
+  - component booleans for the 3 signals
+
+This should operate on current feature-state values, not model outputs.
+
+### 2. Live policy integration
+Apply the regime evaluator in both:
+- live execution policy path
+- research sampler path
+
+Behavior:
+- evaluate regime after feature/scorer state exists and before final trade approval/recording
+- if side is `YES` and regime is `downtrend`, block with explicit reason
+- preserve all existing edge/price/tau/quote filters
+
+This keeps the regime as a clean overlay instead of mixing it into model scoring.
+
+### 3. Logging and analysis fields
+Extend research/live decision payloads and archive rows to include:
+- `regime_label`
+- `bearish_vote_count`
+- `bullish_vote_count`
+- `regime_price_momentum_bearish`
+- `regime_signed_flow_bearish`
+- `regime_yes_share_bearish`
+
+For parity, include bullish component flags too.
+
+Update performance analysis/reporting so it can break down:
+- PnL by regime
+- win rate by regime
+- side performance by regime
+- buckets within each regime
+
+### 4. Offline evaluation pass
+Add regime labeling to offline trade-record generation and evaluation outputs so the same rule can be tested before live deployment.
+
+Minimum offline outputs:
+- counts of rows/trades by regime
+- YES/NO performance by regime
+- what test PnL would have been with the v1 hard gate:
+  - current policy
+  - current policy + `downtrend blocks YES`
+
+### 5. Public interface/type additions
+Add regime fields anywhere a scored or approved candidate is serialized for later analysis. At minimum:
+- live/research event payloads
+- canonical analysis rows
+- optional trade-record exports
+
+Do not change model artifact format in v1. This is a policy/logging addition, not a retraining schema change.
+
+## Test Plan
+- Regime classification unit tests
+  - bearish `2-of-3` => `downtrend`
+  - bullish `2-of-3` => `uptrend`
+  - mixed / insufficient votes => `neutral`
+  - exact threshold boundaries behave as specified
+
+- Policy integration tests
+  - `YES` trade in `downtrend` is blocked with regime-specific reason
+  - `NO` trade in `downtrend` still passes to normal policy checks
+  - `YES` trade in `neutral` is not blocked by regime
+  - existing non-regime filters still fire normally
+
+- Research/live logging tests
+  - recorded and skipped events include regime fields
+  - archive/performance rows carry regime columns without breaking current reports
+
+- Offline evaluation tests
+  - regime labels appear on trade records
+  - counterfactual “block YES in downtrend” metrics compute correctly
+
+- Acceptance check on existing archive data
+  - all scoreable records receive a regime label
+  - the archive confirms `downtrend + YES` is materially worse than `neutral + YES`
+  - the v1 hard gate reduces YES-side drawdown in bearish conditions
+
+## Assumptions and Defaults
+- v1 is a **policy-layer protection**, not a retrained model
+- v1 uses only **KXBTC15M-local features already present everywhere**
+- v1 keeps model selection unchanged
+- v1 blocks only **YES-in-downtrend**
+- v1 does not use hourly-context features, BTC spot, or quote-microstructure features for regime classification
+- v1 prioritizes **drawdown protection and interpretability** over maximum trade coverage
+- A later v2 can add:
+  - asymmetric thresholds by regime
+  - model routing by regime
+  - oversold rebound exceptions
+  - hourly-context regime inputs when those are guaranteed in live runs

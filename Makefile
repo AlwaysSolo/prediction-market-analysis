@@ -9,7 +9,7 @@ run:
 	$(RUN) analyze $(filter-out $@,$(MAKECMDGOALS))
 
 index:
-	$(RUN) index
+	$(RUN) index $(filter-out $@,$(MAKECMDGOALS))
 
 package:
 	$(RUN) package
@@ -26,8 +26,7 @@ test:
 	uv run pytest tests/ -v
 
 setup:
-	bash scripts/install-tools.sh
-	bash scripts/download.sh
+	$(RUN) setup
 
 %:
 	@:

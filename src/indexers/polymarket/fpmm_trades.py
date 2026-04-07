@@ -2,13 +2,12 @@
 
 import concurrent.futures
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 from tqdm import tqdm
-from web3 import Web3
 
 from src.common.indexer import Indexer
 from src.indexers.polymarket.blockchain import PolygonClient
@@ -20,12 +19,18 @@ FPMM_START_BLOCK = 4023693
 
 # Event signatures (keccak256 hashes)
 # FPMMBuy(address indexed buyer, uint256 investmentAmount, uint256 feeAmount, uint256 indexed outcomeIndex, uint256 outcomeTokensBought)
-FPMM_BUY_TOPIC = "0x" + Web3.keccak(text="FPMMBuy(address,uint256,uint256,uint256,uint256)").hex()
+FPMM_BUY_TOPIC = "0x4f62630f51608fc8a7603a9391a5101e58bd7c276139366fc107dc3b67c3dcf8"
 # FPMMSell(address indexed seller, uint256 returnAmount, uint256 feeAmount, uint256 indexed outcomeIndex, uint256 outcomeTokensSold)
-FPMM_SELL_TOPIC = "0x" + Web3.keccak(text="FPMMSell(address,uint256,uint256,uint256,uint256)").hex()
+FPMM_SELL_TOPIC = "0xadcf2a240ed9300d681d9a3f5382b6c1beed1b7e46643e0c7b42cbe6e2d766b4"
 
 DATA_DIR = Path("data/polymarket/legacy_trades")
 CURSOR_FILE = Path("data/polymarket/.legacy_backfill_block_cursor")
+
+
+def _to_checksum_address(address: str) -> str:
+    from web3 import Web3
+
+    return Web3.to_checksum_address(address)
 
 
 @dataclass
@@ -85,7 +90,7 @@ class PolymarketLegacyTradesIndexer(Indexer):
         """Decode an FPMMBuy event log."""
         # Indexed: buyer (topic1), outcomeIndex (topic2)
         # Non-indexed: investmentAmount, feeAmount, outcomeTokensBought
-        buyer = Web3.to_checksum_address("0x" + log["topics"][1].hex()[-40:])
+        buyer = _to_checksum_address("0x" + log["topics"][1].hex()[-40:])
         outcome_index = int.from_bytes(log["topics"][2], "big")
 
         # Decode non-indexed data
@@ -111,7 +116,7 @@ class PolymarketLegacyTradesIndexer(Indexer):
         """Decode an FPMMSell event log."""
         # Indexed: seller (topic1), outcomeIndex (topic2)
         # Non-indexed: returnAmount, feeAmount, outcomeTokensSold
-        seller = Web3.to_checksum_address("0x" + log["topics"][1].hex()[-40:])
+        seller = _to_checksum_address("0x" + log["topics"][1].hex()[-40:])
         outcome_index = int.from_bytes(log["topics"][2], "big")
 
         # Decode non-indexed data
@@ -255,7 +260,7 @@ class PolymarketLegacyTradesIndexer(Indexer):
             with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                 for batch_start in range(0, len(ranges), self._max_workers):
                     batch = ranges[batch_start : batch_start + self._max_workers]
-                    fetched_at = datetime.utcnow()
+                    fetched_at = datetime.now(UTC)
 
                     # Submit all chunks in this batch
                     futures = {

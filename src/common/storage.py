@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Union
 
@@ -36,7 +36,7 @@ class ParquetStorage:
         return self._existing_tickers
 
     def append_markets(self, markets: list) -> int:
-        fetched_at = datetime.utcnow()
+        fetched_at = datetime.now(UTC)
         existing = self._load_existing_tickers()
 
         # Filter out duplicates

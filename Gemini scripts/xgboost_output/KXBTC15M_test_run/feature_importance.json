@@ -1,0 +1,26 @@
+{
+  "gain": {
+    "market_prob": 489.4999694824219,
+    "tau_minutes": 8.446301460266113,
+    "price_momentum": 7.978789329528809,
+    "abs_price_momentum": 7.401813983917236,
+    "distance_from_mid": 210.59657287597656,
+    "z_implied": 2685.927001953125
+  },
+  "weight": {
+    "market_prob": 505.0,
+    "tau_minutes": 117.0,
+    "price_momentum": 56.0,
+    "abs_price_momentum": 22.0,
+    "distance_from_mid": 43.0,
+    "z_implied": 6.0
+  },
+  "cover": {
+    "market_prob": 5176.04638671875,
+    "tau_minutes": 1287.22265625,
+    "price_momentum": 701.1702880859375,
+    "abs_price_momentum": 879.9955444335938,
+    "distance_from_mid": 4080.343505859375,
+    "z_implied": 12189.0185546875
+  }
+}

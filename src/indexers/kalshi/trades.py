@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -113,7 +113,7 @@ class KalshiTradesIndexer(Indexer):
                 )
                 if not trades:
                     return []
-                fetched_at = datetime.utcnow()
+                fetched_at = datetime.now(UTC)
                 return [
                     {**asdict(t), "_fetched_at": fetched_at} for t in trades if t.trade_id not in existing_trade_ids
                 ]

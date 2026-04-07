@@ -23,10 +23,12 @@ Requires Python 3.9+. Install dependencies with [uv](https://github.com/astral-s
 uv sync
 ```
 
+Windows 11 and macOS/Linux use the same Python entrypoint. The `Makefile` is now just a thin wrapper around these commands.
+
 Download and extract the pre-collected dataset (36GiB compressed):
 
 ```bash
-make setup
+uv run main.py setup
 ```
 
 This downloads `data.tar.zst` from [Cloudflare R2 Storage](https://s3.jbecker.dev/data.tar.zst) and extracts it to `data/`.
@@ -36,28 +38,28 @@ This downloads `data.tar.zst` from [Cloudflare R2 Storage](https://s3.jbecker.de
 Collect market and trade data from prediction market APIs:
 
 ```bash
-make index
+uv run main.py index
 ```
 
-This opens an interactive menu to select which indexer to run. Data is saved to `data/kalshi/` and `data/polymarket/` directories. Progress is saved automatically, so you can interrupt and resume collection.
+This opens an interactive menu to select which indexer to run. On terminals where the arrow-key menu is unavailable, the CLI falls back to a numbered prompt. You can also run an indexer directly with `uv run main.py index <indexer_name>`. Data is saved to `data/kalshi/` and `data/polymarket/` directories. Progress is saved automatically, so you can interrupt and resume collection.
 
 ### Running Analyses
 
 ```bash
-make analyze
+uv run main.py analyze
 ```
 
-This opens an interactive menu to select which analysis to run. You can run all analyses or select a specific one. Output files (PNG, PDF, CSV, JSON) are saved to `output/`.
+This opens an interactive menu to select which analysis to run. On terminals where the arrow-key menu is unavailable, the CLI falls back to a numbered prompt. You can run all analyses with `uv run main.py analyze all` or a specific one with `uv run main.py analyze <analysis_name>`. Output files (PNG, PDF, CSV, JSON) are saved to `output/`.
 
 ### Packaging Data
 
 To compress the data directory for storage/distribution:
 
 ```bash
-make package
+uv run main.py package
 ```
 
-This creates a zstd-compressed tar archive (`data.tar.zst`) and removes the `data/` directory.
+This creates a zstd-compressed tar archive (`data.tar.zst`) using Python, so it works on Windows without GNU `tar` or external `zstd`.
 
 ## Project Structure
 
