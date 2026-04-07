@@ -54,7 +54,12 @@ def _resolve_model_and_policy(run_dir: Path | None, policy_file: str | None) -> 
     return model_file, resolved_policy
 
 
-def _build_live_signal_config(environment: KalshiEnvironment, policy_file: Path) -> KalshiSignalRiskConfig:
+def _build_live_signal_config(
+    environment: KalshiEnvironment,
+    policy_file: Path,
+    *,
+    allow_stacking: bool = False,
+) -> KalshiSignalRiskConfig:
     base_config, _loaded_policy = signal_config_from_env_and_policy(environment, policy_file)
     return replace(
         base_config,
@@ -64,7 +69,7 @@ def _build_live_signal_config(environment: KalshiEnvironment, policy_file: Path)
         capital_pct_per_order=None,
         kelly_fraction_multiplier=None,
         kelly_fraction_cap_pct=None,
-        allow_stacking=False,
+        allow_stacking=allow_stacking,
     )
 
 
@@ -188,7 +193,11 @@ async def _run(args: argparse.Namespace) -> None:
     )
     credentials = KalshiCredentials.from_env(environment)
 
-    signal_config = _build_live_signal_config(environment, policy_file)
+    signal_config = _build_live_signal_config(
+        environment,
+        policy_file,
+        allow_stacking=args.allow_stacking,
+    )
     execution_log_dir = Path(args.log_root) / "execution" / "bagged_lasso"
     signal_log_dir = Path(args.log_root) / "signal" / "bagged_lasso"
     execution_config = _build_execution_config(
@@ -331,6 +340,11 @@ def main() -> None:
     )
     parser.add_argument("--mode", choices=["shadow", "live"], default="shadow")
     parser.add_argument("--confirm-live", action="store_true")
+    parser.add_argument(
+        "--allow-stacking",
+        action="store_true",
+        help="Enable stacking for the dedicated bagged-lasso runner. Off by default.",
+    )
     parser.add_argument("--environment", choices=["production"], default="production")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--policy-file", default=None)

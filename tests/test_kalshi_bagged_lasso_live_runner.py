@@ -54,6 +54,28 @@ def test_build_live_signal_config_forces_live_profile_overrides(tmp_path: Path) 
     assert config.allow_stacking is False
 
 
+def test_build_live_signal_config_allows_explicit_stacking_override(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "allow_stacking": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = _build_live_signal_config(
+        KalshiEnvironment.PRODUCTION,
+        policy_path,
+        allow_stacking=True,
+    )
+
+    assert config.allow_stacking is True
+
+
 def test_validate_live_runner_preflight_rejects_missing_confirm_live() -> None:
     with pytest.raises(RuntimeError, match="--confirm-live"):
         validate_live_runner_preflight(
