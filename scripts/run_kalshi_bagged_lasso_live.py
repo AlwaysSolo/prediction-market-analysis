@@ -39,6 +39,16 @@ from scripts.run_kalshi_regularized_execution_engine import (  # noqa: E402
     signal_config_from_env_and_policy,
 )
 
+DEDICATED_LIVE_MAX_TAU_MINUTES = 10.0
+DEDICATED_LIVE_BLOCKED_REGIME_LABELS = frozenset({"neutral"})
+DEDICATED_LIVE_BANNED_COMBO_BUCKETS = frozenset(
+    {
+        "12-14|60-70|70-80|5-10",
+        "10-12|40-50|50-60|5-10",
+        "10-12|30-40|30-40|5-10",
+    }
+)
+
 
 def _resolve_model_and_policy(run_dir: Path | None, policy_file: str | None) -> tuple[Path, Path]:
     if run_dir is not None:
@@ -65,11 +75,15 @@ def _build_live_signal_config(
         base_config,
         apply_regime_hard_gate=True,
         enable_bucket_ban_policy=True,
+        enable_combo_ban_policy=True,
+        banned_combo_buckets=DEDICATED_LIVE_BANNED_COMBO_BUCKETS,
+        blocked_regime_labels=DEDICATED_LIVE_BLOCKED_REGIME_LABELS,
         contracts_per_order=1,
         capital_pct_per_order=None,
         kelly_fraction_multiplier=None,
         kelly_fraction_cap_pct=None,
         allow_stacking=allow_stacking,
+        max_tau_minutes=min(base_config.max_tau_minutes, DEDICATED_LIVE_MAX_TAU_MINUTES),
     )
 
 

@@ -40,17 +40,27 @@ def test_build_live_signal_config_forces_live_profile_overrides(tmp_path: Path) 
 
     assert config.edge_threshold_cents == 6.0
     assert config.min_tau_minutes == 0.0
-    assert config.max_tau_minutes == 12.0
+    assert config.max_tau_minutes == 10.0
     assert config.price_band_min_cents == 10
     assert config.price_band_max_cents == 90
     assert config.reserve_cash_pct == 30.0
     assert config.slippage_pct == 1.0
     assert config.apply_regime_hard_gate is True
     assert config.enable_bucket_ban_policy is True
+    assert config.enable_combo_ban_policy is True
     assert config.contracts_per_order == 1
     assert config.capital_pct_per_order is None
     assert config.kelly_fraction_multiplier is None
     assert config.kelly_fraction_cap_pct is None
+    assert config.max_tau_minutes == 10.0
+    assert config.blocked_regime_labels == frozenset({"neutral"})
+    assert config.banned_combo_buckets == frozenset(
+        {
+            "12-14|60-70|70-80|5-10",
+            "10-12|40-50|50-60|5-10",
+            "10-12|30-40|30-40|5-10",
+        }
+    )
     assert config.allow_stacking is False
 
 

@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 from src.live.kalshi.bucket_policy import (
+    DEFAULT_BANNED_COMBO_BUCKETS,
     DEFAULT_BANNED_NO_PRICE_BUCKETS,
     DEFAULT_BANNED_YES_PRICE_BUCKETS,
     DEFAULT_BANNED_YES_PROBABILITY_BUCKETS,
@@ -22,6 +23,7 @@ from src.live.kalshi.bucket_policy import (
     bucket_policy_fields,
     build_chosen_side_buckets,
     evaluate_bucket_ban_policy,
+    evaluate_combo_ban_policy,
     parse_bucket_csv,
 )
 from src.live.kalshi.config import KalshiEnvironment
@@ -107,6 +109,9 @@ class KalshiSignalRiskConfig:
     banned_yes_price_buckets: frozenset[str] = field(default_factory=lambda: DEFAULT_BANNED_YES_PRICE_BUCKETS)
     banned_yes_probability_buckets: frozenset[str] = field(default_factory=lambda: DEFAULT_BANNED_YES_PROBABILITY_BUCKETS)
     banned_no_price_buckets: frozenset[str] = field(default_factory=lambda: DEFAULT_BANNED_NO_PRICE_BUCKETS)
+    enable_combo_ban_policy: bool = False
+    banned_combo_buckets: frozenset[str] = field(default_factory=lambda: DEFAULT_BANNED_COMBO_BUCKETS)
+    blocked_regime_labels: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         if self.edge_threshold_cents < 0:
@@ -199,6 +204,15 @@ class KalshiSignalRiskConfig:
             banned_no_price_buckets=parse_bucket_csv(
                 _resolve_env_value(environment, "BANNED_NO_PRICE_BUCKETS"),
                 default=DEFAULT_BANNED_NO_PRICE_BUCKETS,
+            ),
+            enable_combo_ban_policy=_parse_bool(_resolve_env_value(environment, "ENABLE_COMBO_BAN_POLICY") or "false"),
+            banned_combo_buckets=parse_bucket_csv(
+                _resolve_env_value(environment, "BANNED_COMBO_BUCKETS"),
+                default=DEFAULT_BANNED_COMBO_BUCKETS,
+            ),
+            blocked_regime_labels=parse_bucket_csv(
+                _resolve_env_value(environment, "BLOCKED_REGIME_LABELS"),
+                default=frozenset(),
             ),
         )
 
@@ -1118,6 +1132,53 @@ class KalshiSignalRiskEngine:
                 regime=regime,
                 chosen_buckets=chosen_buckets,
                 bucket_policy=bucket_policy,
+            )
+
+        combo_policy = evaluate_combo_ban_policy(
+            enabled=self.config.enable_combo_ban_policy,
+            side=side,
+            buckets=chosen_buckets,
+            banned_combo_buckets=self.config.banned_combo_buckets,
+        )
+        if combo_policy.is_blocked:
+            return self._blocked_candidate(
+                score_state,
+                side=side,
+                predicted_no_probability=predicted_no_probability,
+                raw_model_edge=raw_model_edge,
+                post_cost_edge=post_cost_edge,
+                yes_post_cost_edge=yes_post_cost_edge,
+                no_post_cost_edge=no_post_cost_edge,
+                reference_price_cents=reference_price_cents,
+                max_acceptable_entry_price_cents=max_acceptable_entry_price_cents,
+                block_reason="blocked_by_combo_policy",
+                contracts=contracts,
+                entry_cost_dollars=entry_cost_dollars,
+                fees_dollars=fees_dollars,
+                cash_required_dollars=cash_required_dollars,
+                regime=regime,
+                chosen_buckets=chosen_buckets,
+                bucket_policy=combo_policy,
+            )
+
+        if regime.regime_label in self.config.blocked_regime_labels:
+            return self._blocked_candidate(
+                score_state,
+                side=side,
+                predicted_no_probability=predicted_no_probability,
+                raw_model_edge=raw_model_edge,
+                post_cost_edge=post_cost_edge,
+                yes_post_cost_edge=yes_post_cost_edge,
+                no_post_cost_edge=no_post_cost_edge,
+                reference_price_cents=reference_price_cents,
+                max_acceptable_entry_price_cents=max_acceptable_entry_price_cents,
+                block_reason=f"blocked_by_regime_{regime.regime_label}",
+                contracts=contracts,
+                entry_cost_dollars=entry_cost_dollars,
+                fees_dollars=fees_dollars,
+                cash_required_dollars=cash_required_dollars,
+                regime=regime,
+                chosen_buckets=chosen_buckets,
             )
 
         if self.config.apply_regime_hard_gate and side == "YES" and regime.regime_label == "downtrend":

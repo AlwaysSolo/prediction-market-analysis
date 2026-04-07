@@ -26,6 +26,7 @@ DEFAULT_BANNED_YES_TAU_BUCKETS: frozenset[str] = frozenset({"2-4"})
 DEFAULT_BANNED_YES_PRICE_BUCKETS: frozenset[str] = frozenset({"0-10", "10-20", "20-30", "30-40"})
 DEFAULT_BANNED_YES_PROBABILITY_BUCKETS: frozenset[str] = frozenset({"0-10", "10-20", "20-30", "30-40", "40-50"})
 DEFAULT_BANNED_NO_PRICE_BUCKETS: frozenset[str] = frozenset({"20-30"})
+DEFAULT_BANNED_COMBO_BUCKETS: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,17 @@ def build_chosen_side_buckets(
     )
 
 
+def combo_bucket_key(buckets: KalshiChosenSideBuckets) -> str:
+    return "|".join(
+        (
+            buckets.tau_bucket,
+            buckets.price_bucket,
+            buckets.chosen_side_probability_bucket,
+            buckets.chosen_side_edge_bucket,
+        )
+    )
+
+
 def evaluate_bucket_ban_policy(
     *,
     enabled: bool,
@@ -142,6 +154,21 @@ def evaluate_bucket_ban_policy(
 
     if buckets.price_bucket in banned_no_price_buckets:
         return KalshiBucketPolicyEvaluation(True, "price", buckets.price_bucket, side)
+    return KalshiBucketPolicyEvaluation(is_blocked=False)
+
+
+def evaluate_combo_ban_policy(
+    *,
+    enabled: bool,
+    side: str | None,
+    buckets: KalshiChosenSideBuckets,
+    banned_combo_buckets: Collection[str],
+) -> KalshiBucketPolicyEvaluation:
+    if not enabled or side not in {"YES", "NO"}:
+        return KalshiBucketPolicyEvaluation(is_blocked=False)
+    combo_key = combo_bucket_key(buckets)
+    if combo_key in banned_combo_buckets:
+        return KalshiBucketPolicyEvaluation(True, "combo", combo_key, side)
     return KalshiBucketPolicyEvaluation(is_blocked=False)
 
 

@@ -558,6 +558,116 @@ def test_signal_risk_blocks_bucket_ban_policy_for_no_price_bucket(tmp_path: Path
     asyncio.run(run())
 
 
+def test_signal_risk_blocks_combo_ban_policy(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scorer = _FakeScorer(
+        collector,
+        {
+            "KXBTC15M-TEST": KalshiLightGBMScoreState(
+                ticker="KXBTC15M-TEST",
+                event_time=event_time,
+                market_prob=0.45,
+                tau_minutes=10.5,
+                predicted_yes_probability=0.56,
+                model_edge=0.11,
+                model_file=Path("fake-model.txt"),
+                last_yes_price_cents=45,
+                last_price_cents=45,
+                yes_bid_cents=44,
+                yes_ask_cents=45,
+                no_bid_cents=55,
+                no_ask_cents=56,
+                ticker_update_time=event_time,
+                trade_yes_prob=0.45,
+                quote_mid_prob=0.445,
+                quote_spread_cents=1,
+                buy_yes_price_cents=45,
+                buy_no_price_cents=56,
+                quote_age_seconds=0.0,
+                last_to_mid_gap=0.0,
+            )
+        },
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            enable_bucket_ban_policy=False,
+            enable_combo_ban_policy=True,
+            banned_combo_buckets=frozenset({"10-12|40-50|50-60|5-10"}),
+        ),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        await signal_engine.stop()
+
+        assert update.approved is False
+        assert update.block_reason == "blocked_by_combo_policy"
+        assert update.bucket_policy_dimension == "combo"
+        assert update.bucket_policy_bucket == "10-12|40-50|50-60|5-10"
+        assert update.side == "YES"
+
+    asyncio.run(run())
+
+
+def test_signal_risk_blocks_neutral_regime_when_configured(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scorer = _FakeScorer(
+        collector,
+        {
+            "KXBTC15M-TEST": KalshiLightGBMScoreState(
+                ticker="KXBTC15M-TEST",
+                event_time=event_time,
+                market_prob=0.55,
+                tau_minutes=8.0,
+                predicted_yes_probability=0.72,
+                model_edge=0.17,
+                model_file=Path("fake-model.txt"),
+                last_yes_price_cents=55,
+                last_price_cents=55,
+                yes_bid_cents=54,
+                yes_ask_cents=55,
+                no_bid_cents=45,
+                no_ask_cents=46,
+                ticker_update_time=event_time,
+                trade_yes_prob=0.55,
+                quote_mid_prob=0.545,
+                quote_spread_cents=1,
+                buy_yes_price_cents=55,
+                buy_no_price_cents=46,
+                quote_age_seconds=0.0,
+                last_to_mid_gap=0.0,
+                price_momentum=0.0,
+                signed_contracts_sum_300s=0.0,
+                yes_taker_share_300s=0.5,
+            )
+        },
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            enable_bucket_ban_policy=False,
+            blocked_regime_labels=frozenset({"neutral"}),
+        ),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        await signal_engine.stop()
+
+        assert update.approved is False
+        assert update.regime_label == "neutral"
+        assert update.block_reason == "blocked_by_regime_neutral"
+
+    asyncio.run(run())
+
+
 def test_signal_risk_blocks_outside_price_band(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     collector = KalshiMarketDataCollector(_collector_config(tmp_path))
     monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.95))
