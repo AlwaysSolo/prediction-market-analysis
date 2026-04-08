@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import uuid
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -35,6 +36,7 @@ from src.live.kalshi.scorer import (
 )
 
 Callback = Callable[["KalshiSignalDecisionUpdate"], Awaitable[None] | None]
+StackingSignature = tuple[str | None, str | None, str | None, str | None, str | None]
 
 
 def utc_now() -> datetime:
@@ -399,6 +401,7 @@ class _PendingReservation:
     created_at: datetime
     expires_at: datetime | None
     is_acknowledged: bool = False
+    stacking_signature: StackingSignature | None = None
 
     def as_position(self) -> KalshiPortfolioPosition:
         return KalshiPortfolioPosition(
@@ -660,6 +663,8 @@ class KalshiSignalRiskEngine:
         self._pending_reservations: dict[str, _PendingReservation] = {}
         self._expired_reservations: dict[str, _ExpiredReservation] = {}
         self._local_open_positions: dict[str, KalshiPortfolioPosition] = {}
+        self._active_stacking_signatures: dict[str, dict[StackingSignature, int]] = defaultdict(dict)
+        self._completed_stacking_signatures: dict[str, set[StackingSignature]] = defaultdict(set)
         self._last_trade_opened_at: datetime | None = None
 
     async def start(self) -> None:
@@ -782,6 +787,7 @@ class KalshiSignalRiskEngine:
             if reservation_source == "expired":
                 self._expired_reservations.pop(feedback.decision_id, None)
                 self._pending_reservations[feedback.decision_id] = reservation
+                self._mark_stacking_signature_active(reservation)
             reservation.is_acknowledged = True
             reservation.expires_at = None
             affected_tickers.add(reservation.ticker)
@@ -793,6 +799,7 @@ class KalshiSignalRiskEngine:
                 self._expired_reservations.pop(feedback.decision_id, None)
             else:
                 self._pending_reservations.pop(feedback.decision_id, None)
+            self._release_stacking_signature_active(reservation)
             affected_tickers.add(reservation.ticker)
             self._states.pop(reservation.ticker, None)
         elif feedback.status == "filled":
@@ -802,6 +809,8 @@ class KalshiSignalRiskEngine:
                 self._expired_reservations.pop(feedback.decision_id, None)
             else:
                 self._pending_reservations.pop(feedback.decision_id, None)
+            self._release_stacking_signature_active(reservation)
+            self._mark_stacking_signature_completed(reservation)
             self._local_open_positions[feedback.decision_id] = KalshiPortfolioPosition(
                 ticker=reservation.ticker,
                 side=reservation.side,
@@ -819,6 +828,7 @@ class KalshiSignalRiskEngine:
                     self._expired_reservations.pop(feedback.decision_id, None)
                 else:
                     self._pending_reservations.pop(feedback.decision_id, None)
+                self._release_stacking_signature_active(reservation)
                 affected_tickers.add(reservation.ticker)
                 self._states.pop(reservation.ticker, None)
             elif local_open_position is not None:
@@ -880,6 +890,7 @@ class KalshiSignalRiskEngine:
             reservation = self._pending_reservations.pop(decision_id, None)
             if reservation is None:
                 continue
+            self._release_stacking_signature_active(reservation)
             self._expired_reservations[decision_id] = _ExpiredReservation(reservation=reservation, expired_at=now)
             expired_tickers.add(reservation.ticker)
             self._states.pop(reservation.ticker, None)
@@ -1096,6 +1107,7 @@ class KalshiSignalRiskEngine:
             predicted_yes_probability=predicted_yes_probability,
             chosen_edge_cents=chosen_evaluation.post_cost_edge * 100.0,
         )
+        stacking_signature = self._build_stacking_signature(side=side, chosen_buckets=chosen_buckets)
         reference_price_cents = chosen_evaluation.entry_price_cents
         max_acceptable_entry_price_cents = chosen_evaluation.max_acceptable_entry_price_cents
         post_cost_edge = chosen_evaluation.post_cost_edge
@@ -1103,6 +1115,26 @@ class KalshiSignalRiskEngine:
         entry_cost_dollars = chosen_evaluation.entry_cost_dollars
         fees_dollars = chosen_evaluation.fees_dollars
         cash_required_dollars = chosen_evaluation.cash_required_dollars
+
+        if self.config.allow_stacking and self._stacking_signature_is_seen(score_state.ticker, stacking_signature):
+            return self._blocked_candidate(
+                score_state,
+                side=side,
+                predicted_no_probability=predicted_no_probability,
+                raw_model_edge=raw_model_edge,
+                post_cost_edge=post_cost_edge,
+                yes_post_cost_edge=yes_post_cost_edge,
+                no_post_cost_edge=no_post_cost_edge,
+                reference_price_cents=reference_price_cents,
+                max_acceptable_entry_price_cents=max_acceptable_entry_price_cents,
+                block_reason="duplicate_signature",
+                contracts=contracts,
+                entry_cost_dollars=entry_cost_dollars,
+                fees_dollars=fees_dollars,
+                cash_required_dollars=cash_required_dollars,
+                regime=regime,
+                chosen_buckets=chosen_buckets,
+            )
 
         bucket_policy = evaluate_bucket_ban_policy(
             enabled=self.config.enable_bucket_ban_policy,
@@ -1677,6 +1709,7 @@ class KalshiSignalRiskEngine:
         decision_id = str(uuid.uuid4())
         generated_at = utc_now()
         self._last_trade_opened_at = generated_at
+        stacking_signature = self._build_stacking_signature_from_candidate(candidate)
         reservation = _PendingReservation(
             decision_id=decision_id,
             ticker=candidate.ticker,
@@ -1688,8 +1721,10 @@ class KalshiSignalRiskEngine:
             created_at=generated_at,
             expires_at=generated_at + timedelta(seconds=self.config.reservation_ttl_seconds),
             is_acknowledged=False,
+            stacking_signature=stacking_signature,
         )
         self._pending_reservations[decision_id] = reservation
+        self._mark_stacking_signature_active(reservation)
         return KalshiTradeIntent(
             decision_id=decision_id,
             ticker=candidate.ticker,
@@ -1807,6 +1842,68 @@ class KalshiSignalRiskEngine:
             round(candidate.fees_dollars, 10) if candidate.approved else None,
             round(candidate.cash_required_dollars, 10) if candidate.approved else None,
         )
+
+    def _build_stacking_signature(
+        self,
+        *,
+        side: str | None,
+        chosen_buckets: Any | None,
+    ) -> StackingSignature | None:
+        if side is None or chosen_buckets is None:
+            return None
+        return (
+            side,
+            chosen_buckets.tau_bucket,
+            chosen_buckets.price_bucket,
+            chosen_buckets.chosen_side_probability_bucket,
+            chosen_buckets.chosen_side_edge_bucket,
+        )
+
+    def _build_stacking_signature_from_candidate(self, candidate: _DecisionCandidate) -> StackingSignature | None:
+        if candidate.side is None:
+            return None
+        return (
+            candidate.side,
+            candidate.tau_bucket,
+            candidate.price_bucket,
+            candidate.chosen_side_probability_bucket,
+            candidate.chosen_side_edge_bucket,
+        )
+
+    def _stacking_signature_is_seen(self, ticker: str, signature: StackingSignature | None) -> bool:
+        if signature is None:
+            return False
+        if signature in self._completed_stacking_signatures.get(ticker, set()):
+            return True
+        return self._active_stacking_signatures.get(ticker, {}).get(signature, 0) > 0
+
+    def _mark_stacking_signature_active(self, reservation: _PendingReservation) -> None:
+        signature = reservation.stacking_signature
+        if signature is None:
+            return
+        ticker_counts = self._active_stacking_signatures[reservation.ticker]
+        ticker_counts[signature] = ticker_counts.get(signature, 0) + 1
+
+    def _release_stacking_signature_active(self, reservation: _PendingReservation) -> None:
+        signature = reservation.stacking_signature
+        if signature is None:
+            return
+        ticker_counts = self._active_stacking_signatures.get(reservation.ticker)
+        if not ticker_counts:
+            return
+        current = ticker_counts.get(signature, 0)
+        if current <= 1:
+            ticker_counts.pop(signature, None)
+        else:
+            ticker_counts[signature] = current - 1
+        if not ticker_counts:
+            self._active_stacking_signatures.pop(reservation.ticker, None)
+
+    def _mark_stacking_signature_completed(self, reservation: _PendingReservation) -> None:
+        signature = reservation.stacking_signature
+        if signature is None:
+            return
+        self._completed_stacking_signatures[reservation.ticker].add(signature)
 
     async def _publish_update(self, update: KalshiSignalDecisionUpdate) -> None:
         await self._logger.write(

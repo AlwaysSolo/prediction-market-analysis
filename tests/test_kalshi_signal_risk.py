@@ -942,7 +942,9 @@ def test_signal_risk_no_stacking_blocks_second_same_ticker(tmp_path: Path, monke
     asyncio.run(run())
 
 
-def test_signal_risk_stacking_enabled_allows_second_same_ticker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_signal_risk_stacking_enabled_allows_second_same_ticker_when_signature_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     collector = KalshiMarketDataCollector(_collector_config(tmp_path))
     monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
 
@@ -962,10 +964,100 @@ def test_signal_risk_stacking_enabled_allows_second_same_ticker(tmp_path: Path, 
         first = await asyncio.wait_for(queue.get(), timeout=0.5)
         assert first.approved is True
 
-        await collector._publish_update(_ticker_update(last_yes_price_cents=56, previous_yes_price_cents=55))
+        await collector._publish_update(_ticker_update(last_yes_price_cents=65, previous_yes_price_cents=55))
         second = await asyncio.wait_for(queue.get(), timeout=0.5)
         assert second.approved is True
         assert second.trade_intent is not None
+        assert second.price_bucket != first.price_bucket
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_signal_risk_stacking_blocks_duplicate_signature_after_accept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,
+        KalshiSignalRiskConfig(allow_stacking=True),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+
+        await collector._publish_update(_ticker_update(last_yes_price_cents=55, previous_yes_price_cents=54))
+        first = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert first.approved is True
+        assert first.trade_intent is not None
+
+        await signal_engine.apply_execution_feedback(
+            KalshiExecutionFeedback(
+                decision_id=first.trade_intent.decision_id,
+                status="accepted",
+                event_time=datetime.now(UTC),
+            )
+        )
+        second = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert second.approved is False
+        assert second.block_reason == "duplicate_signature"
+        assert second.tau_bucket == first.tau_bucket
+        assert second.price_bucket == first.price_bucket
+        assert second.chosen_side_probability_bucket == first.chosen_side_probability_bucket
+        assert second.chosen_side_edge_bucket == first.chosen_side_edge_bucket
+
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_signal_risk_stacking_blocks_duplicate_signature_after_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,
+        KalshiSignalRiskConfig(allow_stacking=True),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+
+        await collector._publish_update(_ticker_update(last_yes_price_cents=55, previous_yes_price_cents=54))
+        first = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert first.approved is True
+        assert first.trade_intent is not None
+
+        await signal_engine.apply_execution_feedback(
+            KalshiExecutionFeedback(
+                decision_id=first.trade_intent.decision_id,
+                status="filled",
+                event_time=datetime.now(UTC),
+                filled_contracts=first.trade_intent.contracts,
+            )
+        )
+        second = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert second.approved is False
+        assert second.block_reason == "duplicate_signature"
+
         await signal_engine.stop()
         await scorer.stop()
         await feature_engine.stop()
@@ -994,15 +1086,51 @@ def test_signal_risk_trade_cooldown_blocks_rapid_reentry(tmp_path: Path, monkeyp
         first = await asyncio.wait_for(queue.get(), timeout=0.5)
         assert first.approved is True
 
-        await collector._publish_update(_ticker_update(last_yes_price_cents=56, previous_yes_price_cents=55))
+        await collector._publish_update(_ticker_update(last_yes_price_cents=65, previous_yes_price_cents=55))
         second = await asyncio.wait_for(queue.get(), timeout=0.5)
         assert second.approved is False
         assert second.block_reason == "cooldown_active"
 
         await asyncio.sleep(0.25)
-        await collector._publish_update(_ticker_update(last_yes_price_cents=57, previous_yes_price_cents=56))
+        await collector._publish_update(_ticker_update(last_yes_price_cents=65, previous_yes_price_cents=64))
         third = await asyncio.wait_for(queue.get(), timeout=0.5)
         assert third.approved is True
+
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_signal_risk_stacking_retry_after_reservation_expiry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,
+        KalshiSignalRiskConfig(allow_stacking=True, reservation_ttl_seconds=0.1),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+
+        await collector._publish_update(_ticker_update(last_yes_price_cents=55, previous_yes_price_cents=54))
+        first = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert first.approved is True
+
+        await asyncio.sleep(0.25)
+        await collector._publish_update(_ticker_update(last_yes_price_cents=56, previous_yes_price_cents=55))
+        second = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert second.approved is True
+        assert second.trade_intent is not None
+        assert first.trade_intent is not None
+        assert second.trade_intent.decision_id != first.trade_intent.decision_id
 
         await signal_engine.stop()
         await scorer.stop()
