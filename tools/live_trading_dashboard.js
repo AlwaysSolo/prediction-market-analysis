@@ -29,6 +29,12 @@ const COMPARISON_COLUMNS = [
 const state = {
   rootHandle: null,
   snapshotFiles: [],
+  folderRootHandle: null,
+  runHandleMap: new Map(),
+  snapshotRunMap: new Map(),
+  selectedRun: "",
+  sourceKind: "idle",
+  sourceLabel: "",
   environment: "demo",
   refreshSeconds: 5,
   lookbackDays: 7,
@@ -63,6 +69,24 @@ function escapeHtml(value) {
 function sync(label, kind = "warn") {
   $("sync-label").textContent = label;
   $("sync-dot").className = `dot${kind === "ok" ? " ok" : kind === "bad" ? " bad" : ""}`;
+}
+
+function setTopMeta({
+  source = "idle",
+  run = "none",
+  mode = "unknown",
+  root = "none",
+  loader = "folder or snapshot",
+  files = 0,
+  focus = "auto",
+} = {}) {
+  $("source-pill").textContent = source;
+  $("run-pill").textContent = run;
+  $("mode-pill").textContent = mode;
+  $("root-pill").textContent = root;
+  $("loader-pill").textContent = loader;
+  $("file-pill").textContent = fmtCount(files);
+  $("focus-meta-pill").textContent = focus;
 }
 
 function lines(text) {
@@ -100,6 +124,80 @@ async function getDir(parent, name) {
   } catch {
     return null;
   }
+}
+
+async function looksLikeRunRoot(handle) {
+  if (!handle) return false;
+  const [signalDir, executionDir] = await Promise.all([
+    getDir(handle, "signal"),
+    getDir(handle, "execution"),
+  ]);
+  return Boolean(signalDir || executionDir);
+}
+
+async function discoverRunHandles(baseHandle) {
+  const runs = new Map();
+  if (await looksLikeRunRoot(baseHandle)) {
+    runs.set(baseHandle.name || "selected", baseHandle);
+    return runs;
+  }
+  for await (const [name, handle] of baseHandle.entries()) {
+    if (handle.kind !== "directory") continue;
+    if (await looksLikeRunRoot(handle)) runs.set(name, handle);
+  }
+  return runs;
+}
+
+function preferredRunKey(keys) {
+  return [...keys].sort().at(-1) || "";
+}
+
+function updateRunSelector(runKeys) {
+  const select = $("run-select");
+  if (!runKeys.length) {
+    select.innerHTML = `<option value="">auto</option>`;
+    state.selectedRun = "";
+    return;
+  }
+  if (!runKeys.includes(state.selectedRun)) state.selectedRun = preferredRunKey(runKeys);
+  select.innerHTML = runKeys.map((runKey) => `<option value="${escapeHtml(runKey)}">${escapeHtml(runKey)}</option>`).join("");
+  select.value = state.selectedRun;
+}
+
+function snapshotDescriptor(file) {
+  const rel = (file.webkitRelativePath || file.name).replace(/\\/g, "/");
+  const parts = rel.split("/").filter(Boolean);
+  const areaIndex = parts.findIndex((part) => part === "execution" || part === "signal");
+  if (areaIndex === -1) return null;
+  const area = parts[areaIndex];
+  const runKey = areaIndex > 0 ? parts[areaIndex - 1] : "selected";
+  const tail = parts.slice(areaIndex);
+  let model = "single";
+  let env = null;
+  let dateKey = null;
+  if (tail.length >= 4 && (tail[1] === "demo" || tail[1] === "production")) {
+    env = tail[1];
+    dateKey = tail[2];
+  } else if (tail.length >= 5 && (tail[2] === "demo" || tail[2] === "production")) {
+    model = tail[1];
+    env = tail[2];
+    dateKey = tail[3];
+  } else {
+    return null;
+  }
+  if (tail.at(-1) !== "events.jsonl") return null;
+  return { rel, runKey, area, model, env, dateKey };
+}
+
+function buildSnapshotRunMap(files) {
+  const grouped = new Map();
+  for (const file of files) {
+    const descriptor = snapshotDescriptor(file);
+    if (!descriptor) continue;
+    if (!grouped.has(descriptor.runKey)) grouped.set(descriptor.runKey, []);
+    grouped.get(descriptor.runKey).push({ file, descriptor });
+  }
+  return grouped;
 }
 
 async function dateHandlesFromEnvDir(envDir) {
@@ -358,14 +456,18 @@ function analyze(signalRows, executionRows) {
   }
 
   let mode = null;
+  let executionActive = false;
+  let executionStartedPayload = null;
   for (const row of execs) {
     const p = row.payload || {};
     if (row.event_type === "execution_started") {
       mode = p.mode || mode;
+      executionStartedPayload = p;
+      executionActive = true;
       continue;
     }
     if (row.event_type === "execution_stopped") {
-      mode = null;
+      executionActive = false;
       continue;
     }
     if (row.event_type === "intent_claimed") {
@@ -385,7 +487,7 @@ function analyze(signalRows, executionRows) {
       d.orderId = order.order_id || null;
       continue;
     }
-    if (row.event_type === "simulated_position_settled") {
+    if (row.event_type === "simulated_position_settled" || row.event_type === "live_position_settled") {
       const d = ensureDecision(decisions, p.decision_id, { ticker: p.ticker, side: normalizeSide(p.side) });
       d.ticker = p.ticker || d.ticker;
       d.side = normalizeSide(p.side);
@@ -403,6 +505,7 @@ function analyze(signalRows, executionRows) {
     .filter((r) => r.event_type === "portfolio_snapshot_full"
       || r.event_type === "portfolio_snapshot_balance"
       || r.event_type.startsWith("simulated_portfolio_")
+      || r.event_type.startsWith("shadow_portfolio_")
       || r.event_type.startsWith("paper_portfolio_"))
     .map((r) => {
       const p = r.payload || {};
@@ -448,6 +551,9 @@ function analyze(signalRows, executionRows) {
   const worstTrade = losses.reduce((worst, d) => (!worst || num(d.pnl, 0) < num(worst.pnl, 0) ? d : worst), null);
   const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Number.POSITIVE_INFINITY : 0;
   const paperObjective = realized / Math.max(1, maxDd);
+  const initialEquity = portfolio[0]?.equity ?? num(signalStart.starting_cash_dollars, 0);
+  const latestEquity = portfolio.at(-1)?.equity ?? initialEquity;
+  const equityDelta = latestEquity - initialEquity;
 
   const latest = portfolio.at(-1) || {
     cash: 0,
@@ -575,6 +681,9 @@ function analyze(signalRows, executionRows) {
   return {
     signalStart,
     latestSignal,
+    mode,
+    executionActive,
+    executionStartedPayload,
     approved,
     blocked,
     claimCount,
@@ -598,6 +707,8 @@ function analyze(signalRows, executionRows) {
     expectancy,
     avgWin,
     avgLoss,
+    initialEquity,
+    equityDelta,
     bestTrade,
     worstTrade,
     maxDd,
@@ -737,7 +848,7 @@ function renderComparison(summaryMap, metaMap) {
       <td><span class="tag">${escapeHtml(row.model)}</span>${row.isLegacy ? ' <span class="tag legacy">legacy</span>' : ""}</td>
       <td><span class="${ratioTone(summary.paperObjective)}">${fmtRatio(summary.paperObjective)}</span></td>
       <td><span class="${moneyTone(summary.realized)}">${fmtMoney(summary.realized)}</span></td>
-      <td><span class="${moneyTone(summary.latest.equity - 10000)}">${fmtMoney(summary.latest.equity)}</span></td>
+      <td><span class="${moneyTone(summary.equityDelta)}">${fmtMoney(summary.latest.equity)}</span></td>
       <td>${fmtCount(summary.settled.length)}</td>
       <td>Y ${fmtCount(yesClaimed)} / N ${fmtCount(noClaimed)}</td>
       <td>${fmtPct(winRate)}</td>
@@ -813,7 +924,7 @@ function renderModelCards(summaryMap, metaMap) {
         { label: "Largest Win", value: fmtMoney(summary.bestTrade ? summary.bestTrade.pnl : 0), tone: moneyTone(summary.bestTrade ? summary.bestTrade.pnl : 0) },
         { label: "Largest Loss", value: fmtMoney(summary.worstTrade ? summary.worstTrade.pnl : 0), tone: moneyTone(summary.worstTrade ? summary.worstTrade.pnl : 0) },
         { label: "Max DD", value: fmtMoney(summary.maxDd), tone: moneyTone(-summary.maxDd) },
-        { label: "Equity", value: fmtMoney(summary.latest.equity), tone: moneyTone(summary.latest.equity - 10000) },
+        { label: "Equity", value: fmtMoney(summary.latest.equity), tone: moneyTone(summary.equityDelta), sub: `vs start ${fmtMoney(summary.initialEquity)}` },
       ])}
     </div>`;
   }).join("");
@@ -883,7 +994,7 @@ function overviewHtml(modelName, summary, meta) {
   const overviewMetrics = statsGridHtml([
     { label: "Realized PnL", value: fmtMoney(summary.realized), tone: moneyTone(summary.realized), sub: `${fmtCount(summary.settled.length)} settled trades` },
     { label: "Objective", value: fmtRatio(summary.paperObjective), tone: ratioTone(summary.paperObjective), sub: "Realized PnL / max(1, drawdown)" },
-    { label: "Equity", value: fmtMoney(summary.latest.equity), tone: moneyTone(summary.latest.equity - 10000), sub: `${modelName} cash plus deployed capital` },
+    { label: "Equity", value: fmtMoney(summary.latest.equity), tone: moneyTone(summary.equityDelta), sub: `Started at ${fmtMoney(summary.initialEquity)}` },
     { label: "Win Rate", value: fmtPct(summary.settled.length ? summary.wins.length / summary.settled.length : 0), sub: `${fmtCount(summary.wins.length)} wins / ${fmtCount(summary.losses.length)} losses` },
     { label: "Max Drawdown", value: fmtMoney(summary.maxDd), tone: moneyTone(-summary.maxDd), sub: `${fmtPct(summary.maxDdPct, 2)} of peak` },
     { label: "Approved", value: fmtCount(summary.approved), sub: `${fmtCount(summary.blocked)} blocked signals` },
@@ -905,7 +1016,7 @@ function overviewHtml(modelName, summary, meta) {
     { label: "Average Loss", value: fmtMoney(summary.avgLoss), tone: moneyTone(summary.avgLoss) },
     { label: "Largest Win", value: fmtMoney(summary.bestTrade ? summary.bestTrade.pnl : 0), tone: moneyTone(summary.bestTrade ? summary.bestTrade.pnl : 0), sub: summary.bestTrade ? `${summary.bestTrade.ticker} • ${fmtDate(summary.bestTrade.settledAt)}` : "No winning settlements yet" },
     { label: "Largest Loss", value: fmtMoney(summary.worstTrade ? summary.worstTrade.pnl : 0), tone: moneyTone(summary.worstTrade ? summary.worstTrade.pnl : 0), sub: summary.worstTrade ? `${summary.worstTrade.ticker} • ${fmtDate(summary.worstTrade.settledAt)}` : "No losing settlements yet" },
-    { label: "Available Cash", value: fmtMoney(summary.latest.cash), tone: moneyTone(summary.latest.cash - 10000), sub: `Snapshot ${fmtDate(summary.latest.label)}` },
+    { label: "Available Cash", value: fmtMoney(summary.latest.cash), tone: moneyTone(summary.latest.cash - summary.initialEquity), sub: `Snapshot ${fmtDate(summary.latest.label)}` },
     { label: "Pending Reservations", value: fmtCount(summary.latest.pending), sub: `${modelName} current pending reservations` },
   ]);
 
@@ -1026,7 +1137,10 @@ function tradesHtml(modelName, summary) {
 
 function diagnosticsHtml(modelName, summary, meta) {
   const latestSignal = summary.latestSignal;
+  const startMeta = summary.executionStartedPayload || {};
   const signalHealth = statsGridHtml([
+    { label: "Execution Mode", value: summary.mode || "unknown", tone: summary.mode === "live" ? "warn" : "good", sub: summary.executionActive ? "Execution loop active in logs" : "Latest observed execution mode" },
+    { label: "Subaccount", value: startMeta.subaccount == null ? "n/a" : String(startMeta.subaccount), sub: "Configured execution subaccount" },
     { label: "Edge Threshold", value: `${num(summary.signalStart.edge_threshold_cents, 0).toFixed(1)}c` },
     { label: "Tau Gate", value: `${num(summary.signalStart.min_tau_minutes, 0)}-${num(summary.signalStart.max_tau_minutes, 0)}m` },
     { label: "Stacking", value: summary.signalStart.allow_stacking ? "on" : "off" },
@@ -1074,21 +1188,42 @@ function diagnosticsHtml(modelName, summary, meta) {
   `;
 }
 
-function renderSelectedModel(modelName, summary, meta, modelCount) {
+function updateDashboardChrome(modelName, summary, loadedMeta = {}, modelCount = 0) {
   $("env-pill").textContent = state.environment;
   $("refresh-pill").textContent = `${state.refreshSeconds}s`;
   $("lookback-pill").textContent = `${state.lookbackDays} days`;
   $("last-load").textContent = fmtDate(state.lastLoadedAt || new Date());
+  setTopMeta({
+    source: loadedMeta.sourceKind || state.sourceKind || "idle",
+    run: loadedMeta.runName || state.selectedRun || "none",
+    mode: summary?.mode || "unknown",
+    root: loadedMeta.rootLabel || state.sourceLabel || "none",
+    loader: loadedMeta.loaderLabel || "folder or snapshot",
+    files: loadedMeta.fileCount || 0,
+    focus: modelName || "auto",
+  });
+  $("source-caption").textContent = loadedMeta.caption
+    || "Choose a run folder or snapshot first. The dashboard can read both shadow and live execution logs, and it now distinguishes runs instead of assuming one fixed folder shape.";
+  sync(
+    summary
+      ? `Dashboard synced | ${fmtCount(modelCount)} models | ${summary.mode || "unknown"} mode | focused ${modelName}`
+      : "Waiting for logs",
+    summary ? "ok" : "warn",
+  );
+}
+
+function renderSelectedModel(modelName, summary, meta, modelCount, loadedMeta) {
+  updateDashboardChrome(modelName, summary, loadedMeta, modelCount);
   renderFocusedHeader(modelName, summary, meta);
   $("tab-overview").innerHTML = overviewHtml(modelName, summary, meta);
   $("tab-breakdowns").innerHTML = breakdownsHtml(modelName, summary);
   $("tab-trades").innerHTML = tradesHtml(modelName, summary);
   $("tab-diagnostics").innerHTML = diagnosticsHtml(modelName, summary, meta);
   updateTabVisibility();
-  sync(`Dashboard live and read-only | ${fmtCount(modelCount)} models | focused ${modelName} | ${fmtCount(meta.execFiles)} exec files | ${fmtCount(meta.signalFiles)} signal files`, "ok");
 }
 
-function renderEmptyFocus(message) {
+function renderEmptyFocus(message, loadedMeta = {}) {
+  updateDashboardChrome("", null, loadedMeta, 0);
   $("focused-model-title").textContent = "Focused Model";
   $("focused-model-subtitle").textContent = message;
   $("focused-model-badges").innerHTML = "";
@@ -1119,14 +1254,14 @@ function renderAll(loaded) {
   renderComparison(summaryMap, metaMap);
   renderModelCards(summaryMap, metaMap);
   if (!selectedModel) {
-    renderEmptyFocus("No logs found yet. Choose a live folder or snapshot first.");
-    sync("No logs found yet");
+    renderEmptyFocus("No logs found yet. Choose a live folder or snapshot first.", loaded.meta);
     return;
   }
-  renderSelectedModel(selectedModel, summaryMap[selectedModel], metaMap[selectedModel], Object.keys(summaryMap).length);
+  renderSelectedModel(selectedModel, summaryMap[selectedModel], metaMap[selectedModel], Object.keys(summaryMap).length, loaded.meta);
 }
 
 async function loadFromHandles() {
+  if (!state.rootHandle) return null;
   const [execByModel, signalByModel] = await Promise.all([
     areaHandlesByModel(state.rootHandle, "execution", state.environment),
     areaHandlesByModel(state.rootHandle, "signal", state.environment),
@@ -1146,36 +1281,32 @@ async function loadFromHandles() {
       meta: { execFiles: execHandles.length, signalFiles: signalHandles.length },
     };
   }
-  return { modelData: pruneLegacySingleModel(modelData) };
+  const fileCount = Object.values(modelData).reduce((sum, item) => sum + item.meta.execFiles + item.meta.signalFiles, 0);
+  return {
+    modelData: pruneLegacySingleModel(modelData),
+    meta: {
+      sourceKind: "folder",
+      runName: state.selectedRun || state.rootHandle.name || "selected",
+      rootLabel: state.sourceLabel || state.rootHandle.name || "selected",
+      loaderLabel: "live folder access",
+      fileCount,
+      caption: `Reading ${fmtCount(fileCount)} JSONL log files from the selected live folder. Current run: ${state.selectedRun || state.rootHandle.name || "selected"}.`,
+    },
+  };
 }
 
 async function loadFromSnapshot() {
+  const grouped = state.snapshotRunMap.get(state.selectedRun) || [];
+  if (!grouped.length) return null;
   const modelData = {};
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - state.lookbackDays);
   cutoff.setHours(0, 0, 0, 0);
 
-  for (const file of state.snapshotFiles) {
-    const rel = (file.webkitRelativePath || file.name).replace(/\\/g, "/");
-    let area = null;
-    let model = "single";
-    let env = null;
-    let dateKey = null;
-    let match = rel.match(/\/(execution|signal)\/([^/]+)\/(demo|production)\/(\d{4}-\d{2}-\d{2})\/events\.jsonl$/);
-    if (match) {
-      area = match[1];
-      model = match[2];
-      env = match[3];
-      dateKey = match[4];
-    } else {
-      match = rel.match(/\/(execution|signal)\/(demo|production)\/(\d{4}-\d{2}-\d{2})\/events\.jsonl$/);
-      if (match) {
-        area = match[1];
-        env = match[2];
-        dateKey = match[3];
-      }
-    }
-    if (!match || env !== state.environment) continue;
+  for (const entry of grouped) {
+    const { file, descriptor } = entry;
+    const { area, model, env, dateKey } = descriptor;
+    if (env !== state.environment) continue;
     const d = parseDateFolder(dateKey);
     if (d && d < cutoff) continue;
     const rows = lines(await file.text());
@@ -1190,7 +1321,18 @@ async function loadFromSnapshot() {
       modelData[model].meta.signalFiles += 1;
     }
   }
-  return { modelData: pruneLegacySingleModel(modelData) };
+  const fileCount = Object.values(modelData).reduce((sum, item) => sum + item.meta.execFiles + item.meta.signalFiles, 0);
+  return {
+    modelData: pruneLegacySingleModel(modelData),
+    meta: {
+      sourceKind: "snapshot",
+      runName: state.selectedRun || "selected",
+      rootLabel: state.sourceLabel || "snapshot",
+      loaderLabel: "offline snapshot",
+      fileCount,
+      caption: `Reading ${fmtCount(fileCount)} JSONL log files from uploaded snapshot files. Current snapshot run: ${state.selectedRun || "selected"}.`,
+    },
+  };
 }
 
 async function refresh() {
@@ -1205,7 +1347,13 @@ async function refresh() {
         : null;
     if (!loaded) {
       state.lastLoaded = null;
-      renderEmptyFocus("Choose a live folder or snapshot first.");
+      renderEmptyFocus("Choose a live folder or snapshot first.", {
+        sourceKind: state.sourceKind,
+        runName: state.selectedRun || "none",
+        rootLabel: state.sourceLabel || "none",
+        loaderLabel: state.sourceKind === "snapshot" ? "offline snapshot" : "live folder access",
+        fileCount: 0,
+      });
       sync("Choose a live folder or snapshot first");
       return;
     }
@@ -1226,21 +1374,26 @@ function rerender() {
 }
 
 async function populateEnvs() {
-  if (!state.rootHandle) return;
   const envs = new Set();
-  for (const area of ["execution", "signal"]) {
-    const areaDir = await getDir(state.rootHandle, area);
-    if (!areaDir) continue;
-    for await (const [name, h] of areaDir.entries()) {
-      if (h.kind !== "directory") continue;
-      if (name === "demo" || name === "production") {
-        envs.add(name);
-        continue;
+  if (state.rootHandle) {
+    for (const area of ["execution", "signal"]) {
+      const areaDir = await getDir(state.rootHandle, area);
+      if (!areaDir) continue;
+      for await (const [name, h] of areaDir.entries()) {
+        if (h.kind !== "directory") continue;
+        if (name === "demo" || name === "production") {
+          envs.add(name);
+          continue;
+        }
+        const demoDir = await getDir(h, "demo");
+        if (demoDir) envs.add("demo");
+        const prodDir = await getDir(h, "production");
+        if (prodDir) envs.add("production");
       }
-      const demoDir = await getDir(h, "demo");
-      if (demoDir) envs.add("demo");
-      const prodDir = await getDir(h, "production");
-      if (prodDir) envs.add("production");
+    }
+  } else if (state.snapshotRunMap.size) {
+    for (const entry of state.snapshotRunMap.get(state.selectedRun) || []) {
+      envs.add(entry.descriptor.env);
     }
   }
   if (!envs.size) return;
@@ -1264,8 +1417,17 @@ async function chooseFolder() {
     return;
   }
   try {
-    state.rootHandle = await window.showDirectoryPicker({ mode: "read" });
+    const picked = await window.showDirectoryPicker({ mode: "read" });
+    const runs = await discoverRunHandles(picked);
+    state.folderRootHandle = picked;
+    state.runHandleMap = runs;
+    state.selectedRun = preferredRunKey(runs.keys());
+    state.rootHandle = state.runHandleMap.get(state.selectedRun) || null;
     state.snapshotFiles = [];
+    state.snapshotRunMap = new Map();
+    state.sourceKind = "folder";
+    state.sourceLabel = picked.name || "selected";
+    updateRunSelector([...runs.keys()].sort());
     await populateEnvs();
     restartTimer();
     await refresh();
@@ -1278,6 +1440,14 @@ $("folder-button").addEventListener("click", chooseFolder);
 $("manual-refresh").addEventListener("click", refresh);
 $("environment-select").addEventListener("change", async (e) => {
   state.environment = e.target.value;
+  await refresh();
+});
+$("run-select").addEventListener("change", async (e) => {
+  state.selectedRun = e.target.value;
+  if (state.sourceKind === "folder") {
+    state.rootHandle = state.runHandleMap.get(state.selectedRun) || null;
+  }
+  await populateEnvs();
   await refresh();
 });
 $("refresh-seconds").addEventListener("change", (e) => {
@@ -1298,7 +1468,15 @@ $("model-select").addEventListener("change", (e) => {
 });
 $("snapshot-input").addEventListener("change", async (e) => {
   state.snapshotFiles = [...(e.target.files || [])];
+  state.snapshotRunMap = buildSnapshotRunMap(state.snapshotFiles);
+  state.selectedRun = preferredRunKey(state.snapshotRunMap.keys());
+  updateRunSelector([...state.snapshotRunMap.keys()].sort());
   state.rootHandle = null;
+  state.folderRootHandle = null;
+  state.runHandleMap = new Map();
+  state.sourceKind = "snapshot";
+  state.sourceLabel = state.snapshotFiles.length ? "uploaded snapshot" : "snapshot";
+  await populateEnvs();
   await refresh();
 });
 document.querySelectorAll("[data-tab]").forEach((button) => {
@@ -1309,5 +1487,6 @@ document.querySelectorAll("[data-tab]").forEach((button) => {
 });
 
 restartTimer();
+setTopMeta();
 renderEmptyFocus("Choose a live folder or snapshot first.");
 sync("Waiting for logs");

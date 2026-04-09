@@ -7,6 +7,8 @@ import pytest
 
 from src.live.kalshi import KalshiEnvironment, KalshiExecutionConfig, KalshiExecutionMode
 from scripts.run_kalshi_bagged_lasso_live import (
+    DEDICATED_LIVE_SIGNAL_PROFILE,
+    RESEARCH_PARITY_SIGNAL_PROFILE,
     _build_live_signal_config,
     validate_live_runner_preflight,
 )
@@ -36,7 +38,11 @@ def test_build_live_signal_config_forces_live_profile_overrides(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    config = _build_live_signal_config(KalshiEnvironment.PRODUCTION, policy_path)
+    config = _build_live_signal_config(
+        KalshiEnvironment.PRODUCTION,
+        policy_path,
+        signal_profile=DEDICATED_LIVE_SIGNAL_PROFILE,
+    )
 
     assert config.edge_threshold_cents == 6.0
     assert config.min_tau_minutes == 0.0
@@ -80,9 +86,53 @@ def test_build_live_signal_config_allows_explicit_stacking_override(tmp_path: Pa
     config = _build_live_signal_config(
         KalshiEnvironment.PRODUCTION,
         policy_path,
+        signal_profile=DEDICATED_LIVE_SIGNAL_PROFILE,
         allow_stacking=True,
     )
 
+    assert config.allow_stacking is True
+
+
+def test_build_live_signal_config_supports_research_parity_profile(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "edge_threshold_cents": 6.0,
+                    "min_tau_minutes": 1.0,
+                    "max_tau_minutes": 12.0,
+                    "price_band_min_cents": 10,
+                    "price_band_max_cents": 90,
+                    "allow_stacking": False,
+                    "enable_combo_ban_policy": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = _build_live_signal_config(
+        KalshiEnvironment.PRODUCTION,
+        policy_path,
+        signal_profile=RESEARCH_PARITY_SIGNAL_PROFILE,
+        allow_stacking=True,
+    )
+
+    assert config.edge_threshold_cents == 2.0
+    assert config.min_tau_minutes == 0.0
+    assert config.max_tau_minutes == 15.0
+    assert config.price_band_min_cents == 0
+    assert config.price_band_max_cents == 100
+    assert config.apply_regime_hard_gate is True
+    assert config.enable_bucket_ban_policy is True
+    assert config.enable_combo_ban_policy is False
+    assert config.banned_combo_buckets == frozenset()
+    assert config.blocked_regime_labels == frozenset()
+    assert config.contracts_per_order == 1
+    assert config.capital_pct_per_order is None
+    assert config.kelly_fraction_multiplier is None
+    assert config.kelly_fraction_cap_pct is None
     assert config.allow_stacking is True
 
 

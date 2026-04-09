@@ -39,6 +39,10 @@ from scripts.run_kalshi_regularized_execution_engine import (  # noqa: E402
     signal_config_from_env_and_policy,
 )
 
+DEDICATED_LIVE_SIGNAL_PROFILE = "dedicated-v1"
+RESEARCH_PARITY_SIGNAL_PROFILE = "research-parity"
+SIGNAL_PROFILE_CHOICES = (DEDICATED_LIVE_SIGNAL_PROFILE, RESEARCH_PARITY_SIGNAL_PROFILE)
+
 DEDICATED_LIVE_MAX_TAU_MINUTES = 10.0
 DEDICATED_LIVE_BLOCKED_REGIME_LABELS = frozenset({"neutral"})
 DEDICATED_LIVE_BANNED_COMBO_BUCKETS = frozenset(
@@ -68,21 +72,40 @@ def _build_live_signal_config(
     environment: KalshiEnvironment,
     policy_file: Path,
     *,
+    signal_profile: str = DEDICATED_LIVE_SIGNAL_PROFILE,
     allow_stacking: bool = False,
 ) -> KalshiSignalRiskConfig:
     base_config, _loaded_policy = signal_config_from_env_and_policy(environment, policy_file)
-    return replace(
-        base_config,
+    common_overrides = dict(
         apply_regime_hard_gate=True,
         enable_bucket_ban_policy=True,
-        enable_combo_ban_policy=True,
-        banned_combo_buckets=DEDICATED_LIVE_BANNED_COMBO_BUCKETS,
-        blocked_regime_labels=DEDICATED_LIVE_BLOCKED_REGIME_LABELS,
         contracts_per_order=1,
         capital_pct_per_order=None,
         kelly_fraction_multiplier=None,
         kelly_fraction_cap_pct=None,
         allow_stacking=allow_stacking,
+    )
+    if signal_profile == RESEARCH_PARITY_SIGNAL_PROFILE:
+        return replace(
+            base_config,
+            **common_overrides,
+            edge_threshold_cents=2.0,
+            min_tau_minutes=0.0,
+            max_tau_minutes=15.0,
+            price_band_min_cents=0,
+            price_band_max_cents=100,
+            enable_combo_ban_policy=False,
+            banned_combo_buckets=frozenset(),
+            blocked_regime_labels=frozenset(),
+        )
+    if signal_profile != DEDICATED_LIVE_SIGNAL_PROFILE:
+        raise ValueError(f"Unsupported signal profile: {signal_profile}")
+    return replace(
+        base_config,
+        **common_overrides,
+        enable_combo_ban_policy=True,
+        banned_combo_buckets=DEDICATED_LIVE_BANNED_COMBO_BUCKETS,
+        blocked_regime_labels=DEDICATED_LIVE_BLOCKED_REGIME_LABELS,
         max_tau_minutes=min(base_config.max_tau_minutes, DEDICATED_LIVE_MAX_TAU_MINUTES),
     )
 
@@ -210,6 +233,7 @@ async def _run(args: argparse.Namespace) -> None:
     signal_config = _build_live_signal_config(
         environment,
         policy_file,
+        signal_profile=args.signal_profile,
         allow_stacking=args.allow_stacking,
     )
     execution_log_dir = Path(args.log_root) / "execution" / "bagged_lasso"
@@ -245,13 +269,15 @@ async def _run(args: argparse.Namespace) -> None:
     print(f"Subaccount: {execution_config.subaccount}")
     print(f"Model file: {model_file}")
     print(f"Policy file: {policy_file}")
+    print(f"Signal profile: {args.signal_profile}")
     print(
-        "Signal profile:",
+        "Resolved signal config:",
         f"edge={signal_config.edge_threshold_cents:.1f}c",
         f"tau={signal_config.min_tau_minutes:.1f}-{signal_config.max_tau_minutes:.1f}",
         f"price_band={signal_config.price_band_min_cents}-{signal_config.price_band_max_cents}c",
         f"regime={signal_config.apply_regime_hard_gate}",
         f"bucket_ban={signal_config.enable_bucket_ban_policy}",
+        f"combo_ban={signal_config.enable_combo_ban_policy}",
         f"contracts={signal_config.contracts_per_order}",
         f"stacking={signal_config.allow_stacking}",
     )
@@ -354,6 +380,16 @@ def main() -> None:
     )
     parser.add_argument("--mode", choices=["shadow", "live"], default="shadow")
     parser.add_argument("--confirm-live", action="store_true")
+    parser.add_argument(
+        "--signal-profile",
+        choices=SIGNAL_PROFILE_CHOICES,
+        default=DEDICATED_LIVE_SIGNAL_PROFILE,
+        help=(
+            "Signal policy profile. "
+            "'dedicated-v1' keeps the stricter live-only regime/neutral/combo protections. "
+            "'research-parity' matches the broader 2c / 0-15 / 0-100 research-style filter set."
+        ),
+    )
     parser.add_argument(
         "--allow-stacking",
         action="store_true",

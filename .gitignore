@@ -31,6 +31,8 @@ venv/
 # Editor / local tooling
 .vscode/
 .idea/
+.graphify_scope/
+graphify-out/
 
 # Local scratch / temp outputs
 .backfill_cursor
