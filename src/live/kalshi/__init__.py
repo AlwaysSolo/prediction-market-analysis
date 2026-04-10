@@ -25,6 +25,14 @@ from src.live.kalshi.live_archive import (
     repair_live_archive,
 )
 from src.live.kalshi.feature_engine import KalshiFeatureStateEngine
+from src.live.kalshi.layering import (
+    KalshiBinaryThesisLedger,
+    KalshiBinaryTranche,
+    KalshiLayeringDecision,
+    KalshiLayeringWindowState,
+    KalshiPathDependentBinaryLayeringConfig,
+    KalshiPathDependentBinaryLayeringEngine,
+)
 from src.live.kalshi.features import (
     FEATURE_ORDER,
     KalshiFeatureEngineConfig,
@@ -97,6 +105,7 @@ from src.live.kalshi.signal_risk import (
     calculate_kalshi_fee_dollars,
     find_max_acceptable_entry_price_cents,
 )
+from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource
 from src.live.kalshi.types import KalshiRawStreamEvent, KalshiTickerState, KalshiTickerUpdate
 
 __all__ = [
@@ -115,6 +124,7 @@ __all__ = [
     "KalshiExecutionIntentState",
     "KalshiExecutionMode",
     "KalshiExecutionUpdate",
+    "KalshiTradeIntentSource",
     "KalshiLiveArchiveConfig",
     "KalshiLiveArchiveManager",
     "KalshiLiveArchiveRuntime",
@@ -123,6 +133,12 @@ __all__ = [
     "KalshiFeatureState",
     "KalshiFeatureStateEngine",
     "KalshiFeatureUpdate",
+    "KalshiBinaryThesisLedger",
+    "KalshiBinaryTranche",
+    "KalshiLayeringDecision",
+    "KalshiLayeringWindowState",
+    "KalshiPathDependentBinaryLayeringConfig",
+    "KalshiPathDependentBinaryLayeringEngine",
     "KalshiLightGBMScoreState",
     "KalshiLightGBMScoreUpdate",
     "KalshiLightGBMScorer",

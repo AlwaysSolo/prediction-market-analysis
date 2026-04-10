@@ -136,6 +136,55 @@ def test_build_live_signal_config_supports_research_parity_profile(tmp_path: Pat
     assert config.allow_stacking is True
 
 
+def test_build_live_signal_config_can_disable_regime_control(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "edge_threshold_cents": 6.0,
+                    "allow_stacking": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = _build_live_signal_config(
+        KalshiEnvironment.PRODUCTION,
+        policy_path,
+        signal_profile=DEDICATED_LIVE_SIGNAL_PROFILE,
+        disable_regime_control=True,
+    )
+
+    assert config.apply_regime_hard_gate is False
+    assert config.blocked_regime_labels == frozenset()
+    assert config.enable_combo_ban_policy is True
+
+
+def test_build_live_signal_config_supports_explicit_edge_threshold_override(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "edge_threshold_cents": 6.0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = _build_live_signal_config(
+        KalshiEnvironment.PRODUCTION,
+        policy_path,
+        signal_profile=DEDICATED_LIVE_SIGNAL_PROFILE,
+        edge_threshold_cents=2.0,
+    )
+
+    assert config.edge_threshold_cents == 2.0
+
+
 def test_validate_live_runner_preflight_rejects_missing_confirm_live() -> None:
     with pytest.raises(RuntimeError, match="--confirm-live"):
         validate_live_runner_preflight(

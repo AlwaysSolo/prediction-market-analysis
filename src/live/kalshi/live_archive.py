@@ -16,6 +16,7 @@ from src.live.kalshi.collector import KalshiMarketDataCollector
 from src.live.kalshi.execution import KalshiExecutionUpdate
 from src.live.kalshi.feature_engine import KalshiFeatureStateEngine
 from src.live.kalshi.features import KalshiFeatureUpdate
+from src.live.kalshi.layering import KalshiLayeringDecision
 from src.live.kalshi.regime import evaluate_kxbtc15m_regime_for_state
 from src.live.kalshi.scorer import KalshiLightGBMScoreUpdate
 from src.live.kalshi.signal_risk import KalshiSignalDecisionUpdate
@@ -99,6 +100,7 @@ class KalshiLiveArchiveRuntime:
     scorer: Any
     signal_engine: Any
     execution_engine: Any
+    layering_engine: Any | None = None
     calibration_enabled: bool = False
 
 
@@ -140,6 +142,8 @@ class KalshiLiveArchiveManager:
                     (runtime, runtime.execution_engine.subscribe_queue(), "execution"),
                 ]
             )
+            if runtime.layering_engine is not None:
+                self._runtime_queues.append((runtime, runtime.layering_engine.subscribe_queue(), "layering"))
         await self.compact_all_staging()
         self._tasks = [
             asyncio.create_task(self._consume_raw_loop(), name="kalshi-live-archive-raw"),
@@ -215,6 +219,8 @@ class KalshiLiveArchiveManager:
                     await self._write_signal_decision_event(runtime, update)
                 elif queue_kind == "execution":
                     await self._write_execution_event(runtime, update)
+                elif queue_kind == "layering":
+                    await self._write_layering_event(runtime, update)
         except asyncio.CancelledError:
             raise
 
@@ -477,6 +483,20 @@ class KalshiLiveArchiveManager:
             "estimated_cash_required_dollars": (
                 None if update.trade_intent is None else update.trade_intent.estimated_cash_required_dollars
             ),
+            "thesis_id": None if update.trade_intent is None else update.trade_intent.thesis_id,
+            "tranche_index": None if update.trade_intent is None else update.trade_intent.tranche_index,
+            "tranche_window": None if update.trade_intent is None else update.trade_intent.tranche_window,
+            "tranche_reason": None if update.trade_intent is None else update.trade_intent.tranche_reason,
+            "lifecycle_state": None if update.trade_intent is None else update.trade_intent.lifecycle_state,
+            "total_thesis_budget_dollars": (
+                None if update.trade_intent is None else update.trade_intent.total_thesis_budget_dollars
+            ),
+            "payout_if_yes_dollars": None if update.trade_intent is None else update.trade_intent.payout_if_yes_dollars,
+            "payout_if_no_dollars": None if update.trade_intent is None else update.trade_intent.payout_if_no_dollars,
+            "expected_value_dollars": None if update.trade_intent is None else update.trade_intent.expected_value_dollars,
+            "worst_case_loss_dollars": (
+                None if update.trade_intent is None else update.trade_intent.worst_case_loss_dollars
+            ),
             "execution_mode": runtime.execution_engine.config.mode.value,
             "subaccount": runtime.execution_engine.config.subaccount,
         }
@@ -518,7 +538,66 @@ class KalshiLiveArchiveManager:
             "realized_pnl_dollars": update.realized_pnl_dollars,
             "cumulative_realized_pnl_dollars": update.cumulative_realized_pnl_dollars,
             "settlement_result": update.settlement_result,
+            "thesis_id": update.thesis_id,
+            "tranche_index": update.tranche_index,
+            "tranche_window": update.tranche_window,
+            "tranche_reason": update.tranche_reason,
+            "lifecycle_state": update.lifecycle_state,
+            "total_thesis_budget_dollars": update.total_thesis_budget_dollars,
+            "payout_if_yes_dollars": update.payout_if_yes_dollars,
+            "payout_if_no_dollars": update.payout_if_no_dollars,
+            "expected_value_dollars": update.expected_value_dollars,
+            "worst_case_loss_dollars": update.worst_case_loss_dollars,
             "execution_mode": update.mode.value,
+            "subaccount": runtime.execution_engine.config.subaccount,
+        }
+        await self._write_stage_row("strategy_events", update.event_time, row)
+
+    async def _write_layering_event(
+        self,
+        runtime: KalshiLiveArchiveRuntime,
+        update: KalshiLayeringDecision,
+    ) -> None:
+        row = {
+            "run_name": self.config.run_name,
+            "environment": self.config.environment,
+            "model_label": runtime.label,
+            "model_family": runtime.family,
+            "strategy_event_id": (
+                f"strategy:{runtime.label}:layering:{update.ticker}:{update.action}:{update.event_time.isoformat()}"
+            ),
+            "event_kind": f"layering_{update.action}",
+            "event_time": _iso(update.event_time),
+            "ticker": update.ticker,
+            "side": update.side,
+            "decision_id": None,
+            "approved": None,
+            "status": update.status,
+            "reason": update.message,
+            "reference_price_cents": update.entry_price_cents,
+            "limit_price_cents": update.entry_price_cents,
+            "contracts": update.contracts,
+            "filled_contracts": None,
+            "remaining_contracts": None,
+            "fill_price_cents": None,
+            "entry_cost_dollars": None,
+            "fees_dollars": None,
+            "cash_required_dollars": None,
+            "available_cash_dollars": None,
+            "realized_pnl_dollars": None,
+            "cumulative_realized_pnl_dollars": None,
+            "settlement_result": None,
+            "thesis_id": update.thesis_id,
+            "tranche_index": update.tranche_index,
+            "tranche_window": update.decision_window,
+            "tranche_reason": update.action,
+            "lifecycle_state": update.lifecycle_state,
+            "total_thesis_budget_dollars": update.total_thesis_budget_dollars,
+            "payout_if_yes_dollars": update.payout_if_yes_dollars,
+            "payout_if_no_dollars": update.payout_if_no_dollars,
+            "expected_value_dollars": update.expected_value_dollars,
+            "worst_case_loss_dollars": update.worst_case_loss_dollars,
+            "execution_mode": runtime.execution_engine.config.mode.value,
             "subaccount": runtime.execution_engine.config.subaccount,
         }
         await self._write_stage_row("strategy_events", update.event_time, row)

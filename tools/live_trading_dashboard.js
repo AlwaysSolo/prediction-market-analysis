@@ -422,8 +422,11 @@ function analyze(signalRows, executionRows) {
       block_reason: p.block_reason || null,
     };
 
-    if (p.approved && p.decision_id) {
+    if (p.approved) {
       approved += 1;
+    }
+
+    if (p.approved && p.decision_id) {
       const d = ensureDecision(decisions, p.decision_id, { ticker: p.ticker, side: normalizeSide(p.side) });
       d.ticker = p.ticker || d.ticker;
       d.side = normalizeSide(p.side);
@@ -447,6 +450,10 @@ function analyze(signalRows, executionRows) {
       d.quoteMid = p.quote_mid_prob ?? d.quoteMid;
       d.quoteSpread = p.quote_spread_cents ?? d.quoteSpread;
       d.quoteAge = p.quote_age_seconds ?? d.quoteAge;
+      continue;
+    }
+
+    if (p.approved) {
       continue;
     }
 

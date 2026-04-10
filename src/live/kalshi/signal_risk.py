@@ -7,7 +7,7 @@ import os
 import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -114,6 +114,7 @@ class KalshiSignalRiskConfig:
     enable_combo_ban_policy: bool = False
     banned_combo_buckets: frozenset[str] = field(default_factory=lambda: DEFAULT_BANNED_COMBO_BUCKETS)
     blocked_regime_labels: frozenset[str] = field(default_factory=frozenset)
+    auto_reserve_trade_intents: bool = True
 
     def __post_init__(self) -> None:
         if self.edge_threshold_cents < 0:
@@ -216,6 +217,9 @@ class KalshiSignalRiskConfig:
                 _resolve_env_value(environment, "BLOCKED_REGIME_LABELS"),
                 default=frozenset(),
             ),
+            auto_reserve_trade_intents=_parse_bool(
+                _resolve_env_value(environment, "AUTO_RESERVE_TRADE_INTENTS") or "true"
+            ),
         )
 
 
@@ -286,6 +290,16 @@ class KalshiTradeIntent:
     estimated_fees_dollars: float
     estimated_cash_required_dollars: float
     generated_at: datetime
+    thesis_id: str | None = None
+    tranche_index: int | None = None
+    tranche_window: str | None = None
+    tranche_reason: str | None = None
+    lifecycle_state: str | None = None
+    total_thesis_budget_dollars: float | None = None
+    payout_if_yes_dollars: float | None = None
+    payout_if_no_dollars: float | None = None
+    expected_value_dollars: float | None = None
+    worst_case_loss_dollars: float | None = None
 
 
 @dataclass(frozen=True)
@@ -538,6 +552,13 @@ def calculate_kalshi_fee_dollars(entry_price: float, contracts: int) -> float:
     return float(np.ceil(raw_fee * 100.0) / 100.0)
 
 
+def calculate_realized_cash_metrics(*, entry_price_cents: int, contracts: int) -> tuple[float, float, float]:
+    entry_price = entry_price_cents / 100.0
+    entry_cost = entry_price * contracts
+    fees = calculate_kalshi_fee_dollars(entry_price, contracts)
+    return entry_cost, fees, entry_cost + fees
+
+
 def calculate_cost_metrics(
     *,
     side: str,
@@ -694,6 +715,7 @@ class KalshiSignalRiskEngine:
                 "quote_max_age_seconds": self.config.quote_max_age_seconds,
                 "trade_cooldown_seconds": self.config.trade_cooldown_seconds,
                 "enable_bucket_ban_policy": self.config.enable_bucket_ban_policy,
+                "auto_reserve_trade_intents": self.config.auto_reserve_trade_intents,
                 "banned_yes_tau_buckets": sorted(self.config.banned_yes_tau_buckets),
                 "banned_yes_price_buckets": sorted(self.config.banned_yes_price_buckets),
                 "banned_yes_probability_buckets": sorted(self.config.banned_yes_probability_buckets),
@@ -731,6 +753,18 @@ class KalshiSignalRiskEngine:
     def snapshot_states(self) -> dict[str, KalshiSignalDecisionState]:
         return dict(self._states)
 
+    def update_pending_reservation_fill_pricing(self, decision_id: str, *, fill_price_cents: int) -> None:
+        reservation, _reservation_source = self._lookup_reservation(decision_id)
+        if reservation is None:
+            raise KeyError(f"Unknown reservation decision id: {decision_id}")
+        entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_realized_cash_metrics(
+            entry_price_cents=fill_price_cents,
+            contracts=reservation.contracts,
+        )
+        reservation.entry_cost_dollars = entry_cost_dollars
+        reservation.fees_dollars = fees_dollars
+        reservation.cash_required_dollars = cash_required_dollars
+
     def subscribe(self, callback: Callback) -> None:
         self._callbacks.append(callback)
 
@@ -761,6 +795,168 @@ class KalshiSignalRiskEngine:
             reserved_cash_dollars=reserved_cash,
             open_positions=open_positions,
             pending_reservations=pending_reservations,
+        )
+
+    def resolve_manual_trade_contracts(
+        self,
+        *,
+        decision_state: KalshiSignalDecisionState | KalshiSignalDecisionUpdate,
+        side: str,
+        entry_price_cents: int,
+        cash_budget_dollars: float | None = None,
+    ) -> int:
+        if entry_price_cents <= 0:
+            return 0
+        if cash_budget_dollars is not None:
+            if cash_budget_dollars <= 0:
+                return 0
+            return self._max_contracts_for_cash_budget(
+                side=side,
+                predicted_yes_probability=decision_state.predicted_yes_probability,
+                entry_price_cents=entry_price_cents,
+                cash_budget=cash_budget_dollars,
+            )
+        return self._resolve_contracts(
+            side=side,
+            predicted_yes_probability=decision_state.predicted_yes_probability,
+            entry_price_cents=entry_price_cents,
+        )
+
+    def reserve_manual_trade_intent(
+        self,
+        *,
+        decision_state: KalshiSignalDecisionState | KalshiSignalDecisionUpdate,
+        side: str,
+        entry_price_cents: int,
+        cash_budget_dollars: float | None = None,
+        contracts: int | None = None,
+        allow_ticker_lock_bypass: bool = False,
+        ignore_trade_cooldown: bool = True,
+        stacking_signature: StackingSignature | None = None,
+        thesis_id: str | None = None,
+        tranche_index: int | None = None,
+        tranche_window: str | None = None,
+        tranche_reason: str | None = None,
+        lifecycle_state: str | None = None,
+        total_thesis_budget_dollars: float | None = None,
+        payout_if_yes_dollars: float | None = None,
+        payout_if_no_dollars: float | None = None,
+        expected_value_dollars: float | None = None,
+        worst_case_loss_dollars: float | None = None,
+    ) -> KalshiTradeIntent | None:
+        if not decision_state.approved or decision_state.side is None:
+            return None
+        normalized_side = side.upper()
+        if normalized_side not in {"YES", "NO"}:
+            raise ValueError(f"Unsupported manual trade side: {side}")
+        if entry_price_cents < self.config.price_band_min_cents or entry_price_cents > self.config.price_band_max_cents:
+            return None
+        if not allow_ticker_lock_bypass and not self.config.allow_stacking and self._ticker_is_locked(decision_state.ticker):
+            return None
+        if not ignore_trade_cooldown and self._cooldown_is_active():
+            return None
+
+        resolved_contracts = contracts
+        if resolved_contracts is None:
+            resolved_contracts = self.resolve_manual_trade_contracts(
+                decision_state=decision_state,
+                side=normalized_side,
+                entry_price_cents=entry_price_cents,
+                cash_budget_dollars=cash_budget_dollars,
+            )
+        if resolved_contracts is None or resolved_contracts <= 0:
+            return None
+
+        max_acceptable_entry_price_cents = find_max_acceptable_entry_price_cents(
+            side=normalized_side,
+            predicted_yes_probability=decision_state.predicted_yes_probability,
+            config=self.config,
+            contracts=resolved_contracts,
+        )
+        post_cost_edge, entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_cost_metrics(
+            side=normalized_side,
+            predicted_yes_probability=decision_state.predicted_yes_probability,
+            displayed_entry_price_cents=entry_price_cents,
+            contracts=resolved_contracts,
+            slippage=self.config.slippage,
+        )
+        if (
+            max_acceptable_entry_price_cents is None
+            or entry_price_cents > max_acceptable_entry_price_cents
+            or post_cost_edge + 1e-12 < self.config.edge_threshold
+        ):
+            return None
+        if cash_budget_dollars is not None and cash_required_dollars > cash_budget_dollars + 1e-12:
+            return None
+
+        available_cash, _deployed_capital, equity, _reserved_cash = self._portfolio_metrics()
+        reserve_cash = (self.config.reserve_cash_pct / 100.0) * equity
+        deployable_cash = max(0.0, available_cash - reserve_cash)
+        if cash_required_dollars > deployable_cash + 1e-12:
+            return None
+
+        candidate = _DecisionCandidate(
+            ticker=decision_state.ticker,
+            event_time=decision_state.event_time,
+            approved=True,
+            side=normalized_side,
+            predicted_yes_probability=decision_state.predicted_yes_probability,
+            predicted_no_probability=decision_state.predicted_no_probability,
+            feature_basis_market_prob=decision_state.feature_basis_market_prob,
+            raw_model_edge=decision_state.raw_model_edge,
+            post_cost_edge=post_cost_edge,
+            yes_post_cost_edge=(
+                post_cost_edge if normalized_side == "YES" else decision_state.yes_post_cost_edge
+            ),
+            no_post_cost_edge=(
+                post_cost_edge if normalized_side == "NO" else decision_state.no_post_cost_edge
+            ),
+            tau_minutes=decision_state.tau_minutes,
+            reference_price_cents=entry_price_cents,
+            max_acceptable_entry_price_cents=max_acceptable_entry_price_cents,
+            last_yes_price_cents=decision_state.last_yes_price_cents,
+            yes_bid_cents=decision_state.yes_bid_cents,
+            yes_ask_cents=decision_state.yes_ask_cents,
+            buy_yes_price_cents=decision_state.buy_yes_price_cents,
+            buy_no_price_cents=decision_state.buy_no_price_cents,
+            quote_mid_prob=decision_state.quote_mid_prob,
+            quote_spread_cents=decision_state.quote_spread_cents,
+            quote_age_seconds=decision_state.quote_age_seconds,
+            regime_label=decision_state.regime_label,
+            bearish_vote_count=decision_state.bearish_vote_count,
+            bullish_vote_count=decision_state.bullish_vote_count,
+            regime_price_momentum_bearish=decision_state.regime_price_momentum_bearish,
+            regime_signed_flow_bearish=decision_state.regime_signed_flow_bearish,
+            regime_yes_share_bearish=decision_state.regime_yes_share_bearish,
+            regime_price_momentum_bullish=decision_state.regime_price_momentum_bullish,
+            regime_signed_flow_bullish=decision_state.regime_signed_flow_bullish,
+            regime_yes_share_bullish=decision_state.regime_yes_share_bullish,
+            tau_bucket=decision_state.tau_bucket,
+            price_bucket=decision_state.price_bucket,
+            chosen_side_probability_bucket=decision_state.chosen_side_probability_bucket,
+            chosen_side_edge_bucket=decision_state.chosen_side_edge_bucket,
+            bucket_policy_dimension=decision_state.bucket_policy_dimension,
+            bucket_policy_bucket=decision_state.bucket_policy_bucket,
+            bucket_policy_side=decision_state.bucket_policy_side,
+            block_reason=None,
+            contracts=resolved_contracts,
+            entry_cost_dollars=entry_cost_dollars,
+            fees_dollars=fees_dollars,
+            cash_required_dollars=cash_required_dollars,
+        )
+        intent = self._reserve_trade_intent(candidate, stacking_signature=stacking_signature)
+        return replace(
+            intent,
+            thesis_id=thesis_id,
+            tranche_index=tranche_index,
+            tranche_window=tranche_window,
+            tranche_reason=tranche_reason,
+            lifecycle_state=lifecycle_state,
+            total_thesis_budget_dollars=total_thesis_budget_dollars,
+            payout_if_yes_dollars=payout_if_yes_dollars,
+            payout_if_no_dollars=payout_if_no_dollars,
+            expected_value_dollars=expected_value_dollars,
+            worst_case_loss_dollars=worst_case_loss_dollars,
         )
 
     async def apply_portfolio_snapshot(self, snapshot: KalshiPortfolioSnapshot) -> None:
@@ -929,7 +1125,7 @@ class KalshiSignalRiskEngine:
             return
 
         if candidate.approved:
-            trade_intent = self._reserve_trade_intent(candidate)
+            trade_intent = self._reserve_trade_intent(candidate) if self.config.auto_reserve_trade_intents else None
             next_state = KalshiSignalDecisionState(
                 ticker=candidate.ticker,
                 event_time=candidate.event_time,
@@ -1705,11 +1901,20 @@ class KalshiSignalRiskEngine:
             return False
         return (utc_now() - self._last_trade_opened_at).total_seconds() < self.config.trade_cooldown_seconds
 
-    def _reserve_trade_intent(self, candidate: _DecisionCandidate) -> KalshiTradeIntent:
+    def _reserve_trade_intent(
+        self,
+        candidate: _DecisionCandidate,
+        *,
+        stacking_signature: StackingSignature | None = None,
+    ) -> KalshiTradeIntent:
         decision_id = str(uuid.uuid4())
         generated_at = utc_now()
         self._last_trade_opened_at = generated_at
-        stacking_signature = self._build_stacking_signature_from_candidate(candidate)
+        resolved_signature = (
+            self._build_stacking_signature_from_candidate(candidate)
+            if stacking_signature is None
+            else stacking_signature
+        )
         reservation = _PendingReservation(
             decision_id=decision_id,
             ticker=candidate.ticker,
@@ -1721,7 +1926,7 @@ class KalshiSignalRiskEngine:
             created_at=generated_at,
             expires_at=generated_at + timedelta(seconds=self.config.reservation_ttl_seconds),
             is_acknowledged=False,
-            stacking_signature=stacking_signature,
+            stacking_signature=resolved_signature,
         )
         self._pending_reservations[decision_id] = reservation
         self._mark_stacking_signature_active(reservation)
@@ -1955,6 +2160,20 @@ class KalshiSignalRiskEngine:
                 ),
                 "block_reason": update.block_reason,
                 "decision_id": None if update.trade_intent is None else update.trade_intent.decision_id,
+                "thesis_id": None if update.trade_intent is None else update.trade_intent.thesis_id,
+                "tranche_index": None if update.trade_intent is None else update.trade_intent.tranche_index,
+                "tranche_window": None if update.trade_intent is None else update.trade_intent.tranche_window,
+                "tranche_reason": None if update.trade_intent is None else update.trade_intent.tranche_reason,
+                "lifecycle_state": None if update.trade_intent is None else update.trade_intent.lifecycle_state,
+                "total_thesis_budget_dollars": (
+                    None if update.trade_intent is None else update.trade_intent.total_thesis_budget_dollars
+                ),
+                "payout_if_yes_dollars": None if update.trade_intent is None else update.trade_intent.payout_if_yes_dollars,
+                "payout_if_no_dollars": None if update.trade_intent is None else update.trade_intent.payout_if_no_dollars,
+                "expected_value_dollars": None if update.trade_intent is None else update.trade_intent.expected_value_dollars,
+                "worst_case_loss_dollars": (
+                    None if update.trade_intent is None else update.trade_intent.worst_case_loss_dollars
+                ),
             },
             event_time=update.event_time,
         )

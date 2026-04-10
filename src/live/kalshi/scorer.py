@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -289,9 +290,10 @@ def load_regularized_logistic_model_artifact(
         calibration = load_platt_calibration(calibration_file)
 
     payload = joblib_load(model_file)
+    repaired_model = _repair_legacy_sklearn_model(payload["model"], model_file=model_file)
     return LoadedRegularizedLogisticModel(
         scaler=payload["scaler"],
-        model=payload["model"],
+        model=repaired_model,
         model_file=model_file,
         calibration=calibration,
         feature_names=feature_names,
@@ -320,7 +322,7 @@ def load_linear_svm_model_artifact(config: KalshiLinearSVMScorerConfig | None = 
     payload = joblib_load(model_file)
     return LoadedRegularizedLogisticModel(
         scaler=payload["scaler"],
-        model=payload["model"],
+        model=_repair_legacy_sklearn_model(payload["model"], model_file=model_file),
         model_file=model_file,
         calibration=calibration,
         feature_names=feature_names,
@@ -418,6 +420,50 @@ def _align_feature_row_by_names(
                 f"Feature '{feature_name}' expected by model {model_file} is not present in the canonical feature registry."
             ) from exc
     return feature_row[:, indices]
+
+
+def _iter_nested_estimators(root_model: Any) -> list[Any]:
+    pending = [root_model]
+    seen_ids: set[int] = set()
+    ordered: list[Any] = []
+    while pending:
+        current = pending.pop()
+        current_id = id(current)
+        if current_id in seen_ids:
+            continue
+        seen_ids.add(current_id)
+        ordered.append(current)
+        estimators = getattr(current, "estimators_", None)
+        if estimators:
+            pending.extend(list(estimators))
+        estimator = getattr(current, "estimator_", None)
+        if estimator is not None:
+            pending.append(estimator)
+        base_estimator = getattr(current, "base_estimator_", None)
+        if base_estimator is not None:
+            pending.append(base_estimator)
+    return ordered
+
+
+def _repair_legacy_sklearn_model(model: Any, *, model_file: Path) -> Any:
+    repaired = 0
+    for estimator in _iter_nested_estimators(model):
+        if estimator.__class__.__name__ != "LogisticRegression":
+            continue
+        if hasattr(estimator, "multi_class"):
+            continue
+        # sklearn 1.7 expects this attribute during predict_proba, but some
+        # artifacts trained under newer versions do not persist it.
+        estimator.multi_class = "deprecated"
+        repaired += 1
+    if repaired:
+        warnings.warn(
+            f"Repaired {repaired} legacy LogisticRegression estimator(s) while loading {model_file}. "
+            "This artifact was likely trained under a newer scikit-learn version.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return model
 
 
 def _feature_names_require_hourly_context(feature_names: tuple[str, ...] | None) -> bool:

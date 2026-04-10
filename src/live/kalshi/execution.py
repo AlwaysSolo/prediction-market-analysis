@@ -25,7 +25,9 @@ from src.live.kalshi.signal_risk import (
     KalshiPortfolioSnapshot,
     KalshiSignalRiskEngine,
     KalshiTradeIntent,
+    calculate_realized_cash_metrics,
 )
+from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource
 
 Callback = Callable[["KalshiExecutionUpdate"], Awaitable[None] | None]
 
@@ -105,6 +107,7 @@ class KalshiExecutionConfig:
     mode: KalshiExecutionMode = KalshiExecutionMode.PAPER
     enable_live_trading: bool = False
     simulate_immediate_fills: bool = False
+    shadow_fill_latency_seconds: float = 0.25
     subaccount: int = 0
     reconcile_interval_seconds: float = 15.0
     order_reconcile_timeout_seconds: float = 10.0
@@ -114,6 +117,8 @@ class KalshiExecutionConfig:
     def __post_init__(self) -> None:
         if self.subaccount < 0:
             raise ValueError("subaccount must be non-negative")
+        if self.shadow_fill_latency_seconds < 0:
+            raise ValueError("shadow_fill_latency_seconds must be non-negative")
         if self.reconcile_interval_seconds <= 0:
             raise ValueError("reconcile_interval_seconds must be positive")
         if self.order_reconcile_timeout_seconds <= 0:
@@ -132,12 +137,22 @@ class KalshiExecutionConfig:
             simulate_immediate_fills=_parse_bool(
                 _resolve_env_value(environment, "SIMULATE_IMMEDIATE_FILLS") or "false"
             ),
+            shadow_fill_latency_seconds=float(
+                _resolve_env_value(environment, "SHADOW_FILL_LATENCY_SECONDS") or 0.25
+            ),
             subaccount=int(_resolve_env_value(environment, "SUBACCOUNT") or 0),
             reconcile_interval_seconds=float(_resolve_env_value(environment, "RECONCILE_INTERVAL_SECONDS") or 15.0),
             order_reconcile_timeout_seconds=float(
                 _resolve_env_value(environment, "ORDER_RECONCILE_TIMEOUT_SECONDS") or 10.0
             ),
         )
+
+
+@dataclass(frozen=True)
+class _SimulatedFillResolution:
+    filled: bool
+    fill_price_cents: int | None
+    message: str
 
 
 @dataclass(frozen=True)
@@ -191,6 +206,16 @@ class KalshiExecutionIntentState:
     settlement_result: str | None
     message: str | None
     live_order: KalshiLiveOrderRecord | None
+    thesis_id: str | None
+    tranche_index: int | None
+    tranche_window: str | None
+    tranche_reason: str | None
+    lifecycle_state: str | None
+    total_thesis_budget_dollars: float | None
+    payout_if_yes_dollars: float | None
+    payout_if_no_dollars: float | None
+    expected_value_dollars: float | None
+    worst_case_loss_dollars: float | None
 
 
 @dataclass(frozen=True)
@@ -218,6 +243,16 @@ class KalshiExecutionUpdate:
     settlement_result: str | None
     message: str | None
     live_order: KalshiLiveOrderRecord | None
+    thesis_id: str | None
+    tranche_index: int | None
+    tranche_window: str | None
+    tranche_reason: str | None
+    lifecycle_state: str | None
+    total_thesis_budget_dollars: float | None
+    payout_if_yes_dollars: float | None
+    payout_if_no_dollars: float | None
+    expected_value_dollars: float | None
+    worst_case_loss_dollars: float | None
 
 
 @dataclass(frozen=True)
@@ -267,6 +302,16 @@ def execution_update_from_state(state: KalshiExecutionIntentState) -> KalshiExec
         settlement_result=state.settlement_result,
         message=state.message,
         live_order=state.live_order,
+        thesis_id=state.thesis_id,
+        tranche_index=state.tranche_index,
+        tranche_window=state.tranche_window,
+        tranche_reason=state.tranche_reason,
+        lifecycle_state=state.lifecycle_state,
+        total_thesis_budget_dollars=state.total_thesis_budget_dollars,
+        payout_if_yes_dollars=state.payout_if_yes_dollars,
+        payout_if_no_dollars=state.payout_if_no_dollars,
+        expected_value_dollars=state.expected_value_dollars,
+        worst_case_loss_dollars=state.worst_case_loss_dollars,
     )
 
 
@@ -393,8 +438,11 @@ class KalshiExecutionEngine:
         self,
         signal_engine: KalshiSignalRiskEngine,
         config: KalshiExecutionConfig | None = None,
+        *,
+        trade_intent_source: KalshiTradeIntentSource | None = None,
     ):
         self.signal_engine = signal_engine
+        self.trade_intent_source = trade_intent_source or signal_engine
         self._collector = self.signal_engine.scorer.feature_engine.collector
         self._collector_config = self.signal_engine.scorer.feature_engine.collector.config
         self.environment = self._collector_config.environment
@@ -438,7 +486,7 @@ class KalshiExecutionEngine:
         self._reconcile_event = asyncio.Event()
         self._full_reconcile_requested = False
         if self._signal_queue is None:
-            self._signal_queue = self.signal_engine.subscribe_trade_intent_queue()
+            self._signal_queue = self.trade_intent_source.subscribe_trade_intent_queue()
 
         await self._logger.write(
             "execution_started",
@@ -446,6 +494,7 @@ class KalshiExecutionEngine:
                 "environment": self.environment.value,
                 "mode": self.config.mode.value,
                 "simulate_immediate_fills": self._simulation_enabled(),
+                "shadow_fill_latency_seconds": self.config.shadow_fill_latency_seconds,
                 "subaccount": self.config.subaccount,
             },
         )
@@ -465,7 +514,8 @@ class KalshiExecutionEngine:
                 self._ws_task = asyncio.create_task(self._private_ws_loop(), name="kalshi-execution-private-ws")
             self._reconcile_task = asyncio.create_task(self._reconcile_loop(), name="kalshi-execution-reconcile")
 
-        await self._bootstrap_from_signal_engine()
+        if self.trade_intent_source is self.signal_engine:
+            await self._bootstrap_from_signal_engine()
         self._consume_task = asyncio.create_task(self._consume_loop(), name="kalshi-execution-consume")
         self._ready_event.set()
 
@@ -524,6 +574,69 @@ class KalshiExecutionEngine:
         if self.config.mode is KalshiExecutionMode.SHADOW:
             return "shadow"
         return "simulated"
+
+    def _simulated_fill_latency_seconds(self) -> float:
+        if self.config.mode is KalshiExecutionMode.SHADOW:
+            return self.config.shadow_fill_latency_seconds
+        return 0.0
+
+    def _resolve_shadow_executable_price(
+        self,
+        intent: KalshiTradeIntent,
+    ) -> _SimulatedFillResolution:
+        score_state = self.signal_engine.scorer.get_state(intent.ticker)
+        if score_state is None:
+            return _SimulatedFillResolution(
+                filled=False,
+                fill_price_cents=None,
+                message="shadow_cancelled_missing_score_state",
+            )
+        if (
+            score_state.yes_bid_cents is None
+            or score_state.yes_ask_cents is None
+            or score_state.buy_yes_price_cents is None
+            or score_state.buy_no_price_cents is None
+        ):
+            return _SimulatedFillResolution(
+                filled=False,
+                fill_price_cents=None,
+                message="shadow_cancelled_missing_quote",
+            )
+        if score_state.yes_bid_cents >= score_state.yes_ask_cents:
+            return _SimulatedFillResolution(
+                filled=False,
+                fill_price_cents=None,
+                message="shadow_cancelled_crossed_quote",
+            )
+        if (
+            score_state.quote_age_seconds is None
+            or score_state.quote_age_seconds > self.signal_engine.config.quote_max_age_seconds
+        ):
+            return _SimulatedFillResolution(
+                filled=False,
+                fill_price_cents=None,
+                message="shadow_cancelled_stale_quote",
+            )
+        fill_price_cents = (
+            score_state.buy_yes_price_cents if intent.side.upper() == "YES" else score_state.buy_no_price_cents
+        )
+        if fill_price_cents is None:
+            return _SimulatedFillResolution(
+                filled=False,
+                fill_price_cents=None,
+                message="shadow_cancelled_missing_executable_price",
+            )
+        if fill_price_cents > intent.max_acceptable_entry_price_cents:
+            return _SimulatedFillResolution(
+                filled=False,
+                fill_price_cents=None,
+                message="shadow_cancelled_limit_moved_away",
+            )
+        return _SimulatedFillResolution(
+            filled=True,
+            fill_price_cents=fill_price_cents,
+            message="shadow_fill_requoted",
+        )
 
     def _current_open_positions(self) -> tuple[KalshiPortfolioPosition, ...]:
         return tuple(self._ws_market_positions[ticker] for ticker in sorted(self._ws_market_positions))
@@ -634,6 +747,16 @@ class KalshiExecutionEngine:
             settlement_result=None,
             message=source,
             live_order=None,
+            thesis_id=intent.thesis_id,
+            tranche_index=intent.tranche_index,
+            tranche_window=intent.tranche_window,
+            tranche_reason=intent.tranche_reason,
+            lifecycle_state=intent.lifecycle_state,
+            total_thesis_budget_dollars=intent.total_thesis_budget_dollars,
+            payout_if_yes_dollars=intent.payout_if_yes_dollars,
+            payout_if_no_dollars=intent.payout_if_no_dollars,
+            expected_value_dollars=intent.expected_value_dollars,
+            worst_case_loss_dollars=intent.worst_case_loss_dollars,
         )
         self._states[intent.decision_id] = claimed_state
         self._client_order_to_decision[intent.decision_id] = intent.decision_id
@@ -677,24 +800,88 @@ class KalshiExecutionEngine:
         )
         await self._publish_state(accepted_state)
 
+        simulated_fill_price_cents = intent.reference_price_cents
+        fill_message = f"{simulation_label}_fill"
+        if self.config.mode is KalshiExecutionMode.SHADOW:
+            latency_seconds = self._simulated_fill_latency_seconds()
+            if latency_seconds > 0:
+                await asyncio.sleep(latency_seconds)
+            resolution = self._resolve_shadow_executable_price(intent)
+            await self._logger.write(
+                "shadow_quote_recheck",
+                {
+                    "decision_id": intent.decision_id,
+                    "ticker": intent.ticker,
+                    "side": intent.side,
+                    "reference_price_cents": intent.reference_price_cents,
+                    "limit_price_cents": intent.max_acceptable_entry_price_cents,
+                    "filled": resolution.filled,
+                    "fill_price_cents": resolution.fill_price_cents,
+                    "message": resolution.message,
+                },
+            )
+            if not resolution.filled or resolution.fill_price_cents is None:
+                await self.signal_engine.apply_execution_feedback(
+                    KalshiExecutionFeedback(
+                        decision_id=intent.decision_id,
+                        status="cancelled",
+                        event_time=utc_now(),
+                    )
+                )
+                cancelled_state = replace(
+                    accepted_state,
+                    status="cancelled",
+                    event_time=utc_now(),
+                    available_cash_dollars=self.signal_engine.get_portfolio_state().available_cash_dollars,
+                    message=resolution.message,
+                )
+                self._states[intent.decision_id] = cancelled_state
+                await self._sync_signal_portfolio_snapshot(
+                    event_time=cancelled_state.event_time,
+                    log_event_type="shadow_portfolio_cancelled",
+                )
+                await self._publish_state(cancelled_state)
+                return
+            simulated_fill_price_cents = resolution.fill_price_cents
+            fill_message = (
+                f"{simulation_label}_fill"
+                if simulated_fill_price_cents == intent.reference_price_cents
+                else resolution.message
+            )
+            self.signal_engine.update_pending_reservation_fill_pricing(
+                intent.decision_id,
+                fill_price_cents=simulated_fill_price_cents,
+            )
+
         await self.signal_engine.apply_execution_feedback(
             KalshiExecutionFeedback(
                 decision_id=intent.decision_id,
                 status="filled",
                 event_time=utc_now(),
                 filled_contracts=intent.contracts,
-                filled_price_cents=intent.reference_price_cents,
+                filled_price_cents=simulated_fill_price_cents,
             )
         )
+        entry_cost_dollars = accepted_state.entry_cost_dollars
+        fees_dollars = accepted_state.fees_dollars
+        cash_required_dollars = accepted_state.cash_required_dollars
+        if self.config.mode is KalshiExecutionMode.SHADOW:
+            entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_realized_cash_metrics(
+                entry_price_cents=simulated_fill_price_cents,
+                contracts=intent.contracts,
+            )
         filled_state = replace(
             accepted_state,
             status="filled",
             event_time=utc_now(),
             filled_contracts=intent.contracts,
             remaining_contracts=0,
-            fill_price_cents=intent.reference_price_cents,
+            fill_price_cents=simulated_fill_price_cents,
+            entry_cost_dollars=entry_cost_dollars,
+            fees_dollars=fees_dollars,
+            cash_required_dollars=cash_required_dollars,
             available_cash_dollars=self.signal_engine.get_portfolio_state().available_cash_dollars,
-            message=f"{simulation_label}_fill",
+            message=fill_message,
         )
         self._states[intent.decision_id] = filled_state
         await self._sync_signal_portfolio_snapshot(
@@ -921,6 +1108,16 @@ class KalshiExecutionEngine:
                 settlement_result=None,
                 message="recovered_order",
                 live_order=record,
+                thesis_id=None,
+                tranche_index=None,
+                tranche_window=None,
+                tranche_reason=None,
+                lifecycle_state=None,
+                total_thesis_budget_dollars=None,
+                payout_if_yes_dollars=None,
+                payout_if_no_dollars=None,
+                expected_value_dollars=None,
+                worst_case_loss_dollars=None,
             )
 
         self._client_order_to_decision[decision_id] = decision_id

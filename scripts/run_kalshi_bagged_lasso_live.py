@@ -22,6 +22,7 @@ from src.live.kalshi import (  # noqa: E402
     KalshiExecutionMode,
     KalshiFeatureStateEngine,
     KalshiMarketDataCollector,
+    KalshiPathDependentBinaryLayeringEngine,
     KalshiRegularizedLogisticScorer,
     KalshiRegularizedLogisticScorerConfig,
     KalshiSignalRiskConfig,
@@ -74,10 +75,12 @@ def _build_live_signal_config(
     *,
     signal_profile: str = DEDICATED_LIVE_SIGNAL_PROFILE,
     allow_stacking: bool = False,
+    disable_regime_control: bool = False,
+    edge_threshold_cents: float | None = None,
 ) -> KalshiSignalRiskConfig:
     base_config, _loaded_policy = signal_config_from_env_and_policy(environment, policy_file)
     common_overrides = dict(
-        apply_regime_hard_gate=True,
+        apply_regime_hard_gate=not disable_regime_control,
         enable_bucket_ban_policy=True,
         contracts_per_order=1,
         capital_pct_per_order=None,
@@ -86,7 +89,7 @@ def _build_live_signal_config(
         allow_stacking=allow_stacking,
     )
     if signal_profile == RESEARCH_PARITY_SIGNAL_PROFILE:
-        return replace(
+        config = replace(
             base_config,
             **common_overrides,
             edge_threshold_cents=2.0,
@@ -98,16 +101,23 @@ def _build_live_signal_config(
             banned_combo_buckets=frozenset(),
             blocked_regime_labels=frozenset(),
         )
+        if edge_threshold_cents is not None:
+            config = replace(config, edge_threshold_cents=edge_threshold_cents)
+        return config
     if signal_profile != DEDICATED_LIVE_SIGNAL_PROFILE:
         raise ValueError(f"Unsupported signal profile: {signal_profile}")
-    return replace(
+    config = replace(
         base_config,
         **common_overrides,
+        edge_threshold_cents=(
+            base_config.edge_threshold_cents if edge_threshold_cents is None else edge_threshold_cents
+        ),
         enable_combo_ban_policy=True,
         banned_combo_buckets=DEDICATED_LIVE_BANNED_COMBO_BUCKETS,
-        blocked_regime_labels=DEDICATED_LIVE_BLOCKED_REGIME_LABELS,
+        blocked_regime_labels=(frozenset() if disable_regime_control else DEDICATED_LIVE_BLOCKED_REGIME_LABELS),
         max_tau_minutes=min(base_config.max_tau_minutes, DEDICATED_LIVE_MAX_TAU_MINUTES),
     )
+    return config
 
 
 def _build_execution_config(
@@ -205,6 +215,32 @@ async def _consume_execution_updates(queue: asyncio.Queue, execution_engine: Kal
             if snapshot is not None
             else (f"${update.available_cash_dollars:.2f}" if update.available_cash_dollars is not None else "n/a")
         )
+
+
+async def _consume_layering_updates(queue: asyncio.Queue) -> None:
+    while True:
+        update = await queue.get()
+        print(
+            "LAYERING",
+            update.ticker,
+            f"action={update.action}",
+            f"status={update.status}",
+            f"window={update.decision_window}",
+            f"side={update.side}",
+            f"tranche={update.tranche_index}",
+            f"contracts={update.contracts}",
+            (
+                f"ev=${update.expected_value_dollars:+.2f}"
+                if update.expected_value_dollars is not None
+                else "ev=?"
+            ),
+            (
+                f"worst=${update.worst_case_loss_dollars:.2f}"
+                if update.worst_case_loss_dollars is not None
+                else "worst=?"
+            ),
+            f"msg={update.message}" if update.message else "",
+        )
         print(
             "EXECUTION",
             update.ticker,
@@ -235,7 +271,12 @@ async def _run(args: argparse.Namespace) -> None:
         policy_file,
         signal_profile=args.signal_profile,
         allow_stacking=args.allow_stacking,
+        disable_regime_control=args.disable_regime_control,
+        edge_threshold_cents=args.edge_threshold_cents,
     )
+    layering_engine = None
+    if args.enable_layering:
+        signal_config = replace(signal_config, auto_reserve_trade_intents=False)
     execution_log_dir = Path(args.log_root) / "execution" / "bagged_lasso"
     signal_log_dir = Path(args.log_root) / "signal" / "bagged_lasso"
     execution_config = _build_execution_config(
@@ -276,6 +317,7 @@ async def _run(args: argparse.Namespace) -> None:
         f"tau={signal_config.min_tau_minutes:.1f}-{signal_config.max_tau_minutes:.1f}",
         f"price_band={signal_config.price_band_min_cents}-{signal_config.price_band_max_cents}c",
         f"regime={signal_config.apply_regime_hard_gate}",
+        f"blocked_regimes={','.join(sorted(signal_config.blocked_regime_labels)) or 'none'}",
         f"bucket_ban={signal_config.enable_bucket_ban_policy}",
         f"combo_ban={signal_config.enable_combo_ban_policy}",
         f"contracts={signal_config.contracts_per_order}",
@@ -299,7 +341,18 @@ async def _run(args: argparse.Namespace) -> None:
         signal_config,
         log_dir=signal_log_dir,
     )
-    execution_engine = KalshiExecutionEngine(signal_engine, execution_config)
+    if args.enable_layering:
+        layering_engine = KalshiPathDependentBinaryLayeringEngine(
+            signal_engine,
+            log_dir=Path(args.log_root) / "layering" / "bagged_lasso",
+        )
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        execution_config,
+        trade_intent_source=layering_engine,
+    )
+    if layering_engine is not None:
+        layering_engine.bind_execution_engine(execution_engine)
     archive_manager = KalshiLiveArchiveManager(
         collector,
         feature_engine,
@@ -311,6 +364,7 @@ async def _run(args: argparse.Namespace) -> None:
                 scorer=scorer,
                 signal_engine=signal_engine,
                 execution_engine=execution_engine,
+                layering_engine=layering_engine,
                 calibration_enabled=getattr(scorer.config, "apply_calibration", False),
             )
         ],
@@ -324,6 +378,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     signal_queue = signal_engine.subscribe_queue()
     execution_queue = execution_engine.subscribe_queue()
+    layering_queue = None if layering_engine is None else layering_engine.subscribe_queue()
 
     print("Starting collector...")
     await collector.start()
@@ -343,6 +398,8 @@ async def _run(args: argparse.Namespace) -> None:
     await scorer.start()
     await signal_engine.start()
     await execution_engine.start()
+    if layering_engine is not None:
+        await layering_engine.start()
     await archive_manager.start()
 
     print("Dedicated bagged-lasso live stack started.")
@@ -355,17 +412,27 @@ async def _run(args: argparse.Namespace) -> None:
         _consume_execution_updates(execution_queue, execution_engine),
         name="bagged-lasso-live-execution",
     )
+    layering_task = None
+    if layering_queue is not None:
+        layering_task = asyncio.create_task(
+            _consume_layering_updates(layering_queue),
+            name="bagged-lasso-live-layering",
+        )
     try:
         await asyncio.Event().wait()
     finally:
         signal_task.cancel()
         execution_task.cancel()
-        for task in (signal_task, execution_task):
+        if layering_task is not None:
+            layering_task.cancel()
+        for task in tuple(task for task in (signal_task, execution_task, layering_task) if task is not None):
             try:
                 await task
             except asyncio.CancelledError:
                 pass
         await archive_manager.stop()
+        if layering_engine is not None:
+            await layering_engine.stop()
         await execution_engine.stop()
         await signal_engine.stop()
         await scorer.stop()
@@ -394,6 +461,22 @@ def main() -> None:
         "--allow-stacking",
         action="store_true",
         help="Enable stacking for the dedicated bagged-lasso runner. Off by default.",
+    )
+    parser.add_argument(
+        "--disable-regime-control",
+        action="store_true",
+        help="Disable blocked-regime labels and the YES/downtrend regime gate for testing.",
+    )
+    parser.add_argument(
+        "--edge-threshold-cents",
+        type=float,
+        default=None,
+        help="Optional explicit edge threshold override. Useful for widening trade intake during shadow tests.",
+    )
+    parser.add_argument(
+        "--enable-layering",
+        action="store_true",
+        help="Enable the path-dependent KXBTC15M layering engine instead of direct one-shot entries.",
     )
     parser.add_argument("--environment", choices=["production"], default="production")
     parser.add_argument("--run-dir", default=None)

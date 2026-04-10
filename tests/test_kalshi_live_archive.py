@@ -15,6 +15,7 @@ from src.live.kalshi import (
     KalshiExecutionMode,
     KalshiExecutionUpdate,
     KalshiFeatureStateEngine,
+    KalshiLayeringDecision,
     KalshiLightGBMScoreUpdate,
     KalshiLiveArchiveConfig,
     KalshiLiveArchiveManager,
@@ -148,6 +149,16 @@ def test_live_archive_manager_writes_model_signal_and_execution_rows(tmp_path: P
         estimated_fees_dollars=0.02,
         estimated_cash_required_dollars=0.59,
         generated_at=event_time,
+        thesis_id="thesis-1",
+        tranche_index=0,
+        tranche_window="10m",
+        tranche_reason="opened",
+        lifecycle_state="probe_pending",
+        total_thesis_budget_dollars=2.95,
+        payout_if_yes_dollars=0.43,
+        payout_if_no_dollars=-0.57,
+        expected_value_dollars=0.19,
+        worst_case_loss_dollars=0.57,
     )
     signal_update = KalshiSignalDecisionUpdate(
         ticker="KXBTC15M-TEST",
@@ -215,11 +226,41 @@ def test_live_archive_manager_writes_model_signal_and_execution_rows(tmp_path: P
         settlement_result=None,
         message="order_terminal_fill",
         live_order=None,
+        thesis_id="thesis-1",
+        tranche_index=0,
+        tranche_window="10m",
+        tranche_reason="opened",
+        lifecycle_state="probe_open",
+        total_thesis_budget_dollars=2.95,
+        payout_if_yes_dollars=0.43,
+        payout_if_no_dollars=-0.57,
+        expected_value_dollars=0.19,
+        worst_case_loss_dollars=0.57,
+    )
+    layering_update = KalshiLayeringDecision(
+        event_time=event_time + timedelta(seconds=1),
+        ticker="KXBTC15M-TEST",
+        thesis_id="thesis-1",
+        action="opened",
+        status="emitted",
+        decision_window="10m",
+        side="YES",
+        tranche_index=0,
+        contracts=1,
+        entry_price_cents=56,
+        payout_if_yes_dollars=0.43,
+        payout_if_no_dollars=-0.57,
+        expected_value_dollars=0.19,
+        worst_case_loss_dollars=0.57,
+        total_thesis_budget_dollars=2.95,
+        lifecycle_state="probe_pending",
+        message=None,
     )
 
     async def run() -> None:
         await manager._write_model_output(runtime, score_update)
         await manager._write_signal_decision_event(runtime, signal_update)
+        await manager._write_layering_event(runtime, layering_update)
         await manager._write_execution_event(runtime, execution_update)
         await manager.compact_all_staging()
 
@@ -234,9 +275,12 @@ def test_live_archive_manager_writes_model_signal_and_execution_rows(tmp_path: P
     strategy_df = pd.read_parquet(strategy_files[0])
     assert model_df.iloc[0]["model_label"] == "bagged_lasso"
     assert abs(float(model_df.iloc[0]["predicted_yes_probability"]) - 0.76) < 1e-9
-    assert {"signal_approved", "execution_filled"} <= set(strategy_df["event_kind"])
+    assert {"signal_approved", "layering_opened", "execution_filled"} <= set(strategy_df["event_kind"])
     execution_rows = strategy_df.loc[strategy_df["event_kind"] == "execution_filled"]
     assert int(execution_rows.iloc[0]["subaccount"]) == 7
+    assert execution_rows.iloc[0]["thesis_id"] == "thesis-1"
+    layering_rows = strategy_df.loc[strategy_df["event_kind"] == "layering_opened"]
+    assert layering_rows.iloc[0]["tranche_window"] == "10m"
 
 
 def test_repair_live_archive_compacts_leftover_stage(tmp_path: Path) -> None:

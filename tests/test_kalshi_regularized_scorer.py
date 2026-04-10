@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from joblib import dump as joblib_dump
+from sklearn.ensemble import BaggingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -138,6 +139,49 @@ def test_load_regularized_logistic_model_artifact_reads_feature_names_and_calibr
     assert artifact.model_file == model_path
     assert artifact.feature_names == ("z_implied", "tau_minutes")
     assert artifact.calibration is not None
+
+
+def test_load_regularized_logistic_model_artifact_repairs_legacy_bagged_logistic_estimators(tmp_path: Path):
+    X = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [0.2, 0.8],
+            [0.8, 0.2],
+            [0.1, 0.9],
+            [0.9, 0.1],
+        ],
+        dtype=np.float64,
+    )
+    y = np.array([0, 1, 0, 1, 0, 1], dtype=np.int8)
+    scaler = StandardScaler().fit(X)
+    model = BaggingClassifier(
+        estimator=LogisticRegression(solver="lbfgs", random_state=42),
+        n_estimators=3,
+        random_state=7,
+    ).fit(scaler.transform(X), y)
+
+    for estimator in getattr(model, "estimators_", ()):
+        if hasattr(estimator, "multi_class"):
+            delattr(estimator, "multi_class")
+
+    model_path = tmp_path / "legacy-bagged.joblib"
+    metrics_path = tmp_path / "metrics.json"
+    joblib_dump({"scaler": scaler, "model": model}, model_path)
+    metrics_path.write_text(json.dumps({"feature_names": ["z_implied", "tau_minutes"]}), encoding="utf-8")
+
+    artifact = load_regularized_logistic_model_artifact(
+        KalshiRegularizedLogisticScorerConfig(
+            model_file=model_path,
+            metrics_file=metrics_path,
+        )
+    )
+
+    transformed = artifact.scaler.transform(X[:1])
+    probability = float(artifact.model.predict_proba(transformed)[0, 1])
+
+    assert 0.0 <= probability <= 1.0
+    assert all(hasattr(estimator, "multi_class") for estimator in getattr(artifact.model, "estimators_", ()))
 
 
 def test_predict_regularized_logistic_yes_probability_aligns_feature_row():

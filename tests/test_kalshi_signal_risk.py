@@ -1338,6 +1338,82 @@ def test_signal_risk_late_accepted_feedback_recovers_recently_expired_reservatio
     asyncio.run(run())
 
 
+def test_signal_risk_manual_trade_reservation_builds_layering_metadata(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scorer = _FakeScorer(
+        collector,
+        {
+            "KXBTC15M-TEST": KalshiLightGBMScoreState(
+                ticker="KXBTC15M-TEST",
+                event_time=event_time,
+                market_prob=0.55,
+                tau_minutes=9.0,
+                predicted_yes_probability=0.78,
+                model_edge=0.23,
+                model_file=Path("fake-model.txt"),
+                last_yes_price_cents=55,
+                last_price_cents=55,
+                yes_bid_cents=54,
+                yes_ask_cents=56,
+                no_bid_cents=44,
+                no_ask_cents=46,
+                ticker_update_time=event_time,
+                trade_yes_prob=0.55,
+                quote_mid_prob=0.55,
+                quote_spread_cents=2,
+                buy_yes_price_cents=56,
+                buy_no_price_cents=46,
+                quote_age_seconds=0.0,
+                last_to_mid_gap=0.0,
+            )
+        },
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(auto_reserve_trade_intents=False, starting_cash_dollars=100.0, contracts_per_order=5),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert update.approved is True
+        assert update.trade_intent is None
+
+        manual = signal_engine.reserve_manual_trade_intent(
+            decision_state=update,
+            side="YES",
+            entry_price_cents=56,
+            contracts=2,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+            thesis_id="thesis-1",
+            tranche_index=0,
+            tranche_window="10m",
+            tranche_reason="opened",
+            lifecycle_state="probe_pending",
+            total_thesis_budget_dollars=2.95,
+            payout_if_yes_dollars=0.43,
+            payout_if_no_dollars=-0.57,
+            expected_value_dollars=0.19,
+            worst_case_loss_dollars=0.57,
+        )
+
+        assert manual is not None
+        assert manual.thesis_id == "thesis-1"
+        assert manual.tranche_window == "10m"
+        assert manual.tranche_reason == "opened"
+        assert manual.lifecycle_state == "probe_pending"
+        assert manual.contracts == 2
+        assert manual.expected_value_dollars == pytest.approx(0.19)
+        assert manual.worst_case_loss_dollars == pytest.approx(0.57)
+
+        await signal_engine.stop()
+
+    asyncio.run(run())
+
+
 def test_signal_risk_portfolio_snapshot_replaces_local_open_positions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     collector = KalshiMarketDataCollector(_collector_config(tmp_path))
     monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))

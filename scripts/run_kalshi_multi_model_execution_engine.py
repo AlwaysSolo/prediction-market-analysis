@@ -25,6 +25,7 @@ from src.live.kalshi import (  # noqa: E402
     KalshiLinearSVMScorer,
     KalshiLinearSVMScorerConfig,
     KalshiMarketDataCollector,
+    KalshiPathDependentBinaryLayeringEngine,
     KalshiRegularizedLogisticScorer,
     KalshiRegularizedLogisticScorerConfig,
     KalshiSignalRiskEngine,
@@ -46,8 +47,10 @@ class ModelRuntime:
     scorer: object
     signal_engine: KalshiSignalRiskEngine
     execution_engine: KalshiExecutionEngine
+    layering_engine: KalshiPathDependentBinaryLayeringEngine | None
     signal_queue: asyncio.Queue
     execution_queue: asyncio.Queue
+    layering_queue: asyncio.Queue | None
 
 
 @dataclass(frozen=True)
@@ -182,6 +185,32 @@ async def _consume_execution_updates(
             if portfolio_snapshot is not None
             else (f"${update.available_cash_dollars:.2f}" if update.available_cash_dollars is not None else "n/a")
         )
+
+
+async def _consume_layering_updates(model_family: str, queue: asyncio.Queue) -> None:
+    while True:
+        update = await queue.get()
+        print(
+            f"[{model_family}] LAYERING",
+            update.ticker,
+            f"action={update.action}",
+            f"status={update.status}",
+            f"window={update.decision_window}",
+            f"side={update.side}",
+            f"tranche={update.tranche_index}",
+            f"contracts={update.contracts}",
+            (
+                f"ev=${update.expected_value_dollars:+.2f}"
+                if update.expected_value_dollars is not None
+                else "ev=?"
+            ),
+            (
+                f"worst=${update.worst_case_loss_dollars:.2f}"
+                if update.worst_case_loss_dollars is not None
+                else "worst=?"
+            ),
+            f"msg={update.message}" if update.message else "",
+        )
         print(
             f"[{model_family}] EXECUTION",
             update.ticker,
@@ -219,6 +248,13 @@ async def _run(args: argparse.Namespace) -> None:
     model_file_overrides = _parse_family_path_overrides(args.model_file)
     policy_file_overrides = _parse_family_path_overrides(args.policy_file)
     runtime_specs = _parse_runtime_specs(args.runtime_run_dir)
+    layering_enabled = bool(args.enable_layering)
+
+    if layering_enabled:
+        if any(series != "KXBTC15M" for series in args.series):
+            raise RuntimeError("Path-dependent layering v1 currently supports only the KXBTC15M series.")
+        if any(not ticker.startswith("KXBTC15M") for ticker in args.ticker):
+            raise RuntimeError("Path-dependent layering v1 currently supports only KXBTC15M tickers.")
 
     resolved_runtime_specs: list[tuple[str, str, Path, Path | None]] = []
     for family in args.model_family:
@@ -264,6 +300,8 @@ async def _run(args: argparse.Namespace) -> None:
     for label, family, model_file, policy_file in resolved_runtime_specs:
         signal_config, loaded_policy_file = signal_config_from_env_and_policy(environment, policy_file)
         signal_config = apply_signal_config_overrides(signal_config, args)
+        if layering_enabled:
+            signal_config = replace(signal_config, auto_reserve_trade_intents=False)
 
         if family == "linear_svm":
             scorer = KalshiLinearSVMScorer(
@@ -292,9 +330,22 @@ async def _run(args: argparse.Namespace) -> None:
                 "Current multi-model regularized artifacts are legacy LTP-trained models and are restricted to paper "
                 "mode until quote-aware retraining and offline evaluation are complete."
             )
-        execution_engine = KalshiExecutionEngine(signal_engine, execution_config)
+        layering_engine = None
+        if layering_enabled:
+            layering_engine = KalshiPathDependentBinaryLayeringEngine(
+                signal_engine,
+                log_dir=log_root / "layering" / label,
+            )
+        execution_engine = KalshiExecutionEngine(
+            signal_engine,
+            execution_config,
+            trade_intent_source=layering_engine,
+        )
+        if layering_engine is not None:
+            layering_engine.bind_execution_engine(execution_engine)
         signal_queue = signal_engine.subscribe_queue()
         execution_queue = execution_engine.subscribe_queue()
+        layering_queue = None if layering_engine is None else layering_engine.subscribe_queue()
 
         print(f"Configured runtime: {label}")
         print(f"  family: {family}")
@@ -305,6 +356,8 @@ async def _run(args: argparse.Namespace) -> None:
             print("  policy file: env/default signal config")
         print(f"  signal log dir: {log_root / 'signal' / label}")
         print(f"  execution log dir: {log_root / 'execution' / label}")
+        if layering_engine is not None:
+            print(f"  layering log dir: {log_root / 'layering' / label}")
 
         model_runtimes.append(
             ModelRuntime(
@@ -315,8 +368,10 @@ async def _run(args: argparse.Namespace) -> None:
                 scorer=scorer,
                 signal_engine=signal_engine,
                 execution_engine=execution_engine,
+                layering_engine=layering_engine,
                 signal_queue=signal_queue,
                 execution_queue=execution_queue,
+                layering_queue=layering_queue,
             )
         )
 
@@ -333,6 +388,8 @@ async def _run(args: argparse.Namespace) -> None:
         await runtime.scorer.start()
         await runtime.signal_engine.start()
         await runtime.execution_engine.start()
+        if runtime.layering_engine is not None:
+            await runtime.layering_engine.start()
         print(
             f"[{runtime.label}] started",
             f"family={runtime.family}",
@@ -347,6 +404,7 @@ async def _run(args: argparse.Namespace) -> None:
             f"kelly_mult={runtime.signal_engine.config.kelly_fraction_multiplier}",
             f"kelly_cap={runtime.signal_engine.config.kelly_fraction_cap_pct}",
             f"stacking={runtime.signal_engine.config.allow_stacking}",
+            f"layering={runtime.layering_engine is not None}",
         )
 
     consumer_tasks: list[asyncio.Task] = []
@@ -363,6 +421,13 @@ async def _run(args: argparse.Namespace) -> None:
                 name=f"{runtime.label}-execution-printer",
             )
         )
+        if runtime.layering_queue is not None:
+            consumer_tasks.append(
+                asyncio.create_task(
+                    _consume_layering_updates(runtime.label, runtime.layering_queue),
+                    name=f"{runtime.label}-layering-printer",
+                )
+            )
 
     print("Shared multi-model paper stack started.")
     print("Dashboard root:", log_root)
@@ -380,6 +445,8 @@ async def _run(args: argparse.Namespace) -> None:
             except asyncio.CancelledError:
                 pass
         for runtime in reversed(model_runtimes):
+            if runtime.layering_engine is not None:
+                await runtime.layering_engine.stop()
             await runtime.execution_engine.stop()
             await runtime.signal_engine.stop()
             await runtime.scorer.stop()
@@ -438,6 +505,11 @@ def main() -> None:
     parser.add_argument("--ticker", action="append", default=[], help="Explicit market ticker filter")
     parser.add_argument("--log-root", default="output/live/kalshi", help="Root folder for raw, signal, and execution logs")
     parser.add_argument("--metadata-refresh-interval-seconds", type=float, default=300.0)
+    parser.add_argument(
+        "--enable-layering",
+        action="store_true",
+        help="Enable the path-dependent binary layering engine for KXBTC15M runtimes.",
+    )
     args = parser.parse_args()
     if not args.model_family and not args.runtime_run_dir:
         args.model_family = ["lasso", "elastic_net", "bagged_lasso", "linear_svm"]

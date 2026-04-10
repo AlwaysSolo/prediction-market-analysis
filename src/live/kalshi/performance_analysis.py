@@ -83,6 +83,7 @@ class SourceLoadResult:
     calibration_summary_rows: list[dict[str, Any]] = field(default_factory=list)
     skip_reason_rows: list[dict[str, Any]] = field(default_factory=list)
     quote_quality_rows: list[dict[str, Any]] = field(default_factory=list)
+    thesis_summary_rows: list[dict[str, Any]] = field(default_factory=list)
     metadata_extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -522,6 +523,7 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
         settlement_result = _clean_string((settled_payload or {}).get("settlement_result"))
         realized_pnl = _safe_float((settled_payload or {}).get("realized_pnl_dollars"))
         cumulative_pnl = _safe_float((settled_payload or {}).get("cumulative_realized_pnl_dollars"))
+        thesis_id = _clean_string((settled_payload or {}).get("thesis_id")) or _clean_string(payload.get("thesis_id"))
         offline_rule_side = None
         same_as_offline_rule = None
         if predicted_yes_probability is not None and feature_basis_market_prob is not None:
@@ -538,6 +540,7 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
             "model": model,
             "ticker": _clean_string((settled_payload or {}).get("ticker")) or _clean_string(payload.get("ticker")),
             "decision_id": decision_id,
+            "thesis_id": thesis_id,
             "sample_id": None,
             "side": side,
             "recorded_at": approved_at,
@@ -581,6 +584,30 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
             "bucket_policy_side": _clean_string(payload.get("bucket_policy_side")),
             "bucket_policy_dimension": _clean_string(payload.get("bucket_policy_dimension")),
             "bucket_policy_bucket": _clean_string(payload.get("bucket_policy_bucket")),
+            "tranche_index": _safe_int((settled_payload or {}).get("tranche_index"))
+            if (settled_payload or {}).get("tranche_index") is not None
+            else _safe_int(payload.get("tranche_index")),
+            "tranche_window": _clean_string((settled_payload or {}).get("tranche_window"))
+            or _clean_string(payload.get("tranche_window")),
+            "tranche_reason": _clean_string((settled_payload or {}).get("tranche_reason"))
+            or _clean_string(payload.get("tranche_reason")),
+            "lifecycle_state": _clean_string((settled_payload or {}).get("lifecycle_state"))
+            or _clean_string(payload.get("lifecycle_state")),
+            "total_thesis_budget_dollars": _safe_float((settled_payload or {}).get("total_thesis_budget_dollars"))
+            if (settled_payload or {}).get("total_thesis_budget_dollars") is not None
+            else _safe_float(payload.get("total_thesis_budget_dollars")),
+            "payout_if_yes_dollars": _safe_float((settled_payload or {}).get("payout_if_yes_dollars"))
+            if (settled_payload or {}).get("payout_if_yes_dollars") is not None
+            else _safe_float(payload.get("payout_if_yes_dollars")),
+            "payout_if_no_dollars": _safe_float((settled_payload or {}).get("payout_if_no_dollars"))
+            if (settled_payload or {}).get("payout_if_no_dollars") is not None
+            else _safe_float(payload.get("payout_if_no_dollars")),
+            "expected_value_dollars": _safe_float((settled_payload or {}).get("expected_value_dollars"))
+            if (settled_payload or {}).get("expected_value_dollars") is not None
+            else _safe_float(payload.get("expected_value_dollars")),
+            "worst_case_loss_dollars": _safe_float((settled_payload or {}).get("worst_case_loss_dollars"))
+            if (settled_payload or {}).get("worst_case_loss_dollars") is not None
+            else _safe_float(payload.get("worst_case_loss_dollars")),
             "offline_rule_side": offline_rule_side,
             "same_as_offline_rule": same_as_offline_rule,
             "one_sided_quote": one_sided_quote,
@@ -611,6 +638,7 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
     metadata_extras.update(_time_lag_summary([row for row in canonical_rows if row.get("status") == "settled"]))
 
     quote_quality_rows = _quote_quality_summary_rows(canonical_rows)
+    thesis_summary_rows = _thesis_summary_rows(canonical_rows)
     return SourceLoadResult(
         source_type="live_execution",
         run_dir=run_dir,
@@ -619,6 +647,7 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
         skipped_lines_by_file=skipped_lines_by_file,
         skip_reason_rows=skip_reason_rows,
         quote_quality_rows=quote_quality_rows,
+        thesis_summary_rows=thesis_summary_rows,
         metadata_extras=metadata_extras,
     )
 
@@ -1064,6 +1093,44 @@ def _quote_quality_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
     return summaries
 
 
+def _thesis_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        thesis_id = _clean_string(row.get("thesis_id"))
+        model = _clean_string(row.get("model"))
+        if thesis_id is None or model is None:
+            continue
+        grouped[(model, thesis_id)].append(row)
+
+    summaries: list[dict[str, Any]] = []
+    for (model, thesis_id), group in sorted(grouped.items()):
+        settled_rows = [row for row in group if row.get("status") == "settled"]
+        recorded_times = [_parse_timestamp(row.get("recorded_at")) for row in group]
+        settled_times = [_parse_timestamp(row.get("settled_at")) for row in settled_rows]
+        budget_values = [_safe_float(row.get("total_thesis_budget_dollars")) for row in group]
+        loss_values = [_safe_float(row.get("worst_case_loss_dollars")) for row in group]
+        pnl_values = [_safe_float(row.get("realized_pnl_dollars")) for row in settled_rows]
+        tranche_indices = [_safe_int(row.get("tranche_index")) for row in group]
+        summaries.append(
+            {
+                "model": model,
+                "thesis_id": thesis_id,
+                "ticker": _clean_string(group[0].get("ticker")),
+                "status": "settled" if len(settled_rows) == len(group) and group else "open",
+                "tranche_count": len(group),
+                "max_tranche_index": max((value for value in tranche_indices if value is not None), default=None),
+                "settled_tranche_count": len(settled_rows),
+                "net_pnl_dollars": sum(value or 0.0 for value in pnl_values),
+                "total_cash_required_dollars": sum(_safe_float(row.get("cash_required_dollars")) or 0.0 for row in group),
+                "total_thesis_budget_dollars": max((value for value in budget_values if value is not None), default=None),
+                "max_worst_case_loss_dollars": max((value for value in loss_values if value is not None), default=None),
+                "opened_at": min((value for value in recorded_times if value is not None), default=None),
+                "settled_at": max((value for value in settled_times if value is not None), default=None),
+            }
+        )
+    return summaries
+
+
 def _model_totals_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_model: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -1490,6 +1557,17 @@ def _report_markdown(
                 f"{_format_pct(_safe_float(row.get('win_rate')))} | {_format_currency(_safe_float(row.get('net_pnl_dollars')))} |"
             )
 
+    if result.thesis_summary_rows:
+        lines.extend(["", "## Thesis Summary", "", "| Model | Thesis | Ticker | Tranches | Status | Net PnL | Worst Loss Cap |", "| --- | --- | --- | ---: | --- | ---: | ---: |"])
+        for row in result.thesis_summary_rows[:20]:
+            thesis_id = str(row["thesis_id"])
+            lines.append(
+                f"| {row['model']} | {thesis_id[:12]} | {row.get('ticker') or 'n/a'} | "
+                f"{_format_number(_safe_int(row.get('tranche_count')), 0)} | {row.get('status') or 'unknown'} | "
+                f"{_format_currency(_safe_float(row.get('net_pnl_dollars')))} | "
+                f"{_format_currency(_safe_float(row.get('max_worst_case_loss_dollars')))} |"
+            )
+
     if result.notes:
         lines.extend(["", "## Notes", ""])
         lines.extend(f"- {note}" for note in result.notes)
@@ -1534,6 +1612,7 @@ def _write_run_outputs(
         "trade_metrics.csv": result.trade_metrics_rows,
         "calibration_summary.csv": result.calibration_summary_rows,
         "quote_quality_summary.csv": result.quote_quality_rows,
+        "thesis_summary.csv": result.thesis_summary_rows,
     }
     for filename, rows in files_to_write.items():
         path = output_dir / filename
