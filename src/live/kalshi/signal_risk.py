@@ -290,6 +290,7 @@ class KalshiTradeIntent:
     estimated_fees_dollars: float
     estimated_cash_required_dollars: float
     generated_at: datetime
+    stacking_signature: StackingSignature | None = None
     thesis_id: str | None = None
     tranche_index: int | None = None
     tranche_window: str | None = None
@@ -653,6 +654,7 @@ class _SideEvaluation:
 
 class KalshiSignalRiskEngine:
     _EXPIRED_RESERVATION_GRACE_SECONDS = 60.0
+    _CLAIM_RESERVATION_GRACE_SECONDS = 120.0
 
     def __init__(
         self,
@@ -796,6 +798,41 @@ class KalshiSignalRiskEngine:
             open_positions=open_positions,
             pending_reservations=pending_reservations,
         )
+
+    def claim_trade_intent_reservation(self, intent: KalshiTradeIntent) -> None:
+        reservation, reservation_source = self._lookup_reservation(intent.decision_id)
+        extend_until = utc_now() + timedelta(seconds=self._CLAIM_RESERVATION_GRACE_SECONDS)
+        if reservation is None:
+            reservation = _PendingReservation(
+                decision_id=intent.decision_id,
+                ticker=intent.ticker,
+                side=intent.side,
+                contracts=intent.contracts,
+                entry_cost_dollars=intent.estimated_entry_cost_dollars,
+                fees_dollars=intent.estimated_fees_dollars,
+                cash_required_dollars=intent.estimated_cash_required_dollars,
+                created_at=intent.generated_at,
+                expires_at=extend_until,
+                is_acknowledged=False,
+                stacking_signature=intent.stacking_signature,
+            )
+            self._pending_reservations[intent.decision_id] = reservation
+            self._mark_stacking_signature_active(reservation)
+            return
+
+        if reservation_source == "expired":
+            self._expired_reservations.pop(intent.decision_id, None)
+            self._pending_reservations[intent.decision_id] = reservation
+            self._mark_stacking_signature_active(reservation)
+
+        reservation.entry_cost_dollars = intent.estimated_entry_cost_dollars
+        reservation.fees_dollars = intent.estimated_fees_dollars
+        reservation.cash_required_dollars = intent.estimated_cash_required_dollars
+        if reservation.stacking_signature is None and intent.stacking_signature is not None:
+            reservation.stacking_signature = intent.stacking_signature
+            self._mark_stacking_signature_active(reservation)
+        if reservation.expires_at is None or reservation.expires_at < extend_until:
+            reservation.expires_at = extend_until
 
     def resolve_manual_trade_contracts(
         self,
@@ -1956,6 +1993,7 @@ class KalshiSignalRiskEngine:
             estimated_fees_dollars=candidate.fees_dollars,
             estimated_cash_required_dollars=candidate.cash_required_dollars,
             generated_at=generated_at,
+            stacking_signature=resolved_signature,
         )
 
     def _decision_signature(self, state: KalshiSignalDecisionState) -> tuple[Any, ...]:

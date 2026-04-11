@@ -1,0 +1,170 @@
+# Live Rollout Plan for Exact-Match Bagged-Lasso Layering
+
+## Summary
+Run the first live deployment as a **phased exact-match rollout** of the winning shadow configuration, with only one code-level blocker fix required before launch.
+
+Chosen live target:
+- Runtime: `EC2` in `tmux`
+- Session style: first run is a **full trading day**
+- Capital isolation: **tiny dedicated subaccount**
+- Strategy posture: match the strong shadow run as closely as possible, not re-optimize first
+
+Exact strategy config to preserve from the winning shadow run:
+- `--signal-profile dedicated-v1`
+- `--enable-layering`
+- `--allow-stacking`
+- `--disable-regime-control`
+- `--edge-threshold-cents 2`
+
+The only prelaunch code change in scope is the **critical reservation/execution handoff bug** that produced `Unknown reservation decision id ...` during the shadow run. No other strategy tightening or behavior changes should be introduced before the first live session.
+
+## Key Changes
+### 1. Critical blocker fix before live
+Fix and validate the reservation-state mismatch between layering-emitted intents, signal-risk reservations, and execution consumption.
+
+Required outcome:
+- no `Unknown reservation decision id` errors
+- every emitted live thesis/tranche ends in a valid terminal state:
+  - filled
+  - cancelled
+  - rejected
+  - or explicitly released
+- restart/recovery does not orphan reserved decisions
+
+Implementation intent:
+- treat this as a correctness fix only
+- do not alter strategy logic, thresholds, or tranche math while fixing it
+
+### 2. Live config to match shadow as closely as possible
+Use the same effective strategy settings that produced the strong shadow result.
+
+Live command shape:
+```powershell
+C:\Python312\python.exe scripts\run_kalshi_bagged_lasso_live.py `
+  --mode live `
+  --confirm-live `
+  --enable-layering `
+  --allow-stacking `
+  --disable-regime-control `
+  --edge-threshold-cents 2 `
+  --signal-profile dedicated-v1 `
+  --log-root output\live\kalshi_bagged_lasso_live_exact_shadow_edge2
+```
+
+Environment/defaults:
+- `KALSHI_PROD_API_KEY_ID`
+- `KALSHI_PROD_PRIVATE_KEY_PATH`
+- `KALSHI_PROD_EXECUTION_SUBACCOUNT=<dedicated tiny subaccount>`
+- `KALSHI_PROD_EXECUTION_ENABLE_LIVE_TRADING=true`
+
+Operational choice:
+- use a **new live log root**, never the shadow folder
+- keep layering enabled exactly as tested
+- keep regime control disabled for this rollout because the shadow win profile depended on broad participation and recent higher-timeframe conditions penalized `YES`
+
+### 3. Bankroll and subaccount plan
+Use a **separate dedicated live subaccount** funded only for this rollout.
+
+Sizing default:
+- target bankroll: **$25**
+- do not start with the main production bankroll
+- do not co-mingle this test with other live strategies
+
+Why this size:
+- shadow peak deployed capital was only about `$2.69`
+- largest settled single tranche was about `$1.24`
+- max total thesis budget observed was about `$5.49`
+- `$25` gives cushion for live fill variance, reservation overlap, and operational mistakes while still keeping the rollout intentionally tiny
+
+### 4. Launch sequence
+Run the launch in four phases, but keep the strategy config the same across phases.
+
+Phase A: EC2 parity check
+- verify the exact artifact bundle and policy file on EC2
+- verify Python / dependency environment
+- verify key file permissions and prod subaccount access
+- run the same configuration once in `shadow` on EC2 for a short smoke to confirm environment parity
+
+Phase B: live preflight immediately before launch
+- confirm subaccount balance and zero unexpected open positions
+- confirm websocket quote stream is live
+- confirm dashboard folder loads correctly
+- confirm no stale/crossed quote flood or repeated startup exceptions
+- confirm live mode prints the expected config:
+  - `layering=True`
+  - `stacking=True`
+  - `regime=False`
+  - `edge=2.0`
+
+Phase C: first live trading day
+- start at the beginning of a normal trading day window
+- run in `tmux`
+- keep the dashboard open throughout the session
+- monitor the first several fills closely to compare actual live fill behavior versus the shadow assumptions
+
+Phase D: post-run analysis
+- generate the same performance outputs used for the shadow evaluation
+- compare live against shadow on:
+  - thesis count
+  - tranche count
+  - fill rate
+  - average entry price versus quote-time reference price
+  - realized PnL
+  - side breakdown (`YES` vs `NO`)
+  - window breakdown (`10m`, `5m`, `3m`, `1m`)
+  - rejection reasons
+  - any execution or reservation errors
+
+## Monitoring and Operator Rules
+### Live monitoring
+Use the existing dashboard and watch these first:
+- blocked signal breakdown
+- claimed trades and open positions
+- execution errors / consume errors
+- latest portfolio snapshot
+- actual fill cadence by decision window
+
+Additional must-watch live deltas versus shadow:
+- how often IOC orders fail to fill when shadow would have filled
+- how often live price is worse than the quote-time reference price
+- whether `NO` continues to carry the run
+- whether `YES` remains weak but acceptable, rather than catastrophically worse
+
+### Manual stop rules for the first live session
+Because the stack does not currently have a built-in daily kill switch, use operator-level stop conditions:
+
+Stop the run immediately if any of these happen:
+- any recurrence of `Unknown reservation decision id`
+- repeated order submit/reconcile errors
+- dashboard stops updating or event logs stall unexpectedly
+- fill behavior is clearly inconsistent with the order book for multiple consecutive trades
+- unexpected open positions appear outside this strategy’s expected thesis ledger
+- live realized loss exceeds the tiny-rollout tolerance you choose for the day
+
+Default daily stop for this first rollout:
+- stop manually if realized drawdown reaches **$5**
+- stop manually if two operational errors occur, even if PnL is fine
+
+## Test Plan
+Before the first live dollar:
+- validate the critical reservation fix with a targeted layering/execution recovery test
+- rerun the exact shadow configuration locally or on EC2 and confirm no reservation mismatch occurs
+- confirm live-mode preflight against the dedicated subaccount
+- confirm a fresh dashboard session reads the new live log root
+
+First-day acceptance criteria:
+- runner starts cleanly in live mode with the exact intended config
+- no reservation/execution state mismatch
+- actual live orders are submitted and reconciled correctly
+- first trading day completes without manual emergency unwind
+- post-run analysis is generated and comparable to the shadow run
+
+## Assumptions and Defaults
+- The first live rollout is intentionally **exact-match**, not a new strategy experiment
+- Regime control stays disabled for this rollout
+- `2c` edge threshold stays in place
+- Layering and stacking remain enabled
+- The live rollout uses a **dedicated $25 subaccount**
+- Early exit remains out of scope
+- The reporting/parser gap in the generic analyzer is not a launch blocker if archive-driven analysis still works
+- Only the reservation/execution mismatch is treated as a required code fix before launch

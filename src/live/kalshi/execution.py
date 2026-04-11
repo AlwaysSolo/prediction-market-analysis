@@ -722,6 +722,7 @@ class KalshiExecutionEngine:
         existing = self._states.get(intent.decision_id)
         if existing is not None:
             return
+        self.signal_engine.claim_trade_intent_reservation(intent)
 
         claimed_state = KalshiExecutionIntentState(
             decision_id=intent.decision_id,
