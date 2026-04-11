@@ -67,6 +67,64 @@ def _make_live_execution_run(base: Path) -> Path:
                     "bucket_policy_bucket": "30-40",
                 },
             },
+            {
+                "logged_at": "2026-04-01T12:02:00+00:00",
+                "event_type": "signal_decision",
+                "payload": {
+                    "approved": True,
+                    "decision_id": "dec-3",
+                    "ticker": "KXBTC15M-TEST3",
+                    "side": "NO",
+                    "predicted_yes_probability": 0.34,
+                    "predicted_no_probability": 0.66,
+                    "feature_basis_market_prob": 0.48,
+                    "raw_model_edge": -0.14,
+                    "yes_post_cost_edge": -0.20,
+                    "no_post_cost_edge": 0.08,
+                    "tau_minutes": 5.0,
+                    "reference_price_cents": 32,
+                    "quote_spread_cents": 1,
+                    "quote_age_seconds": 0.2,
+                    "quote_mid_prob": 0.33,
+                    "buy_yes_price_cents": 68,
+                    "buy_no_price_cents": 32,
+                    "yes_bid_cents": 67,
+                    "yes_ask_cents": 68,
+                    "regime_label": "downtrend",
+                    "bearish_vote_count": 2,
+                    "bullish_vote_count": 0,
+                    "tranche_window": "5m",
+                },
+            },
+            {
+                "logged_at": "2026-04-01T12:03:00+00:00",
+                "event_type": "signal_decision",
+                "payload": {
+                    "approved": True,
+                    "decision_id": "dec-4",
+                    "ticker": "KXBTC15M-TEST4",
+                    "side": "NO",
+                    "predicted_yes_probability": 0.29,
+                    "predicted_no_probability": 0.71,
+                    "feature_basis_market_prob": 0.44,
+                    "raw_model_edge": -0.15,
+                    "yes_post_cost_edge": -0.22,
+                    "no_post_cost_edge": 0.10,
+                    "tau_minutes": 3.0,
+                    "reference_price_cents": 41,
+                    "quote_spread_cents": 2,
+                    "quote_age_seconds": 0.1,
+                    "quote_mid_prob": 0.42,
+                    "buy_yes_price_cents": 59,
+                    "buy_no_price_cents": 41,
+                    "yes_bid_cents": 58,
+                    "yes_ask_cents": 59,
+                    "regime_label": "downtrend",
+                    "bearish_vote_count": 2,
+                    "bullish_vote_count": 0,
+                    "tranche_window": "3m",
+                },
+            },
         ],
         malformed_tail='{"logged_at":"broken"',
     )
@@ -86,7 +144,69 @@ def _make_live_execution_run(base: Path) -> Path:
                     "realized_pnl_dollars": 0.44,
                     "cumulative_realized_pnl_dollars": 0.44,
                 },
-            }
+            },
+            {
+                "logged_at": "2026-04-01T12:02:05+00:00",
+                "event_type": "submit_requested",
+                "payload": {
+                    "decision_id": "dec-3",
+                    "ticker": "KXBTC15M-TEST3",
+                    "side": "NO",
+                    "contracts": 1,
+                    "limit_price_cents": 50,
+                    "reference_price_cents": 32,
+                    "subaccount": 0,
+                },
+            },
+            {
+                "logged_at": "2026-04-01T12:02:05.100000+00:00",
+                "event_type": "submit_response",
+                "payload": {
+                    "decision_id": "dec-3",
+                    "response": {
+                        "order": {
+                            "order_id": "order-3",
+                            "client_order_id": "dec-3",
+                            "ticker": "KXBTC15M-TEST3",
+                            "side": "no",
+                            "status": "canceled",
+                            "no_price_dollars": "0.5000",
+                            "yes_price_dollars": "0.5000",
+                            "fill_count_fp": "0.00",
+                            "remaining_count_fp": "0.00",
+                            "initial_count_fp": "1.00",
+                            "taker_fees_dollars": "0.000000",
+                            "maker_fees_dollars": "0.000000",
+                            "taker_fill_cost_dollars": "0.000000",
+                            "maker_fill_cost_dollars": "0.000000",
+                            "created_time": "2026-04-01T12:02:05.090000Z",
+                            "last_update_time": "2026-04-01T12:02:05.090000Z",
+                        }
+                    },
+                },
+            },
+            {
+                "logged_at": "2026-04-01T12:03:05+00:00",
+                "event_type": "submit_requested",
+                "payload": {
+                    "decision_id": "dec-4",
+                    "ticker": "KXBTC15M-TEST4",
+                    "side": "NO",
+                    "contracts": 1,
+                    "limit_price_cents": 50,
+                    "reference_price_cents": 41,
+                    "subaccount": 0,
+                },
+            },
+            {
+                "logged_at": "2026-04-01T12:03:05.100000+00:00",
+                "event_type": "submit_error",
+                "payload": {
+                    "decision_id": "dec-4",
+                    "status_code": 400,
+                    "response": "{\"error\":{\"code\":\"invalid_subaccount_number\",\"message\":\"invalid subaccount number\",\"service\":\"exchange\"}}",
+                },
+            },
         ],
     )
     return run_dir
@@ -288,11 +408,24 @@ def test_generate_kalshi_performance_reports_for_live_execution(tmp_path: Path) 
     assert blocked_row["bucket_policy_side"] == "YES"
     assert blocked_row["bucket_policy_dimension"] == "price"
     assert blocked_row["bucket_policy_bucket"] == "30-40"
+    execution_df = pd.read_csv(artifacts["execution_rows.csv"])
+    assert set(execution_df["decision_id"]) == {"dec-3", "dec-4"}
+    assert "cancelled_zero_fill" in set(execution_df["execution_outcome"])
+    assert "submit_rejected" in set(execution_df["execution_outcome"])
+    execution_quality_df = pd.read_csv(artifacts["execution_quality_summary.csv"])
+    side_row = execution_quality_df.loc[
+        (execution_quality_df["scope"] == "all_models")
+        & (execution_quality_df["dimension"] == "side")
+        & (execution_quality_df["bucket"] == "NO")
+    ].iloc[0]
+    assert int(side_row["attempted_count"]) == 2
+    assert int(side_row["zero_fill_cancel_count"]) == 1
 
     report_text = Path(artifacts["report.md"]).read_text(encoding="utf-8")
     assert "Model Totals" in report_text
     assert "Skip Reasons" in report_text
     assert "Quote Quality Effects" in report_text
+    assert "Execution Quality" in report_text
 
 
 def test_generate_kalshi_performance_reports_for_live_research(tmp_path: Path) -> None:
