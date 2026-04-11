@@ -199,17 +199,16 @@ def test_validate_live_runner_preflight_rejects_missing_confirm_live() -> None:
         )
 
 
-def test_validate_live_runner_preflight_rejects_zero_subaccount() -> None:
-    with pytest.raises(RuntimeError, match="nonzero production subaccount"):
-        validate_live_runner_preflight(
-            mode="shadow",
-            confirm_live=False,
-            execution_config=KalshiExecutionConfig(
-                mode=KalshiExecutionMode.SHADOW,
-                enable_live_trading=False,
-                subaccount=0,
-            ),
-        )
+def test_validate_live_runner_preflight_allows_primary_account_subaccount_zero() -> None:
+    validate_live_runner_preflight(
+        mode="shadow",
+        confirm_live=False,
+        execution_config=KalshiExecutionConfig(
+            mode=KalshiExecutionMode.SHADOW,
+            enable_live_trading=False,
+            subaccount=0,
+        ),
+    )
 
 
 def test_validate_live_runner_preflight_rejects_live_without_enable_flag() -> None:

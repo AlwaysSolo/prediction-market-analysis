@@ -141,8 +141,6 @@ def validate_live_runner_preflight(
     confirm_live: bool,
     execution_config: KalshiExecutionConfig,
 ) -> None:
-    if execution_config.subaccount <= 0:
-        raise RuntimeError("Dedicated bagged-lasso live runner requires a nonzero production subaccount.")
     if mode == "live" and not confirm_live:
         raise RuntimeError("Live mode requires --confirm-live.")
     if mode == "live" and not execution_config.enable_live_trading:

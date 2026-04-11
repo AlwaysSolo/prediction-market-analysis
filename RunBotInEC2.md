@@ -2,7 +2,7 @@ Use this as the EC2 runbook for the exact-match bagged-lasso layering rollout.
 
 The goal of this rollout is simple:
 - match the winning shadow configuration as closely as possible
-- use a tiny isolated production subaccount
+- use either a tiny isolated production subaccount or the primary account if bankroll is already intentionally tiny
 - keep the first live day operationally tight
 
 Exact config we are preserving:
@@ -13,7 +13,8 @@ Exact config we are preserving:
 - `--edge-threshold-cents 2`
 
 Recommended bankroll for the first live rollout:
-- dedicated subaccount funded with about `$25`
+- ideally a dedicated subaccount funded with about `$25`
+- if the primary account is already intentionally tiny, `subaccount 0` is acceptable for rollout one
 
 **1. SSH into EC2**
 
@@ -66,13 +67,15 @@ Create `.env` in the repo root:
 cat > .env <<'EOF'
 KALSHI_PROD_API_KEY_ID=your_kalshi_api_key_id
 KALSHI_PROD_PRIVATE_KEY_PATH=/home/ec2-user/.kalshi/kalshi-prod-api.pem
-KALSHI_PROD_EXECUTION_SUBACCOUNT=123
+KALSHI_PROD_EXECUTION_SUBACCOUNT=0
 KALSHI_PROD_EXECUTION_ENABLE_LIVE_TRADING=true
 EOF
 ```
 
 Important:
 - `KALSHI_PROD_EXECUTION_SUBACCOUNT` must be the numeric Kalshi `subaccount_number`
+- use `0` for the primary account
+- use `1-32` for a created subaccount
 - it is not a UI label, UUID, or arbitrary account identifier
 - the runner now validates this at startup and will print the valid subaccount numbers returned by Kalshi
 
@@ -122,7 +125,7 @@ uv run python scripts/run_kalshi_bagged_lasso_live.py \
 What to confirm:
 - `Runner mode: shadow`
 - `Environment: production`
-- `Subaccount: <nonzero>`
+- `Subaccount: 0` for primary or another valid numeric Kalshi subaccount
 - `regime=False`
 - `edge=2.0c`
 - `stacking=True`
@@ -190,7 +193,7 @@ uv run python scripts/run_kalshi_bagged_lasso_live.py \
 What to confirm immediately:
 - `Runner mode: live`
 - `Environment: production`
-- `Subaccount: <nonzero>`
+- `Subaccount: 0` for primary or another valid numeric Kalshi subaccount
 - `regime=False`
 - `edge=2.0c`
 - `stacking=True`
@@ -267,8 +270,8 @@ uv run python scripts/repair_kalshi_live_archive.py \
 All of these should be true:
 - production Kalshi API key is correct
 - production signing key path is correct
-- subaccount is the isolated live-test subaccount
-- subaccount size is intentionally tiny for rollout one
+- subaccount is either `0` for the primary account or a valid created Kalshi subaccount number
+- the bankroll behind that account is intentionally tiny for rollout one
 - EC2 shadow smoke with the exact flags ran cleanly
 - dashboard is reading the exact live log root
 - no reservation/execution handoff errors are appearing
