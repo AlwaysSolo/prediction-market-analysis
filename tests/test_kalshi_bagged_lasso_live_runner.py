@@ -10,6 +10,7 @@ from scripts.run_kalshi_bagged_lasso_live import (
     DEDICATED_LIVE_SIGNAL_PROFILE,
     RESEARCH_PARITY_SIGNAL_PROFILE,
     _build_live_signal_config,
+    validate_configured_subaccount_number,
     validate_live_runner_preflight,
 )
 
@@ -234,3 +235,32 @@ def test_validate_live_runner_preflight_allows_shadow_mode() -> None:
             subaccount=7,
         ),
     )
+
+
+def test_validate_configured_subaccount_number_accepts_known_subaccount() -> None:
+    validate_configured_subaccount_number(
+        configured_subaccount=7,
+        subaccount_balances=[
+            {"subaccount_number": 0, "balance": 100},
+            {"subaccount_number": 7, "balance": 2500},
+        ],
+    )
+
+
+def test_validate_configured_subaccount_number_rejects_unknown_subaccount() -> None:
+    with pytest.raises(RuntimeError, match="Valid subaccount numbers: 0, 7"):
+        validate_configured_subaccount_number(
+            configured_subaccount=123,
+            subaccount_balances=[
+                {"subaccount_number": 0, "balance": 100},
+                {"subaccount_number": 7, "balance": 2500},
+            ],
+        )
+
+
+def test_validate_configured_subaccount_number_rejects_empty_response() -> None:
+    with pytest.raises(RuntimeError, match="did not return any subaccount numbers"):
+        validate_configured_subaccount_number(
+            configured_subaccount=7,
+            subaccount_balances=[],
+        )

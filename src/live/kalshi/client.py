@@ -134,6 +134,10 @@ class KalshiLiveRestClient:
     def get_balance(self, *, subaccount: int = 0) -> dict[str, Any]:
         return self._get("/portfolio/balance", params={"subaccount": subaccount})
 
+    def get_subaccount_balances(self) -> list[dict[str, Any]]:
+        payload = self._get("/portfolio/subaccounts/balances")
+        return list(payload.get("subaccount_balances", []))
+
     def iter_positions(
         self,
         *,

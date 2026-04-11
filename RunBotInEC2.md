@@ -71,6 +71,11 @@ KALSHI_PROD_EXECUTION_ENABLE_LIVE_TRADING=true
 EOF
 ```
 
+Important:
+- `KALSHI_PROD_EXECUTION_SUBACCOUNT` must be the numeric Kalshi `subaccount_number`
+- it is not a UI label, UUID, or arbitrary account identifier
+- the runner now validates this at startup and will print the valid subaccount numbers returned by Kalshi
+
 Load it:
 
 ```bash

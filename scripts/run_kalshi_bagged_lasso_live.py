@@ -167,6 +167,47 @@ async def _preflight_subaccount(
     return balance, positions
 
 
+async def _fetch_subaccount_balances(
+    collector_config: KalshiCollectorConfig,
+) -> list[dict]:
+    client = KalshiLiveRestClient(collector_config)
+    try:
+        return await asyncio.to_thread(client.get_subaccount_balances)
+    finally:
+        client.close()
+
+
+def validate_configured_subaccount_number(
+    *,
+    configured_subaccount: int,
+    subaccount_balances: list[dict],
+) -> None:
+    valid_subaccounts: list[int] = []
+    for item in subaccount_balances:
+        raw_number = item.get("subaccount_number")
+        if raw_number is None:
+            continue
+        try:
+            valid_subaccounts.append(int(raw_number))
+        except (TypeError, ValueError):
+            continue
+    valid_subaccounts = sorted(set(valid_subaccounts))
+    if configured_subaccount in valid_subaccounts:
+        return
+    if valid_subaccounts:
+        valid_display = ", ".join(str(number) for number in valid_subaccounts)
+        raise RuntimeError(
+            "Configured execution subaccount "
+            f"{configured_subaccount} is not a valid Kalshi subaccount number for this account. "
+            f"Valid subaccount numbers: {valid_display}. "
+            "Set KALSHI_PROD_EXECUTION_SUBACCOUNT to one of those numeric values."
+        )
+    raise RuntimeError(
+        "Kalshi did not return any subaccount numbers for this account during preflight. "
+        "Verify the API key has portfolio access and that the account has at least the primary subaccount."
+    )
+
+
 async def _await_ticker_stream(
     raw_queue: asyncio.Queue[KalshiRawStreamEvent],
     *,
@@ -299,6 +340,11 @@ async def _run(args: argparse.Namespace) -> None:
         metadata_refresh_interval_seconds=args.metadata_refresh_interval_seconds,
     )
 
+    subaccount_balances = await _fetch_subaccount_balances(collector_config)
+    validate_configured_subaccount_number(
+        configured_subaccount=execution_config.subaccount,
+        subaccount_balances=subaccount_balances,
+    )
     balance_payload, positions_payload = await _preflight_subaccount(
         collector_config,
         subaccount=execution_config.subaccount,
@@ -327,6 +373,15 @@ async def _run(args: argparse.Namespace) -> None:
         "Subaccount preflight:",
         f"balance_cents={balance_payload.get('balance')}",
         f"open_positions={len(positions_payload)}",
+    )
+    print(
+        "Available subaccounts:",
+        ",".join(
+            str(item.get("subaccount_number"))
+            for item in subaccount_balances
+            if item.get("subaccount_number") is not None
+        )
+        or "none",
     )
 
     collector = KalshiMarketDataCollector(collector_config)
