@@ -75,6 +75,17 @@ def _parse_timestamp(value: Any) -> datetime:
     return datetime.fromtimestamp(numeric, tz=UTC)
 
 
+def _compact_error_detail(value: str | None, *, max_length: int = 180) -> str | None:
+    if value is None:
+        return None
+    compact = " ".join(value.split())
+    if not compact:
+        return None
+    if len(compact) <= max_length:
+        return compact
+    return f"{compact[: max_length - 3]}..."
+
+
 class JsonlEventLogger:
     def __init__(self, base_dir: Path, environment: str):
         self.base_dir = base_dir
@@ -896,10 +907,24 @@ class KalshiExecutionEngine:
 
     async def _submit_live_intent(self, intent: KalshiTradeIntent) -> None:
         payload = build_create_order_payload(intent, subaccount=self.config.subaccount)
+        await self._logger.write(
+            "submit_requested",
+            {
+                "decision_id": intent.decision_id,
+                "ticker": intent.ticker,
+                "side": intent.side,
+                "contracts": intent.contracts,
+                "limit_price_cents": intent.max_acceptable_entry_price_cents,
+                "reference_price_cents": intent.reference_price_cents,
+                "subaccount": self.config.subaccount,
+                "payload": payload,
+            },
+        )
         try:
             response = await self._call_rest(self._rest_client.create_order, payload)
             await self._logger.write("submit_response", {"decision_id": intent.decision_id, "response": response})
         except httpx.HTTPStatusError as exc:
+            response_detail = _compact_error_detail(exc.response.text)
             await self._logger.write(
                 "submit_error",
                 {
@@ -911,23 +936,32 @@ class KalshiExecutionEngine:
             if exc.response.status_code == 409:
                 if await self._reconcile_or_retry(intent, reason="duplicate_client_order_id"):
                     return
-                await self._finalize_rejected(intent.decision_id, "duplicate_client_order_id")
+                await self._finalize_rejected(intent.decision_id, "duplicate_client_order_id", detail=response_detail)
                 return
             if 400 <= exc.response.status_code < 500:
-                await self._finalize_rejected(intent.decision_id, f"http_{exc.response.status_code}")
+                await self._finalize_rejected(
+                    intent.decision_id,
+                    f"http_{exc.response.status_code}",
+                    detail=response_detail,
+                )
                 return
             if await self._reconcile_or_retry(intent, reason=f"http_{exc.response.status_code}"):
                 return
-            await self._finalize_error(intent.decision_id, f"http_{exc.response.status_code}")
+            await self._finalize_error(
+                intent.decision_id,
+                f"http_{exc.response.status_code}",
+                detail=response_detail,
+            )
             return
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            error_detail = _compact_error_detail(repr(exc))
             await self._logger.write(
                 "submit_error",
                 {"decision_id": intent.decision_id, "error": repr(exc)},
             )
             if await self._reconcile_or_retry(intent, reason=type(exc).__name__):
                 return
-            await self._finalize_error(intent.decision_id, type(exc).__name__)
+            await self._finalize_error(intent.decision_id, type(exc).__name__, detail=error_detail)
             return
 
         await self._ensure_signal_accepted(intent.decision_id)
@@ -1024,7 +1058,7 @@ class KalshiExecutionEngine:
         self._states[decision_id] = accepted_state
         await self._publish_state(accepted_state)
 
-    async def _finalize_rejected(self, decision_id: str, reason: str) -> None:
+    async def _finalize_rejected(self, decision_id: str, reason: str, *, detail: str | None = None) -> None:
         await self.signal_engine.apply_execution_feedback(
             KalshiExecutionFeedback(decision_id=decision_id, status="rejected", event_time=utc_now())
         )
@@ -1033,7 +1067,7 @@ class KalshiExecutionEngine:
             state,
             status="rejected",
             event_time=utc_now(),
-            message=reason,
+            message=(reason if detail is None else f"{reason}: {detail}"),
             available_cash_dollars=self._current_available_cash_dollars(),
         )
         self._states[decision_id] = rejected_state
@@ -1054,7 +1088,7 @@ class KalshiExecutionEngine:
         self._states[decision_id] = cancelled_state
         await self._publish_state(cancelled_state)
 
-    async def _finalize_error(self, decision_id: str, reason: str) -> None:
+    async def _finalize_error(self, decision_id: str, reason: str, *, detail: str | None = None) -> None:
         await self.signal_engine.apply_execution_feedback(
             KalshiExecutionFeedback(decision_id=decision_id, status="rejected", event_time=utc_now())
         )
@@ -1063,7 +1097,7 @@ class KalshiExecutionEngine:
             state,
             status="error",
             event_time=utc_now(),
-            message=reason,
+            message=(reason if detail is None else f"{reason}: {detail}"),
             available_cash_dollars=self._current_available_cash_dollars(),
         )
         self._states[decision_id] = error_state
