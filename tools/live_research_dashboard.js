@@ -37,6 +37,10 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const setTextIfPresent = (id, value) => {
+  const node = $(id);
+  if (node) node.textContent = value;
+};
 
 const fmtMoney = (v) => `${v < 0 ? "-" : ""}$${Math.abs(Number(v || 0)).toFixed(2)}`;
 const fmtPct = (v, d = 1) => `${(Number(v || 0) * 100).toFixed(d)}%`;
@@ -572,6 +576,111 @@ function summarizeRows(rows) {
   };
 }
 
+function aggregateResearchSummary(summaryMap) {
+  const entries = Object.entries(summaryMap);
+  if (!entries.length) return null;
+
+  let recorded = 0;
+  let settled = 0;
+  let open = 0;
+  let invested = 0;
+  let realized = 0;
+  let settledInvestment = 0;
+  let worstDd = 0;
+  let worstDdModel = "n/a";
+  const skipCounts = new Map();
+
+  for (const [model, summary] of entries) {
+    recorded += summary.recorded.length;
+    settled += summary.settled.length;
+    open += summary.openSamples.length;
+    invested += num(summary.totalInvestment, 0);
+    realized += num(summary.realized, 0);
+    settledInvestment += num(summary.settledInvestment, 0);
+    if (num(summary.maxDrawdown, 0) >= worstDd) {
+      worstDd = num(summary.maxDrawdown, 0);
+      worstDdModel = model;
+    }
+    for (const [reason, count] of summary.skipCounts || []) {
+      skipCounts.set(reason, (skipCounts.get(reason) || 0) + num(count, 0));
+    }
+  }
+
+  const [topSkipReason, topSkipCount] = [...skipCounts.entries()].sort((a, b) => b[1] - a[1])[0] || [null, 0];
+  return {
+    modelCount: entries.length,
+    recorded,
+    settled,
+    open,
+    invested,
+    realized,
+    pnlPct: pnlPct(realized, settledInvestment),
+    worstDd,
+    worstDdModel,
+    topSkipReason,
+    topSkipCount,
+  };
+}
+
+function renderResearchRunOverview(aggregate) {
+  if (!aggregate) {
+    setTextIfPresent("research-overview-recorded", "0");
+    setTextIfPresent("research-overview-recorded-note", "No loaded samples yet");
+    setTextIfPresent("research-overview-settled", "0");
+    setTextIfPresent("research-overview-settled-note", "No settled samples yet");
+    setTextIfPresent("research-overview-open", "0");
+    setTextIfPresent("research-overview-open-note", "Waiting on resolution");
+    setTextIfPresent("research-overview-invested", "$0.00");
+    setTextIfPresent("research-overview-invested-note", "Recorded notional");
+    setTextIfPresent("research-overview-realized", "$0.00");
+    setTextIfPresent("research-overview-realized-note", "Settled-only realized");
+    setTextIfPresent("research-overview-pnlpct", "0.00%");
+    setTextIfPresent("research-overview-pnlpct-note", "Realized / settled investment");
+    setTextIfPresent("research-overview-drawdown", "$0.00");
+    setTextIfPresent("research-overview-drawdown-note", "Worst model drawdown");
+    setTextIfPresent("research-overview-skip", "n/a");
+    setTextIfPresent("research-overview-skip-note", "No skipped samples yet");
+    return;
+  }
+
+  setTextIfPresent("research-overview-recorded", fmtCount(aggregate.recorded));
+  setTextIfPresent("research-overview-recorded-note", `Across ${fmtCount(aggregate.modelCount)} model lanes`);
+  setTextIfPresent("research-overview-settled", fmtCount(aggregate.settled));
+  setTextIfPresent("research-overview-settled-note", "Resolved observation-only samples");
+  setTextIfPresent("research-overview-open", fmtCount(aggregate.open));
+  setTextIfPresent("research-overview-open-note", "Still waiting on settlement");
+  setTextIfPresent("research-overview-invested", fmtMoney(aggregate.invested));
+  setTextIfPresent("research-overview-invested-note", "Recorded notional across the run");
+  setTextIfPresent("research-overview-realized", fmtMoney(aggregate.realized));
+  setTextIfPresent("research-overview-realized-note", "Settled-only realized");
+  setTextIfPresent("research-overview-pnlpct", fmtPct(aggregate.pnlPct, 2));
+  setTextIfPresent("research-overview-pnlpct-note", "Realized / settled investment");
+  setTextIfPresent("research-overview-drawdown", fmtMoney(aggregate.worstDd));
+  setTextIfPresent("research-overview-drawdown-note", `${aggregate.worstDdModel} worst max DD`);
+  setTextIfPresent("research-overview-skip", aggregate.topSkipReason || "n/a");
+  setTextIfPresent(
+    "research-overview-skip-note",
+    aggregate.topSkipReason ? `${fmtCount(aggregate.topSkipCount)} skipped candidates` : "No skipped samples yet",
+  );
+}
+
+function updateResearchChrome(modelName, loadedMeta = {}, modelCount = 0) {
+  setTextIfPresent("env-pill", state.environment);
+  setTextIfPresent("refresh-pill", `${state.refreshSeconds}s`);
+  setTextIfPresent("lookback-pill", `${state.lookbackDays} days`);
+  setTextIfPresent("last-load", fmtDate(state.lastLoadedAt || new Date()));
+  setTextIfPresent("research-root-pill", loadedMeta.rootLabel || "none");
+  setTextIfPresent("research-focus-pill", modelName || "auto");
+  setTextIfPresent("research-source-pill", loadedMeta.sourceKind || "idle");
+  setTextIfPresent("research-files-pill", fmtCount(loadedMeta.fileCount || 0));
+  sync(
+    modelName
+      ? `Research dashboard synced | ${fmtCount(modelCount)} models | focused ${modelName}`
+      : "Waiting for research logs",
+    modelName ? "ok" : "warn",
+  );
+}
+
 function pnlSvg(points) {
   if (!points.length) {
     return `<text x="50%" y="50%" text-anchor="middle" fill="rgba(237,245,251,.42)" font-size="18">No summary snapshots yet</text>`;
@@ -1067,21 +1176,20 @@ function diagnosticsHtml(modelName, summary, meta) {
   `;
 }
 
-function renderSelectedModel(modelName, summary, meta, modelCount) {
-  $("env-pill").textContent = state.environment;
-  $("refresh-pill").textContent = `${state.refreshSeconds}s`;
-  $("lookback-pill").textContent = `${state.lookbackDays} days`;
-  $("last-load").textContent = fmtDate(state.lastLoadedAt || new Date());
+function renderSelectedModel(modelName, summary, meta, modelCount, loadedMeta, aggregate) {
+  updateResearchChrome(modelName, loadedMeta, modelCount);
+  renderResearchRunOverview(aggregate);
   renderFocusedHeader(modelName, summary, meta);
   $("tab-overview").innerHTML = overviewHtml(modelName, summary, meta);
   $("tab-buckets").innerHTML = bucketsHtml(modelName, summary);
   $("tab-samples").innerHTML = samplesHtml(modelName, summary);
   $("tab-diagnostics").innerHTML = diagnosticsHtml(modelName, summary, meta);
   updateTabVisibility();
-  sync(`Research dashboard live and read-only | ${fmtCount(modelCount)} models | focused ${modelName} | ${fmtCount(meta.researchFiles)} research files`, "ok");
 }
 
-function renderEmptyFocus(message) {
+function renderEmptyFocus(message, loadedMeta = {}, aggregate = null) {
+  updateResearchChrome("", loadedMeta, 0);
+  renderResearchRunOverview(aggregate);
   $("focused-model-title").textContent = "Focused Model";
   $("focused-model-subtitle").textContent = message;
   $("focused-model-badges").innerHTML = "";
@@ -1108,15 +1216,22 @@ function renderAll(loaded) {
     summaryMap[model] = summarizeRows(payload.researchRows || []);
     metaMap[model] = payload.meta || { researchFiles: 0 };
   }
+  const aggregate = aggregateResearchSummary(summaryMap);
   const selectedModel = updateModelSelector(summaryMap, metaMap);
   renderComparison(summaryMap, metaMap);
   renderModelCards(summaryMap, metaMap);
   if (!selectedModel) {
-    renderEmptyFocus("No research logs found yet. Choose a research run folder or snapshot first.");
-    sync("No research logs found yet");
+    renderEmptyFocus("No research logs found yet. Choose a research run folder or snapshot first.", loaded.meta, aggregate);
     return;
   }
-  renderSelectedModel(selectedModel, summaryMap[selectedModel], metaMap[selectedModel], Object.keys(summaryMap).length);
+  renderSelectedModel(
+    selectedModel,
+    summaryMap[selectedModel],
+    metaMap[selectedModel],
+    Object.keys(summaryMap).length,
+    loaded.meta,
+    aggregate,
+  );
 }
 
 async function loadFromHandles() {
@@ -1130,7 +1245,15 @@ async function loadFromHandles() {
       meta: { researchFiles: researchHandles.length },
     };
   }
-  return { modelData: pruneLegacySingleModel(modelData) };
+  const fileCount = Object.values(modelData).reduce((sum, item) => sum + item.meta.researchFiles, 0);
+  return {
+    modelData: pruneLegacySingleModel(modelData),
+    meta: {
+      sourceKind: "folder",
+      rootLabel: state.rootHandle?.name || "selected",
+      fileCount,
+    },
+  };
 }
 
 async function loadFromSnapshot() {
@@ -1164,7 +1287,15 @@ async function loadFromSnapshot() {
     modelData[model].researchRows.push(...rows);
     modelData[model].meta.researchFiles += 1;
   }
-  return { modelData: pruneLegacySingleModel(modelData) };
+  const fileCount = Object.values(modelData).reduce((sum, item) => sum + item.meta.researchFiles, 0);
+  return {
+    modelData: pruneLegacySingleModel(modelData),
+    meta: {
+      sourceKind: "snapshot",
+      rootLabel: state.snapshotFiles.length ? "uploaded snapshot" : "snapshot",
+      fileCount,
+    },
+  };
 }
 
 async function refresh() {
@@ -1179,7 +1310,11 @@ async function refresh() {
         : null;
     if (!loaded) {
       state.lastLoaded = null;
-      renderEmptyFocus("Choose a research run folder or snapshot first.");
+      renderEmptyFocus("Choose a research run folder or snapshot first.", {
+        sourceKind: state.snapshotFiles.length ? "snapshot" : "idle",
+        rootLabel: state.snapshotFiles.length ? "uploaded snapshot" : "none",
+        fileCount: 0,
+      });
       sync("Choose a research run folder or snapshot first");
       return;
     }

@@ -49,6 +49,10 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const setTextIfPresent = (id, value) => {
+  const node = $(id);
+  if (node) node.textContent = value;
+};
 
 const fmtMoney = (v) => `${v < 0 ? "-" : ""}$${Math.abs(Number(v || 0)).toFixed(2)}`;
 const fmtPct = (v, d = 1) => `${(Number(v || 0) * 100).toFixed(d)}%`;
@@ -730,6 +734,83 @@ function analyze(signalRows, executionRows) {
   };
 }
 
+function aggregateTradingSummary(summaryMap) {
+  const entries = Object.entries(summaryMap);
+  if (!entries.length) return null;
+
+  let realized = 0;
+  let equity = 0;
+  let open = 0;
+  let claimed = 0;
+  let settled = 0;
+  let worstDd = 0;
+  let worstDdModel = "n/a";
+  const blockCounts = new Map();
+
+  for (const [model, summary] of entries) {
+    realized += num(summary.realized, 0);
+    equity += num(summary.latest?.equity, 0);
+    open += num(summary.latest?.open, 0);
+    claimed += num(summary.claimCount, 0);
+    settled += summary.settled.length;
+    if (num(summary.maxDd, 0) >= worstDd) {
+      worstDd = num(summary.maxDd, 0);
+      worstDdModel = model;
+    }
+    for (const [reason, count] of summary.blockCounts || []) {
+      blockCounts.set(reason, (blockCounts.get(reason) || 0) + num(count, 0));
+    }
+  }
+
+  const [topBlockReason, topBlockCount] = [...blockCounts.entries()].sort((a, b) => b[1] - a[1])[0] || [null, 0];
+  return {
+    modelCount: entries.length,
+    realized,
+    equity,
+    open,
+    claimed,
+    settled,
+    worstDd,
+    worstDdModel,
+    topBlockReason,
+    topBlockCount,
+  };
+}
+
+function renderTradingRunOverview(aggregate) {
+  if (!aggregate) {
+    setTextIfPresent("run-overview-realized", "$0.00");
+    setTextIfPresent("run-overview-realized-note", "No loaded trades yet");
+    setTextIfPresent("run-overview-equity", "$0.00");
+    setTextIfPresent("run-overview-equity-note", "Waiting for portfolio snapshots");
+    setTextIfPresent("run-overview-drawdown", "$0.00");
+    setTextIfPresent("run-overview-drawdown-note", "Worst model drawdown");
+    setTextIfPresent("run-overview-open", "0");
+    setTextIfPresent("run-overview-open-note", "Open slots in latest snapshots");
+    setTextIfPresent("run-overview-flow", "0 / 0");
+    setTextIfPresent("run-overview-flow-note", "Execution flow through the run");
+    setTextIfPresent("run-overview-block", "n/a");
+    setTextIfPresent("run-overview-block-note", "No blocked signals yet");
+    return;
+  }
+
+  setTextIfPresent("run-overview-realized", fmtMoney(aggregate.realized));
+  setTextIfPresent("run-overview-realized-note", `Across ${fmtCount(aggregate.modelCount)} model lanes`);
+  setTextIfPresent("run-overview-equity", fmtMoney(aggregate.equity));
+  setTextIfPresent("run-overview-equity-note", "Summed latest equity snapshots");
+  setTextIfPresent("run-overview-drawdown", fmtMoney(aggregate.worstDd));
+  setTextIfPresent("run-overview-drawdown-note", `${aggregate.worstDdModel} worst max DD`);
+  setTextIfPresent("run-overview-open", fmtCount(aggregate.open));
+  setTextIfPresent("run-overview-open-note", "Open slots in latest snapshots");
+  setTextIfPresent("run-overview-flow", `${fmtCount(aggregate.claimed)} / ${fmtCount(aggregate.settled)}`);
+  setTextIfPresent("run-overview-flow-note", "Claimed vs settled intents");
+  setTextIfPresent("run-overview-block", aggregate.topBlockReason || "n/a");
+  setTextIfPresent(
+    "run-overview-block-note",
+    aggregate.topBlockReason ? `${fmtCount(aggregate.topBlockCount)} blocked decisions` : "No blocked signals yet",
+  );
+}
+
 function equitySvg(points) {
   if (!points.length) {
     return `<text x="50%" y="50%" text-anchor="middle" fill="rgba(22,34,43,.45)" font-size="18">No portfolio snapshots yet</text>`;
@@ -1219,8 +1300,9 @@ function updateDashboardChrome(modelName, summary, loadedMeta = {}, modelCount =
   );
 }
 
-function renderSelectedModel(modelName, summary, meta, modelCount, loadedMeta) {
+function renderSelectedModel(modelName, summary, meta, modelCount, loadedMeta, aggregate) {
   updateDashboardChrome(modelName, summary, loadedMeta, modelCount);
+  renderTradingRunOverview(aggregate);
   renderFocusedHeader(modelName, summary, meta);
   $("tab-overview").innerHTML = overviewHtml(modelName, summary, meta);
   $("tab-breakdowns").innerHTML = breakdownsHtml(modelName, summary);
@@ -1229,8 +1311,9 @@ function renderSelectedModel(modelName, summary, meta, modelCount, loadedMeta) {
   updateTabVisibility();
 }
 
-function renderEmptyFocus(message, loadedMeta = {}) {
+function renderEmptyFocus(message, loadedMeta = {}, aggregate = null) {
   updateDashboardChrome("", null, loadedMeta, 0);
+  renderTradingRunOverview(aggregate);
   $("focused-model-title").textContent = "Focused Model";
   $("focused-model-subtitle").textContent = message;
   $("focused-model-badges").innerHTML = "";
@@ -1257,14 +1340,22 @@ function renderAll(loaded) {
     summaryMap[model] = analyze(payload.signalRows || [], payload.executionRows || []);
     metaMap[model] = payload.meta || { execFiles: 0, signalFiles: 0 };
   }
+  const aggregate = aggregateTradingSummary(summaryMap);
   const selectedModel = updateModelSelector(summaryMap, metaMap);
   renderComparison(summaryMap, metaMap);
   renderModelCards(summaryMap, metaMap);
   if (!selectedModel) {
-    renderEmptyFocus("No logs found yet. Choose a live folder or snapshot first.", loaded.meta);
+    renderEmptyFocus("No logs found yet. Choose a live folder or snapshot first.", loaded.meta, aggregate);
     return;
   }
-  renderSelectedModel(selectedModel, summaryMap[selectedModel], metaMap[selectedModel], Object.keys(summaryMap).length, loaded.meta);
+  renderSelectedModel(
+    selectedModel,
+    summaryMap[selectedModel],
+    metaMap[selectedModel],
+    Object.keys(summaryMap).length,
+    loaded.meta,
+    aggregate,
+  );
 }
 
 async function loadFromHandles() {

@@ -4,523 +4,186 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kalshi Live Trading Dashboard</title>
-  <style>
-    :root{
-      --bg:#f3efe8;
-      --paper:#fbf8f1;
-      --panel:#fffdf9;
-      --panel-strong:#ffffff;
-      --ink:#13202b;
-      --muted:#60707b;
-      --line:rgba(19,32,43,.11);
-      --line-strong:rgba(19,32,43,.18);
-      --good:#0f766e;
-      --bad:#b42318;
-      --warn:#956400;
-      --accent:#165d59;
-      --accent-soft:rgba(15,118,110,.09);
-      --shadow:0 18px 42px rgba(20,31,41,.09);
-      --mono:"Cascadia Code","SFMono-Regular",Consolas,monospace;
-      --sans:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
-      --display:"Iowan Old Style","Palatino Linotype","Book Antiqua",Georgia,serif;
-    }
-    *{box-sizing:border-box}
-    html{scroll-behavior:smooth}
-    body{
-      margin:0;
-      color:var(--ink);
-      background:
-        radial-gradient(circle at top left,rgba(15,118,110,.12),transparent 28%),
-        radial-gradient(circle at top right,rgba(149,100,0,.08),transparent 32%),
-        linear-gradient(180deg,#f8f3ea 0%,var(--bg) 100%);
-      font-family:var(--sans);
-      -webkit-font-smoothing:antialiased;
-      text-rendering:optimizeLegibility;
-    }
-    .shell{
-      width:min(1560px,calc(100vw - 28px));
-      margin:20px auto 36px;
-      display:grid;
-      gap:16px;
-    }
-    .panel,.subpanel{
-      background:rgba(255,253,249,.88);
-      border:1px solid var(--line);
-      border-radius:24px;
-      box-shadow:var(--shadow);
-      backdrop-filter:blur(10px);
-    }
-    .panel{padding:20px}
-    .subpanel{
-      padding:16px;
-      background:rgba(255,255,255,.58);
-      box-shadow:none;
-    }
-    .hero{
-      display:grid;
-      grid-template-columns:minmax(0,1.2fr) minmax(360px,.9fr);
-      gap:18px;
-      overflow:hidden;
-    }
-    .hero-copy{
-      position:relative;
-      padding:6px 2px 2px;
-    }
-    .hero-copy::after{
-      content:"";
-      position:absolute;
-      inset:auto -90px -40px auto;
-      width:220px;
-      height:220px;
-      border-radius:50%;
-      background:radial-gradient(circle,rgba(15,118,110,.16),transparent 68%);
-      pointer-events:none;
-    }
-    .eyebrow{
-      margin:0 0 10px;
-      font-size:.74rem;
-      font-weight:700;
-      letter-spacing:.14em;
-      text-transform:uppercase;
-      color:var(--muted);
-    }
-    h1,h2,h3{margin:0}
-    h1{
-      font-family:var(--display);
-      font-size:clamp(2.2rem,3vw,3.5rem);
-      line-height:.96;
-      letter-spacing:-.05em;
-      max-width:11ch;
-    }
-    .hero-text{
-      max-width:64ch;
-      margin:14px 0 0;
-      font-size:1rem;
-      line-height:1.65;
-      color:var(--muted);
-    }
-    .hero-meta{
-      display:grid;
-      gap:12px;
-      align-content:start;
-    }
-    .hero-stat-grid{
-      display:grid;
-      grid-template-columns:repeat(2,minmax(0,1fr));
-      gap:12px;
-    }
-    .hero-stat{
-      padding:14px 15px;
-      border-radius:18px;
-      background:rgba(255,255,255,.76);
-      border:1px solid var(--line);
-    }
-    .hero-stat-label,label,.focus-kicker,.stat-label,.control-copy{
-      font-size:.73rem;
-      font-weight:700;
-      letter-spacing:.08em;
-      text-transform:uppercase;
-      color:var(--muted);
-    }
-    .hero-stat-value,.stat-value{
-      margin-top:6px;
-      font-size:1.42rem;
-      font-weight:700;
-      letter-spacing:-.04em;
-    }
-    .status-rail{
-      display:flex;
-      flex-wrap:wrap;
-      gap:8px;
-      margin-top:18px;
-    }
-    .pill,.badge,.tag{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      padding:7px 11px;
-      border-radius:999px;
-      border:1px solid var(--line);
-      background:rgba(255,255,255,.82);
-      color:var(--muted);
-      font-size:.88rem;
-      line-height:1;
-    }
-    .pill strong,.badge strong{color:var(--ink)}
-    .pill.good,.badge.good{color:var(--good);background:rgba(15,118,110,.09)}
-    .pill.bad,.badge.bad{color:var(--bad);background:rgba(180,35,24,.09)}
-    .pill.warn,.badge.warn,.badge.legacy,.tag.legacy{color:var(--warn);background:rgba(149,100,0,.10)}
-    .badge-row{display:flex;flex-wrap:wrap;gap:8px}
-    .dot{
-      width:8px;
-      height:8px;
-      border-radius:50%;
-      background:var(--warn);
-      box-shadow:0 0 0 6px rgba(149,100,0,.12);
-    }
-    .dot.ok{background:var(--good);box-shadow:0 0 0 6px rgba(15,118,110,.12)}
-    .dot.bad{background:var(--bad);box-shadow:0 0 0 6px rgba(180,35,24,.12)}
-    .controls-panel{
-      display:grid;
-      gap:14px;
-    }
-    .controls-head{
-      display:flex;
-      justify-content:space-between;
-      gap:18px;
-      align-items:flex-start;
-    }
-    .section-copy{
-      margin:6px 0 0;
-      color:var(--muted);
-      line-height:1.62;
-      max-width:72ch;
-    }
-    .control-grid,.model-grid,.detail-grid-two,.detail-grid-three,.stats-grid,.detail-metrics,.tab-panels{
-      display:grid;
-      gap:14px;
-    }
-    .control-grid{
-      grid-template-columns:repeat(8,minmax(0,1fr));
-      align-items:end;
-    }
-    .control-field{
-      display:grid;
-      gap:7px;
-    }
-    .control-field.span-2{grid-column:span 2}
-    .control-inline{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-    .control-note{
-      padding:12px 14px;
-      border-radius:16px;
-      border:1px dashed var(--line-strong);
-      background:rgba(255,255,255,.4);
-      color:var(--muted);
-      line-height:1.55;
-    }
-    input,select,button{
-      width:100%;
-      min-height:46px;
-      padding:11px 13px;
-      border-radius:16px;
-      border:1px solid var(--line);
-      background:rgba(255,255,255,.92);
-      color:var(--ink);
-      font:inherit;
-      transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease,background .18s ease;
-    }
-    input:focus,select:focus,button:focus{
-      outline:none;
-      border-color:rgba(15,118,110,.45);
-      box-shadow:0 0 0 4px rgba(15,118,110,.10);
-    }
-    button{
-      cursor:pointer;
-      font-weight:700;
-    }
-    .primary{
-      background:linear-gradient(135deg,#0f766e 0%,#165d59 100%);
-      color:#fff;
-      border-color:transparent;
-      box-shadow:0 16px 28px rgba(15,118,110,.18);
-    }
-    .primary:hover{transform:translateY(-1px)}
-    .ghost{
-      background:rgba(255,255,255,.72);
-    }
-    .panel-head,.focus-header{
-      display:flex;
-      justify-content:space-between;
-      gap:16px;
-      align-items:flex-start;
-    }
-    .model-grid{
-      grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
-      margin-top:14px;
-    }
-    .model-card{
-      display:grid;
-      gap:12px;
-      padding:16px;
-      border:1px solid var(--line);
-      border-radius:20px;
-      background:
-        linear-gradient(180deg,rgba(255,255,255,.82) 0%,rgba(250,247,240,.78) 100%);
-      cursor:pointer;
-      transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease,background .18s ease;
-    }
-    .model-card:hover{
-      transform:translateY(-2px);
-      box-shadow:0 18px 28px rgba(19,32,43,.08);
-    }
-    .model-card.selected{
-      border-color:rgba(15,118,110,.42);
-      box-shadow:0 18px 34px rgba(15,118,110,.12);
-      background:linear-gradient(180deg,rgba(255,255,255,.96) 0%,rgba(241,250,248,.92) 100%);
-    }
-    .model-card-head{
-      display:flex;
-      justify-content:space-between;
-      gap:12px;
-      align-items:flex-start;
-    }
-    .big{
-      font-size:1.84rem;
-      font-weight:700;
-      letter-spacing:-.05em;
-    }
-    .good{color:var(--good)}
-    .bad{color:var(--bad)}
-    .warn{color:var(--warn)}
-    .muted{color:var(--muted)}
-    .mono{font-family:var(--mono)}
-    .stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
-    .detail-grid-two{grid-template-columns:1.35fr 1fr}
-    .detail-grid-three{grid-template-columns:repeat(3,minmax(0,1fr))}
-    .detail-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
-    .stat-card{
-      padding:12px;
-      border-radius:16px;
-      border:1px solid var(--line);
-      background:rgba(255,255,255,.66);
-    }
-    .stat-sub{
-      margin-top:6px;
-      color:var(--muted);
-      line-height:1.46;
-    }
-    .table-wrap{
-      overflow:auto;
-      border:1px solid var(--line);
-      border-radius:18px;
-      background:rgba(255,255,255,.52);
-    }
-    table{width:100%;border-collapse:collapse;min-width:880px}
-    th,td{
-      padding:10px 12px;
-      border-bottom:1px solid var(--line);
-      text-align:left;
-      vertical-align:top;
-    }
-    th{
-      position:sticky;
-      top:0;
-      z-index:1;
-      background:rgba(255,253,249,.96);
-      font-size:.73rem;
-      text-transform:uppercase;
-      letter-spacing:.08em;
-      color:var(--muted);
-      backdrop-filter:blur(10px);
-    }
-    .sort-button{
-      display:inline-flex;
-      align-items:center;
-      gap:6px;
-      width:auto;
-      min-height:0;
-      padding:0;
-      border:none;
-      background:none;
-      border-radius:0;
-      color:inherit;
-      font-size:inherit;
-      text-transform:inherit;
-      letter-spacing:inherit;
-      box-shadow:none;
-    }
-    .sort-button:hover{color:var(--ink)}
-    .row-selectable{cursor:pointer}
-    .row-selectable:hover td{background:rgba(19,32,43,.04)}
-    .row-selectable.selected-row td{background:rgba(15,118,110,.09)}
-    .tag{
-      padding:4px 9px;
-      background:rgba(19,32,43,.07);
-      font-size:.81rem;
-    }
-    .tab-bar{
-      position:sticky;
-      top:12px;
-      z-index:5;
-      display:flex;
-      flex-wrap:wrap;
-      gap:10px;
-      margin-top:18px;
-      padding:10px;
-      border-radius:18px;
-      background:rgba(251,248,241,.88);
-      border:1px solid var(--line);
-      backdrop-filter:blur(14px);
-    }
-    .tab-button{
-      width:auto;
-      min-height:42px;
-      padding:10px 16px;
-      background:rgba(255,255,255,.74);
-      border:1px solid var(--line);
-      color:var(--ink);
-    }
-    .tab-button.active{
-      color:#fff;
-      border-color:transparent;
-      background:linear-gradient(135deg,#0f766e 0%,#165d59 100%);
-      box-shadow:0 12px 24px rgba(15,118,110,.16);
-    }
-    .tab-panel{
-      display:none;
-      margin-top:16px;
-      animation:fadePanel .22s ease;
-    }
-    .tab-panel.active{display:block}
-    .chart{
-      padding:12px;
-      border-radius:18px;
-      border:1px solid var(--line);
-      background:rgba(255,255,255,.52);
-    }
-    svg{width:100%;height:260px}
-    .empty{
-      padding:16px;
-      border-radius:18px;
-      border:1px dashed var(--line-strong);
-      background:rgba(255,255,255,.36);
-      color:var(--muted);
-      line-height:1.58;
-    }
-    .legend-note{margin-top:10px;color:var(--muted)}
-    @keyframes fadePanel{
-      from{opacity:0;transform:translateY(6px)}
-      to{opacity:1;transform:translateY(0)}
-    }
-    @media (max-width:1320px){
-      .hero{grid-template-columns:1fr}
-      .control-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
-    }
-    @media (max-width:980px){
-      .shell{width:min(100vw - 16px,100%)}
-      .control-grid,.detail-grid-two,.detail-grid-three,.detail-metrics,.stats-grid,.model-grid,.hero-stat-grid{grid-template-columns:1fr 1fr}
-      .control-field.span-2{grid-column:span 2}
-      .panel-head,.focus-header,.controls-head{flex-direction:column}
-    }
-    @media (max-width:760px){
-      .control-grid,.detail-grid-two,.detail-grid-three,.detail-metrics,.stats-grid,.model-grid,.hero-stat-grid{grid-template-columns:1fr}
-      .control-field.span-2{grid-column:span 1}
-      .tab-bar{top:8px}
-      table{min-width:720px}
-    }
-  </style>
+  <link rel="stylesheet" href="dashboard_theme.css">
 </head>
-<body>
-  <div class="shell">
-    <section class="panel hero">
-      <div class="hero-copy">
-        <div class="eyebrow">Kalshi Execution Monitor</div>
-        <h1>Shadow and live trading runs, with one clean workspace.</h1>
-        <p class="hero-text">Point the dashboard at a specific run folder or the parent <span class="mono">output/live</span> directory. It will detect available runs, switch between shadow and live logs, and keep the lower workspace locked on one model at a time.</p>
+<body class="page-trading">
+  <div class="dashboard-shell">
+    <header class="dashboard-panel header-band">
+      <div class="identity-pane">
+        <div class="identity-kicker">Kalshi Terminal</div>
+        <h1 class="identity-title">Live Trading Report Deck</h1>
+        <p class="identity-copy">A dark operator console for shadow and live execution runs. Load one run folder or the parent <span class="mono">output/live</span> directory, switch runs in place, and keep one model locked in focus while the execution logs continue to refresh.</p>
         <div class="status-rail">
-          <span class="pill"><span id="sync-dot" class="dot"></span><strong id="sync-label">Waiting for logs</strong></span>
-          <span class="pill">Source <strong id="source-pill">idle</strong></span>
-          <span class="pill">Run <strong id="run-pill">none</strong></span>
+          <span class="status-chip"><span id="sync-dot" class="dot"></span><strong id="sync-label">Waiting for logs</strong></span>
           <span class="pill">Mode <strong id="mode-pill">unknown</strong></span>
-          <span class="pill">Env <strong id="env-pill">demo</strong></span>
+          <span class="pill">Environment <strong id="env-pill">demo</strong></span>
           <span class="pill">Refresh <strong id="refresh-pill">5s</strong></span>
           <span class="pill">Lookback <strong id="lookback-pill">7 days</strong></span>
-          <span class="pill">Files <strong id="file-pill">0</strong></span>
-          <span class="pill">Last load <strong id="last-load">never</strong></span>
         </div>
       </div>
-      <div class="hero-meta">
-        <div class="hero-stat-grid">
-          <div class="hero-stat">
-            <div class="hero-stat-label">Current Root</div>
-            <div id="root-pill" class="hero-stat-value mono">none</div>
-          </div>
-          <div class="hero-stat">
-            <div class="hero-stat-label">Focused Model</div>
-            <div id="focus-meta-pill" class="hero-stat-value">auto</div>
-          </div>
-          <div class="hero-stat">
-            <div class="hero-stat-label">Loader Mode</div>
-            <div id="loader-pill" class="hero-stat-value">folder or snapshot</div>
-          </div>
-          <div class="hero-stat">
-            <div class="hero-stat-label">Workspace</div>
-            <div class="hero-stat-value">Execution + signal parity</div>
-          </div>
-        </div>
-      </div>
-    </section>
 
-    <section class="panel controls-panel">
-      <div class="controls-head">
-        <div>
-          <h2>Source Controls</h2>
-          <p class="section-copy">Choose either a single run root or the parent <span class="mono">output/live</span> directory. The run selector below will populate automatically, and snapshot mode supports offline review from copied folders.</p>
+      <div class="status-pane">
+        <div class="section-head">
+          <div class="section-head-block">
+            <div class="section-kicker">Run Context</div>
+            <h2>System State Matrix</h2>
+          </div>
+          <p class="workspace-note">Execution and signal logs stay read-only in this surface. The matrix below is the operator snapshot of what the loader is watching right now.</p>
+        </div>
+        <div class="status-grid">
+          <div class="status-cell">
+            <div class="status-label">Source</div>
+            <div id="source-pill" class="status-value">idle</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Run</div>
+            <div id="run-pill" class="status-value compact">none</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Files</div>
+            <div id="file-pill" class="status-value">0</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Current Root</div>
+            <div id="root-pill" class="status-value compact mono">none</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Loader Mode</div>
+            <div id="loader-pill" class="status-value compact">folder or snapshot</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Focused Model</div>
+            <div id="focus-meta-pill" class="status-value compact">auto</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Last Load</div>
+            <div id="last-load" class="status-value compact mono">never</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Workspace</div>
+            <div class="status-value compact">Execution + signal parity</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Signal Sync</div>
+            <div class="status-value compact">Live / shadow compatible</div>
+          </div>
         </div>
       </div>
-      <div class="control-grid">
-        <div class="control-field span-2">
-          <label>Live Folder Access</label>
+    </header>
+
+    <section class="dashboard-panel command-strip">
+      <div class="section-head">
+        <div class="section-head-block">
+          <div class="section-kicker">Command Strip</div>
+          <h2>Loader And Focus Controls</h2>
+        </div>
+        <p class="workspace-note">Use folder access for active monitoring, or snapshot mode for copied EC2 logs. The run selector stays available when the root folder contains multiple live runs.</p>
+      </div>
+      <div class="command-grid">
+        <div class="command-field span-2">
+          <label class="control-label">Live Folder Access</label>
           <button id="folder-button" class="primary" type="button">Choose run folder or output/live</button>
         </div>
-        <div class="control-field span-2">
-          <label>Fallback Snapshot</label>
+        <div class="command-field span-2">
+          <label class="control-label">Fallback Snapshot</label>
           <input id="snapshot-input" type="file" webkitdirectory multiple>
         </div>
-        <div class="control-field">
-          <label>Run</label>
+        <div class="command-field">
+          <label class="control-label">Run</label>
           <select id="run-select"><option value="">auto</option></select>
         </div>
-        <div class="control-field">
-          <label>Environment</label>
-          <select id="environment-select"><option value="demo">demo</option><option value="production">production</option></select>
+        <div class="command-field">
+          <label class="control-label">Environment</label>
+          <select id="environment-select">
+            <option value="demo">demo</option>
+            <option value="production">production</option>
+          </select>
         </div>
-        <div class="control-field">
-          <label>Refresh Seconds</label>
+        <div class="command-field">
+          <label class="control-label">Refresh Seconds</label>
           <input id="refresh-seconds" type="number" min="1" step="1" value="5">
         </div>
-        <div class="control-field">
-          <label>Lookback Days</label>
+        <div class="command-field">
+          <label class="control-label">Lookback Days</label>
           <input id="lookback-days" type="number" min="1" step="1" value="7">
         </div>
-        <div class="control-field">
-          <label>Auto Refresh</label>
-          <select id="auto-refresh"><option value="on">on</option><option value="off">off</option></select>
+        <div class="command-field">
+          <label class="control-label">Auto Refresh</label>
+          <select id="auto-refresh">
+            <option value="on">on</option>
+            <option value="off">off</option>
+          </select>
         </div>
-        <div class="control-field">
-          <label>Model Focus</label>
+        <div class="command-field">
+          <label class="control-label">Model Focus</label>
           <select id="model-select"><option value="">auto</option></select>
         </div>
       </div>
-      <div class="control-inline">
+      <div class="control-actions" style="margin-top:12px">
         <button id="manual-refresh" class="ghost" type="button">Refresh Dashboard</button>
       </div>
-      <div id="source-caption" class="control-note">Choose a run folder or snapshot first. The dashboard can read both shadow and live execution logs, and it now distinguishes runs instead of assuming one fixed folder shape.</div>
+      <div id="source-caption" class="control-note" style="margin-top:12px">Choose a run folder or snapshot first. The dashboard can read both shadow and live execution logs, and it now distinguishes runs instead of assuming one fixed folder shape.</div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Model Comparison</h2>
-          <p class="section-copy">Cross-model performance, ranked by drawdown-aware objective by default. Click a row or card to focus the lower workspace on one model.</p>
+    <section class="dashboard-panel overview-band">
+      <div class="section-head">
+        <div class="section-head-block">
+          <div class="section-kicker">Run Overview</div>
+          <h2>Top-Line Trading State</h2>
         </div>
+        <p class="workspace-note">These values roll up the current loaded run so you can judge health before drilling into one model.</p>
+      </div>
+      <div class="metric-grid">
+        <div class="metric-block">
+          <div class="metric-label">Realized PnL</div>
+          <div id="run-overview-realized" class="metric-value">$0.00</div>
+          <div id="run-overview-realized-note" class="metric-note">No loaded trades yet</div>
+        </div>
+        <div class="metric-block">
+          <div class="metric-label">Equity</div>
+          <div id="run-overview-equity" class="metric-value">$0.00</div>
+          <div id="run-overview-equity-note" class="metric-note">Waiting for portfolio snapshots</div>
+        </div>
+        <div class="metric-block">
+          <div class="metric-label">Max Drawdown</div>
+          <div id="run-overview-drawdown" class="metric-value">$0.00</div>
+          <div id="run-overview-drawdown-note" class="metric-note">Worst model drawdown</div>
+        </div>
+        <div class="metric-block">
+          <div class="metric-label">Open Exposure</div>
+          <div id="run-overview-open" class="metric-value">0</div>
+          <div id="run-overview-open-note" class="metric-note">Open slots in latest snapshots</div>
+        </div>
+        <div class="metric-block">
+          <div class="metric-label">Claimed / Settled</div>
+          <div id="run-overview-flow" class="metric-value">0 / 0</div>
+          <div id="run-overview-flow-note" class="metric-note">Execution flow through the run</div>
+        </div>
+        <div class="metric-block">
+          <div class="metric-label">Top Block Reason</div>
+          <div id="run-overview-block" class="metric-value">n/a</div>
+          <div id="run-overview-block-note" class="metric-note">No blocked signals yet</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="dashboard-panel">
+      <div class="section-head">
+        <div class="section-head-block">
+          <div class="section-kicker">Model Matrix</div>
+          <h2>Sortable Comparison Surface</h2>
+        </div>
+        <p class="workspace-note">The table is the primary spreadsheet-plus view. The lower strip stays as a second scanning mode for quick model-level contrasts.</p>
       </div>
       <div id="model-comparison-wrap" class="table-wrap" style="margin-top:12px"></div>
       <div id="model-summary-grid" class="model-grid"></div>
     </section>
 
-    <section id="focused-model-shell" class="panel">
-      <div class="focus-header">
-        <div>
-          <div class="focus-kicker">Selected Model Detail</div>
-          <h2 id="focused-model-title">Focused Model</h2>
-          <p id="focused-model-subtitle" class="section-copy">Choose a model above to inspect realized PnL, open exposure, block reasons, and live quote context.</p>
-        </div>
+    <section class="dashboard-panel focus-shell">
+      <div class="focus-frame">
+        <div class="section-kicker">Selected Model</div>
+        <h2 id="focused-model-title">Focused Model</h2>
+        <p id="focused-model-subtitle" class="section-subtitle">Choose a model above to inspect realized PnL, open exposure, block reasons, and quote context.</p>
         <div id="focused-model-badges" class="badge-row"></div>
       </div>
 
