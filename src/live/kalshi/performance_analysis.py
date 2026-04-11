@@ -413,6 +413,15 @@ def _execution_limit_gap_bucket(limit_gap_cents: int | None) -> str:
     return "10+"
 
 
+def _sorted_skip_reason_items(
+    counter: Counter[tuple[str, str, str | None, str | None, str | None]]
+) -> list[tuple[tuple[str, str, str | None, str | None, str | None], int]]:
+    return sorted(
+        counter.items(),
+        key=lambda item: tuple("" if value is None else str(value) for value in item[0]),
+    )
+
+
 def _format_currency(value: float | None) -> str:
     if value is None:
         return "n/a"
@@ -1140,7 +1149,7 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
             "bucket_policy_dimension": bucket_policy_dimension,
             "bucket_policy_bucket": bucket_policy_bucket,
         }
-        for (model, reason, bucket_policy_side, bucket_policy_dimension, bucket_policy_bucket), count in sorted(skip_reason_counter.items())
+        for (model, reason, bucket_policy_side, bucket_policy_dimension, bucket_policy_bucket), count in _sorted_skip_reason_items(skip_reason_counter)
     ]
 
     metadata_extras = {
@@ -1295,7 +1304,7 @@ def _load_live_research_run(run_dir: Path, environment: str | None = None) -> So
             "bucket_policy_dimension": bucket_policy_dimension,
             "bucket_policy_bucket": bucket_policy_bucket,
         }
-        for (model, reason, bucket_policy_side, bucket_policy_dimension, bucket_policy_bucket), count in sorted(skip_reason_counter.items())
+        for (model, reason, bucket_policy_side, bucket_policy_dimension, bucket_policy_bucket), count in _sorted_skip_reason_items(skip_reason_counter)
     ]
     metadata_extras = {"summary_snapshots": summary_snapshots}
     metadata_extras.update(_same_ticker_side_stats(canonical_rows))
