@@ -104,6 +104,7 @@ class KalshiSignalRiskConfig:
     price_band_min_cents: int = 20
     price_band_max_cents: int = 80
     quote_max_age_seconds: float = 3.0
+    quote_consistency_tolerance_cents: int = 1
     reservation_ttl_seconds: float = 5.0
     trade_cooldown_seconds: float = 0.0
     enable_bucket_ban_policy: bool = True
@@ -145,6 +146,8 @@ class KalshiSignalRiskConfig:
             raise ValueError("price_band_min_cents must be <= price_band_max_cents")
         if self.quote_max_age_seconds <= 0:
             raise ValueError("quote_max_age_seconds must be positive")
+        if self.quote_consistency_tolerance_cents < 0:
+            raise ValueError("quote_consistency_tolerance_cents must be non-negative")
         if self.reservation_ttl_seconds <= 0:
             raise ValueError("reservation_ttl_seconds must be positive")
         if self.trade_cooldown_seconds < 0:
@@ -189,6 +192,9 @@ class KalshiSignalRiskConfig:
             price_band_min_cents=int(_resolve_env_value(environment, "PRICE_BAND_MIN_CENTS") or 20),
             price_band_max_cents=int(_resolve_env_value(environment, "PRICE_BAND_MAX_CENTS") or 80),
             quote_max_age_seconds=float(_resolve_env_value(environment, "QUOTE_MAX_AGE_SECONDS") or 3.0),
+            quote_consistency_tolerance_cents=int(
+                _resolve_env_value(environment, "QUOTE_CONSISTENCY_TOLERANCE_CENTS") or 1
+            ),
             reservation_ttl_seconds=float(_resolve_env_value(environment, "RESERVATION_TTL_SECONDS") or 5.0),
             trade_cooldown_seconds=float(_resolve_env_value(environment, "TRADE_COOLDOWN_SECONDS") or 0.0),
             enable_bucket_ban_policy=_parse_bool(_resolve_env_value(environment, "ENABLE_BUCKET_BAN_POLICY") or "true"),
@@ -1688,6 +1694,17 @@ class KalshiSignalRiskEngine:
             return "missing_quote"
         if score_state.yes_bid_cents >= score_state.yes_ask_cents:
             return "crossed_quote"
+        tolerance_cents = self.config.quote_consistency_tolerance_cents
+        if (
+            score_state.no_ask_cents is not None
+            and abs((score_state.yes_bid_cents + score_state.no_ask_cents) - 100) > tolerance_cents
+        ):
+            return "inconsistent_quote"
+        if (
+            score_state.no_bid_cents is not None
+            and abs((score_state.yes_ask_cents + score_state.no_bid_cents) - 100) > tolerance_cents
+        ):
+            return "inconsistent_quote"
         if score_state.quote_age_seconds is None:
             return "missing_quote"
         if score_state.quote_age_seconds > self.config.quote_max_age_seconds:

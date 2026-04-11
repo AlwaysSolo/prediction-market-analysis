@@ -117,6 +117,7 @@ def test_signal_risk_config_from_env_uses_demo_override_and_shared_fallback(monk
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_KELLY_FRACTION_MULTIPLIER", "0.25")
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_KELLY_FRACTION_CAP_PCT", "2.0")
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_QUOTE_MAX_AGE_SECONDS", "4.5")
+    monkeypatch.setenv("KALSHI_DEMO_SIGNAL_QUOTE_CONSISTENCY_TOLERANCE_CENTS", "1")
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_BANNED_YES_TAU_BUCKETS", "2-4,4-6")
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_ENABLE_BUCKET_BAN_POLICY", "true")
     monkeypatch.setenv("KALSHI_SIGNAL_BANNED_NO_PRICE_BUCKETS", "20-30,30-40")
@@ -131,6 +132,7 @@ def test_signal_risk_config_from_env_uses_demo_override_and_shared_fallback(monk
     assert demo_config.kelly_fraction_multiplier == pytest.approx(0.25)
     assert demo_config.kelly_fraction_cap_pct == pytest.approx(2.0)
     assert demo_config.quote_max_age_seconds == pytest.approx(4.5)
+    assert demo_config.quote_consistency_tolerance_cents == 1
     assert demo_config.enable_bucket_ban_policy is True
     assert demo_config.banned_yes_tau_buckets == frozenset({"2-4", "4-6"})
     assert prod_config.starting_cash_dollars == 10.0
@@ -158,6 +160,7 @@ def test_signal_risk_config_defaults():
     assert config.price_band_min_cents == 20
     assert config.price_band_max_cents == 80
     assert config.quote_max_age_seconds == 3.0
+    assert config.quote_consistency_tolerance_cents == 1
     assert config.trade_cooldown_seconds == 0.0
     assert config.enable_bucket_ban_policy is True
     assert config.banned_yes_tau_buckets == frozenset({"2-4"})
@@ -875,6 +878,55 @@ def test_signal_risk_blocks_crossed_quote(tmp_path: Path, monkeypatch: pytest.Mo
         await signal_engine.stop()
         await scorer.stop()
         await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_signal_risk_blocks_inconsistent_quote(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scorer = _FakeScorer(
+        collector,
+        {
+            "KXBTC15M-TEST": KalshiLightGBMScoreState(
+                ticker="KXBTC15M-TEST",
+                event_time=event_time,
+                market_prob=0.09,
+                tau_minutes=8.0,
+                predicted_yes_probability=0.20,
+                model_edge=0.11,
+                model_file=Path("fake-model.txt"),
+                last_yes_price_cents=9,
+                last_price_cents=9,
+                yes_bid_cents=8,
+                yes_ask_cents=10,
+                no_bid_cents=63,
+                no_ask_cents=64,
+                ticker_update_time=event_time,
+                trade_yes_prob=0.09,
+                quote_mid_prob=0.09,
+                quote_spread_cents=2,
+                buy_yes_price_cents=10,
+                buy_no_price_cents=64,
+                quote_age_seconds=0.0,
+                last_to_mid_gap=0.0,
+            )
+        },
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(enable_bucket_ban_policy=False),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        await signal_engine.stop()
+
+        assert update.approved is False
+        assert update.block_reason == "inconsistent_quote"
+        assert update.side is None
 
     asyncio.run(run())
 

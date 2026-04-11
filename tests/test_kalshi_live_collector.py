@@ -206,11 +206,49 @@ def test_ticker_message_updates_quote_fields(tmp_path: Path):
     assert state.last_price_cents == 56
     assert state.yes_bid_cents == 54
     assert state.yes_ask_cents == 57
+    assert state.no_bid_cents == 43
+    assert state.no_ask_cents == 46
     assert state.volume == 123
     assert state.open_interest == 77
     assert state.dollar_volume == 456
     assert state.dollar_open_interest == 210
     assert state.ticker_update_time == datetime(2026, 1, 1, 12, 1, tzinfo=UTC)
+
+
+def test_ticker_message_replaces_stale_no_side_with_yes_implied_quotes(tmp_path: Path):
+    collector = KalshiMarketDataCollector(_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    collector._states[ticker] = KalshiTickerState(
+        ticker=ticker,
+        last_yes_price_cents=36,
+        last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        previous_yes_price_cents=35,
+        close_time=datetime(2026, 1, 1, 12, 10, tzinfo=UTC),
+        is_open=True,
+        yes_bid_cents=36,
+        yes_ask_cents=37,
+        no_bid_cents=63,
+        no_ask_cents=64,
+    )
+
+    async def run() -> None:
+        await collector._handle_ticker_message(
+            {
+                "market_ticker": ticker,
+                "price_dollars": "0.090",
+                "yes_bid_dollars": "0.080",
+                "yes_ask_dollars": "0.100",
+                "time": "2026-01-01T12:01:00Z",
+            }
+        )
+
+    asyncio.run(run())
+    state = collector.get_state(ticker)
+    assert state is not None
+    assert state.yes_bid_cents == 8
+    assert state.yes_ask_cents == 10
+    assert state.no_bid_cents == 90
+    assert state.no_ask_cents == 92
 
 
 def test_get_market_returns_cached_market_and_lifecycle_updates_result(tmp_path: Path):

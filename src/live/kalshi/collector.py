@@ -36,6 +36,60 @@ def _has_final_result(market: Market | None) -> bool:
     return market.result.strip().upper() in {"YES", "NO"}
 
 
+def _merge_quote_side(
+    *,
+    direct_bid_cents: int | None,
+    direct_ask_cents: int | None,
+    opposite_direct_bid_cents: int | None,
+    opposite_direct_ask_cents: int | None,
+    fallback_bid_cents: int | None,
+    fallback_ask_cents: int | None,
+) -> tuple[int | None, int | None]:
+    bid_cents = direct_bid_cents
+    if bid_cents is None and opposite_direct_ask_cents is not None:
+        bid_cents = 100 - opposite_direct_ask_cents
+    if bid_cents is None:
+        bid_cents = fallback_bid_cents
+
+    ask_cents = direct_ask_cents
+    if ask_cents is None and opposite_direct_bid_cents is not None:
+        ask_cents = 100 - opposite_direct_bid_cents
+    if ask_cents is None:
+        ask_cents = fallback_ask_cents
+
+    return bid_cents, ask_cents
+
+
+def _merge_binary_quote_fields(
+    *,
+    source_yes_bid_cents: int | None,
+    source_yes_ask_cents: int | None,
+    source_no_bid_cents: int | None,
+    source_no_ask_cents: int | None,
+    fallback_yes_bid_cents: int | None,
+    fallback_yes_ask_cents: int | None,
+    fallback_no_bid_cents: int | None,
+    fallback_no_ask_cents: int | None,
+) -> tuple[int | None, int | None, int | None, int | None]:
+    yes_bid_cents, yes_ask_cents = _merge_quote_side(
+        direct_bid_cents=source_yes_bid_cents,
+        direct_ask_cents=source_yes_ask_cents,
+        opposite_direct_bid_cents=source_no_bid_cents,
+        opposite_direct_ask_cents=source_no_ask_cents,
+        fallback_bid_cents=fallback_yes_bid_cents,
+        fallback_ask_cents=fallback_yes_ask_cents,
+    )
+    no_bid_cents, no_ask_cents = _merge_quote_side(
+        direct_bid_cents=source_no_bid_cents,
+        direct_ask_cents=source_no_ask_cents,
+        opposite_direct_bid_cents=source_yes_bid_cents,
+        opposite_direct_ask_cents=source_yes_ask_cents,
+        fallback_bid_cents=fallback_no_bid_cents,
+        fallback_ask_cents=fallback_no_ask_cents,
+    )
+    return yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents
+
+
 class JsonlEventLogger:
     def __init__(self, base_dir: Path, environment: str):
         self.base_dir = base_dir
@@ -164,6 +218,16 @@ class KalshiMarketDataCollector:
 
         now = datetime.now(UTC)
         current = self._states.get(ticker)
+        yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents = _merge_binary_quote_fields(
+            source_yes_bid_cents=market.yes_bid,
+            source_yes_ask_cents=market.yes_ask,
+            source_no_bid_cents=market.no_bid,
+            source_no_ask_cents=market.no_ask,
+            fallback_yes_bid_cents=(current.yes_bid_cents if current else None),
+            fallback_yes_ask_cents=(current.yes_ask_cents if current else None),
+            fallback_no_bid_cents=(current.no_bid_cents if current else None),
+            fallback_no_ask_cents=(current.no_ask_cents if current else None),
+        )
         updated_state = KalshiTickerState(
             ticker=ticker,
             last_yes_price_cents=(
@@ -180,10 +244,10 @@ class KalshiMarketDataCollector:
             count=current.count if current else None,
             taker_side=current.taker_side if current else None,
             last_price_cents=market.last_price if market.last_price is not None else (current.last_price_cents if current else None),
-            yes_bid_cents=market.yes_bid if market.yes_bid is not None else (current.yes_bid_cents if current else None),
-            yes_ask_cents=market.yes_ask if market.yes_ask is not None else (current.yes_ask_cents if current else None),
-            no_bid_cents=market.no_bid if market.no_bid is not None else (current.no_bid_cents if current else None),
-            no_ask_cents=market.no_ask if market.no_ask is not None else (current.no_ask_cents if current else None),
+            yes_bid_cents=yes_bid_cents,
+            yes_ask_cents=yes_ask_cents,
+            no_bid_cents=no_bid_cents,
+            no_ask_cents=no_ask_cents,
             volume=market.volume if market.volume or market.volume == 0 else (current.volume if current else None),
             open_interest=(
                 market.open_interest
@@ -282,6 +346,16 @@ class KalshiMarketDataCollector:
         self._subscribed_tickers = tuple(sorted(filtered_markets))
         for market in filtered_markets.values():
             existing = self._states.get(market.ticker)
+            yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents = _merge_binary_quote_fields(
+                source_yes_bid_cents=(existing.yes_bid_cents if existing and existing.yes_bid_cents is not None else market.yes_bid),
+                source_yes_ask_cents=(existing.yes_ask_cents if existing and existing.yes_ask_cents is not None else market.yes_ask),
+                source_no_bid_cents=(existing.no_bid_cents if existing and existing.no_bid_cents is not None else market.no_bid),
+                source_no_ask_cents=(existing.no_ask_cents if existing and existing.no_ask_cents is not None else market.no_ask),
+                fallback_yes_bid_cents=None,
+                fallback_yes_ask_cents=None,
+                fallback_no_bid_cents=None,
+                fallback_no_ask_cents=None,
+            )
             updated = KalshiTickerState(
                 ticker=market.ticker,
                 last_yes_price_cents=existing.last_yes_price_cents if existing else None,
@@ -294,10 +368,10 @@ class KalshiMarketDataCollector:
                 count=existing.count if existing else None,
                 taker_side=existing.taker_side if existing else None,
                 last_price_cents=existing.last_price_cents if existing and existing.last_price_cents is not None else market.last_price,
-                yes_bid_cents=existing.yes_bid_cents if existing and existing.yes_bid_cents is not None else market.yes_bid,
-                yes_ask_cents=existing.yes_ask_cents if existing and existing.yes_ask_cents is not None else market.yes_ask,
-                no_bid_cents=existing.no_bid_cents if existing and existing.no_bid_cents is not None else market.no_bid,
-                no_ask_cents=existing.no_ask_cents if existing and existing.no_ask_cents is not None else market.no_ask,
+                yes_bid_cents=yes_bid_cents,
+                yes_ask_cents=yes_ask_cents,
+                no_bid_cents=no_bid_cents,
+                no_ask_cents=no_ask_cents,
                 volume=existing.volume if existing and existing.volume is not None else market.volume,
                 open_interest=(
                     existing.open_interest if existing and existing.open_interest is not None else market.open_interest
@@ -547,6 +621,16 @@ class KalshiMarketDataCollector:
         current = self._states.get(ticker)
         market = self._markets.get(ticker)
         previous_yes = current.last_yes_price_cents if current else None
+        yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents = _merge_binary_quote_fields(
+            source_yes_bid_cents=None,
+            source_yes_ask_cents=None,
+            source_no_bid_cents=None,
+            source_no_ask_cents=None,
+            fallback_yes_bid_cents=(current.yes_bid_cents if current else (market.yes_bid if market else None)),
+            fallback_yes_ask_cents=(current.yes_ask_cents if current else (market.yes_ask if market else None)),
+            fallback_no_bid_cents=(current.no_bid_cents if current else (market.no_bid if market else None)),
+            fallback_no_ask_cents=(current.no_ask_cents if current else (market.no_ask if market else None)),
+        )
         updated_state = KalshiTickerState(
             ticker=ticker,
             last_yes_price_cents=yes_price_cents,
@@ -559,10 +643,10 @@ class KalshiMarketDataCollector:
             count=count,
             taker_side=msg.get("taker_side"),
             last_price_cents=yes_price_cents,
-            yes_bid_cents=current.yes_bid_cents if current else (market.yes_bid if market else None),
-            yes_ask_cents=current.yes_ask_cents if current else (market.yes_ask if market else None),
-            no_bid_cents=current.no_bid_cents if current else (market.no_bid if market else None),
-            no_ask_cents=current.no_ask_cents if current else (market.no_ask if market else None),
+            yes_bid_cents=yes_bid_cents,
+            yes_ask_cents=yes_ask_cents,
+            no_bid_cents=no_bid_cents,
+            no_ask_cents=no_ask_cents,
             volume=current.volume if current else (market.volume if market else None),
             open_interest=current.open_interest if current else (market.open_interest if market else None),
             dollar_volume=current.dollar_volume if current else None,
@@ -610,6 +694,16 @@ class KalshiMarketDataCollector:
         if preserved_trade_price is None and last_price_cents is not None:
             preserved_trade_price = last_price_cents
 
+        resolved_yes_bid_cents, resolved_yes_ask_cents, resolved_no_bid_cents, resolved_no_ask_cents = _merge_binary_quote_fields(
+            source_yes_bid_cents=yes_bid_cents,
+            source_yes_ask_cents=yes_ask_cents,
+            source_no_bid_cents=no_bid_cents,
+            source_no_ask_cents=no_ask_cents,
+            fallback_yes_bid_cents=(current.yes_bid_cents if current else None),
+            fallback_yes_ask_cents=(current.yes_ask_cents if current else None),
+            fallback_no_bid_cents=(current.no_bid_cents if current else (market.no_bid if market else None)),
+            fallback_no_ask_cents=(current.no_ask_cents if current else (market.no_ask if market else None)),
+        )
         updated_state = KalshiTickerState(
             ticker=ticker,
             last_yes_price_cents=preserved_trade_price,
@@ -622,10 +716,10 @@ class KalshiMarketDataCollector:
             count=current.count if current else None,
             taker_side=current.taker_side if current else None,
             last_price_cents=last_price_cents if last_price_cents is not None else (current.last_price_cents if current else None),
-            yes_bid_cents=yes_bid_cents if yes_bid_cents is not None else (current.yes_bid_cents if current else None),
-            yes_ask_cents=yes_ask_cents if yes_ask_cents is not None else (current.yes_ask_cents if current else None),
-            no_bid_cents=no_bid_cents if no_bid_cents is not None else (current.no_bid_cents if current else (market.no_bid if market else None)),
-            no_ask_cents=no_ask_cents if no_ask_cents is not None else (current.no_ask_cents if current else (market.no_ask if market else None)),
+            yes_bid_cents=resolved_yes_bid_cents,
+            yes_ask_cents=resolved_yes_ask_cents,
+            no_bid_cents=resolved_no_bid_cents,
+            no_ask_cents=resolved_no_ask_cents,
             volume=volume if volume or volume == 0 else (current.volume if current else (market.volume if market else None)),
             open_interest=(
                 open_interest
