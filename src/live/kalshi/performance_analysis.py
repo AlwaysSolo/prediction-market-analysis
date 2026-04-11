@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 from collections import Counter, defaultdict
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import zstandard as zstd
 
 from src.live.kalshi.bucket_policy import (
     label_edge_bucket,
@@ -232,6 +234,63 @@ def _iter_jsonl_tolerant(path: Path) -> tuple[list[dict[str, Any]], int]:
     return rows, skipped
 
 
+def _iter_jsonl_zst_tolerant(path: Path) -> tuple[list[dict[str, Any]], int]:
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    if not path.exists():
+        return rows, skipped
+    with path.open("rb") as handle:
+        with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+            text_reader = io.TextIOWrapper(reader, encoding="utf-8")
+            for raw_line in text_reader:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+                if isinstance(parsed, dict):
+                    rows.append(parsed)
+                else:
+                    skipped += 1
+    return rows, skipped
+
+
+def _load_strategy_event_archive_rows(
+    run_dir: Path,
+    *,
+    environment: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    archive_root = run_dir / "archive"
+    strategy_root = archive_root / "strategy_events"
+    strategy_staging_root = archive_root / "strategy_events_staging"
+    rows: list[dict[str, Any]] = []
+    skipped_lines_by_file: dict[str, int] = {}
+
+    if strategy_root.exists():
+        parquet_paths = sorted(strategy_root.rglob("*.parquet"))
+        for parquet_path in parquet_paths:
+            if environment and f"environment={environment}" not in str(parquet_path):
+                continue
+            frame = pd.read_parquet(parquet_path)
+            for row in frame.to_dict(orient="records"):
+                rows.append(row)
+
+    if strategy_staging_root.exists():
+        zst_paths = sorted(strategy_staging_root.rglob("*.jsonl.zst"))
+        for zst_path in zst_paths:
+            if environment and f"environment={environment}" not in str(zst_path):
+                continue
+            parsed_rows, skipped = _iter_jsonl_zst_tolerant(zst_path)
+            rows.extend(parsed_rows)
+            if skipped:
+                skipped_lines_by_file[str(zst_path)] = skipped_lines_by_file.get(str(zst_path), 0) + skipped
+
+    return rows, skipped_lines_by_file
+
+
 def _parse_cents_value(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -323,7 +382,7 @@ def _execution_outcome_label(row: dict[str, Any]) -> str:
 
     if filled_contracts > 0 and remaining_contracts == 0:
         return "filled"
-    if order_status == "canceled":
+    if order_status in {"canceled", "cancelled"}:
         return "cancelled_partial_fill" if filled_contracts > 0 else "cancelled_zero_fill"
     if order_status in {"executed", "filled"}:
         return "filled" if filled_contracts > 0 else "executed_no_fill"
@@ -566,6 +625,8 @@ def _time_lag_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> SourceLoadResult:
     approvals: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     settlements: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+    execution_context_rows: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+    execution_latest_rows: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     submit_requests: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     submit_request_counts: Counter[tuple[str, str]] = Counter()
     submit_errors: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
@@ -578,15 +639,68 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
 
     signal_root = run_dir / "signal"
     execution_root = run_dir / "execution"
+    archive_rows, archive_skipped_lines = _load_strategy_event_archive_rows(run_dir, environment=environment)
+    for file_path, skipped in archive_skipped_lines.items():
+        skipped_lines_by_file[file_path] = skipped_lines_by_file.get(file_path, 0) + skipped
     models = sorted(
         {path.name for path in signal_root.iterdir() if path.is_dir()}
         & {path.name for path in execution_root.iterdir() if path.is_dir()}
     )
+    archive_models = {
+        model
+        for row in archive_rows
+        for model in [_clean_string(row.get("model_label"))]
+        if model is not None
+    }
+    if archive_models:
+        models = sorted(set(models) | archive_models)
+
+    archive_present = bool(archive_rows)
+    for row in archive_rows:
+        model = _clean_string(row.get("model_label")) or _clean_string(row.get("model")) or "unknown"
+        event_kind = _clean_string(row.get("event_kind"))
+        decision_id = _clean_string(row.get("decision_id"))
+        event_time = _timestamp_iso(row.get("event_time")) or ""
+        if event_kind == "signal_blocked":
+            reason = _clean_string(row.get("reason")) or "unknown"
+            skip_reason_counter[(
+                model,
+                reason,
+                _clean_string(row.get("bucket_policy_side")),
+                _clean_string(row.get("bucket_policy_dimension")),
+                _clean_string(row.get("bucket_policy_bucket")),
+            )] += 1
+            continue
+        if decision_id is None:
+            continue
+        key = (model, decision_id)
+        if event_kind == "signal_approved":
+            approval_counts[model] += 1
+            approvals[key] = (event_time, row)
+            continue
+        if not event_kind or not event_kind.startswith("execution_"):
+            continue
+        if key not in execution_context_rows or event_kind == "execution_claimed":
+            execution_context_rows[key] = (event_time, row)
+        existing_latest = execution_latest_rows.get(key)
+        existing_latest_time = None if existing_latest is None else _parse_timestamp(existing_latest[0])
+        candidate_time = _parse_timestamp(event_time)
+        if existing_latest is None or (
+            candidate_time is not None
+            and (existing_latest_time is None or candidate_time >= existing_latest_time)
+        ):
+            execution_latest_rows[key] = (event_time, row)
+        if event_kind == "execution_settled" or _clean_string(row.get("status")) == "settled":
+            settlements[key] = (event_time, row)
 
     for model in models:
         model_signal_root = signal_root / model
+        if not model_signal_root.exists():
+            continue
         env_paths = [model_signal_root / environment] if environment else [path for path in model_signal_root.iterdir() if path.is_dir()]
         for env_path in sorted(env_paths):
+            if not env_path.exists():
+                continue
             for events_path in sorted(env_path.rglob("events.jsonl")):
                 rows, skipped = _iter_jsonl_tolerant(events_path)
                 if skipped:
@@ -599,6 +713,8 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
                     if decision_id is None:
                         continue
                     if not payload.get("approved"):
+                        if archive_present:
+                            continue
                         reason = _clean_string(payload.get("block_reason")) or "unknown"
                         skip_reason_counter[(
                             model,
@@ -608,17 +724,24 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
                             _clean_string(payload.get("bucket_policy_bucket")),
                         )] += 1
                         continue
+                    key = (model, decision_id)
+                    if key in approvals:
+                        continue
                     approval_counts[model] += 1
-                    approvals[(model, decision_id)] = (_timestamp_iso(event.get("logged_at")) or "", payload)
+                    approvals[key] = (_timestamp_iso(event.get("logged_at")) or "", payload)
 
     for model in models:
         model_execution_root = execution_root / model
+        if not model_execution_root.exists():
+            continue
         env_paths = (
             [model_execution_root / environment]
             if environment
             else [path for path in model_execution_root.iterdir() if path.is_dir()]
         )
         for env_path in sorted(env_paths):
+            if not env_path.exists():
+                continue
             for events_path in sorted(env_path.rglob("events.jsonl")):
                 rows, skipped = _iter_jsonl_tolerant(events_path)
                 if skipped:
@@ -682,51 +805,82 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
 
     canonical_rows: list[dict[str, Any]] = []
     execution_rows: list[dict[str, Any]] = []
-    for (model, decision_id), (approved_at, payload) in sorted(approvals.items()):
+    canonical_keys = sorted(
+        set(approvals.keys())
+        | set(settlements.keys())
+        | set(execution_context_rows.keys())
+        | set(execution_latest_rows.keys())
+    )
+    for model, decision_id in canonical_keys:
+        approval = approvals.get((model, decision_id))
+        approved_at = None if approval is None else approval[0]
+        payload = {} if approval is None else approval[1]
         settlement = settlements.get((model, decision_id))
         settled_payload = None if settlement is None else settlement[1]
         settled_at = None if settlement is None else settlement[0]
+        execution_context = execution_context_rows.get((model, decision_id))
+        execution_latest = execution_latest_rows.get((model, decision_id))
+        context_payload = payload or ({} if execution_context is None else execution_context[1]) or ({} if execution_latest is None else execution_latest[1])
+        context_time = approved_at or (None if execution_context is None else execution_context[0]) or (None if execution_latest is None else execution_latest[0])
         submit_request = submit_requests.get((model, decision_id))
         submit_error = submit_errors.get((model, decision_id))
         order_update = live_order_updates.get((model, decision_id))
         order_snapshot = None if order_update is None else order_update[1]
-        side = _clean_string((settled_payload or {}).get("side")) or _clean_string(payload.get("side"))
-        predicted_yes_probability = _safe_float(payload.get("predicted_yes_probability"))
-        feature_basis_market_prob = _safe_float(payload.get("feature_basis_market_prob"))
+        latest_exec_payload = None if execution_latest is None else execution_latest[1]
+        side = (
+            _clean_string((settled_payload or {}).get("side"))
+            or _clean_string((latest_exec_payload or {}).get("side"))
+            or _clean_string(context_payload.get("side"))
+        )
+        predicted_yes_probability = _safe_float(context_payload.get("predicted_yes_probability"))
+        feature_basis_market_prob = _safe_float(context_payload.get("feature_basis_market_prob"))
         chosen_probability = None
         if side == "YES":
             chosen_probability = predicted_yes_probability
         elif side == "NO" and predicted_yes_probability is not None:
             chosen_probability = 1.0 - predicted_yes_probability
-        yes_edge = _safe_float(payload.get("yes_post_cost_edge"))
-        no_edge = _safe_float(payload.get("no_post_cost_edge"))
+        yes_edge = _safe_float(context_payload.get("yes_post_cost_edge"))
+        no_edge = _safe_float(context_payload.get("no_post_cost_edge"))
         chosen_edge = yes_edge if side == "YES" else no_edge if side == "NO" else None
-        reference_price_cents = _safe_int(payload.get("reference_price_cents"))
+        reference_price_cents = _safe_int(context_payload.get("reference_price_cents"))
         settlement_result = _clean_string((settled_payload or {}).get("settlement_result"))
         realized_pnl = _safe_float((settled_payload or {}).get("realized_pnl_dollars"))
         cumulative_pnl = _safe_float((settled_payload or {}).get("cumulative_realized_pnl_dollars"))
-        thesis_id = _clean_string((settled_payload or {}).get("thesis_id")) or _clean_string(payload.get("thesis_id"))
+        thesis_id = (
+            _clean_string((settled_payload or {}).get("thesis_id"))
+            or _clean_string((latest_exec_payload or {}).get("thesis_id"))
+            or _clean_string(context_payload.get("thesis_id"))
+        )
         submit_status_code, submit_error_code, submit_error_message, submit_error_detail = (
             (None, None, None, None)
             if submit_error is None
             else _extract_exchange_error(submit_error[1])
         )
         submitted_at = None if submit_request is None else submit_request[0]
-        order_status = _clean_string((order_snapshot or {}).get("order_status"))
+        order_status = _clean_string((order_snapshot or {}).get("order_status")) or _clean_string((latest_exec_payload or {}).get("status"))
         order_last_update_at = None if order_update is None else order_update[0]
         filled_contracts = _safe_int((order_snapshot or {}).get("fill_count")) or 0
         remaining_contracts = _safe_int((order_snapshot or {}).get("remaining_count")) or 0
         requested_contracts = (
             _safe_int((submit_request or ("", {}))[1].get("contracts"))
             if submit_request is not None
-            else _safe_int((order_snapshot or {}).get("initial_count"))
+            else _safe_int((latest_exec_payload or {}).get("contracts"))
+            or _safe_int((order_snapshot or {}).get("initial_count"))
         )
         limit_price_cents = (
             _safe_int((submit_request or ("", {}))[1].get("limit_price_cents"))
             if submit_request is not None
-            else None
+            else _safe_int((latest_exec_payload or {}).get("limit_price_cents"))
         )
         fill_price_cents = _safe_int((order_snapshot or {}).get("displayed_price_cents"))
+        if fill_price_cents is None:
+            fill_price_cents = _safe_int((latest_exec_payload or {}).get("fill_price_cents"))
+        if filled_contracts == 0:
+            filled_contracts = _safe_int((latest_exec_payload or {}).get("filled_contracts")) or 0
+        if remaining_contracts == 0 and requested_contracts is not None and filled_contracts == 0 and order_status is None:
+            remaining_contracts = requested_contracts
+        if remaining_contracts == 0:
+            remaining_contracts = _safe_int((latest_exec_payload or {}).get("remaining_contracts")) or remaining_contracts
         limit_gap_cents = None if reference_price_cents is None or limit_price_cents is None else limit_price_cents - reference_price_cents
         slippage_cents = None if fill_price_cents is None or reference_price_cents is None else fill_price_cents - reference_price_cents
         offline_rule_side = None
@@ -735,22 +889,22 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
             offline_rule_side = "YES" if predicted_yes_probability > feature_basis_market_prob else "NO"
             if side is not None:
                 same_as_offline_rule = side == offline_rule_side
-        yes_bid_cents = _safe_int(payload.get("yes_bid_cents"))
-        yes_ask_cents = _safe_int(payload.get("yes_ask_cents"))
+        yes_bid_cents = _safe_int(context_payload.get("yes_bid_cents"))
+        yes_ask_cents = _safe_int(context_payload.get("yes_ask_cents"))
         one_sided_quote = (yes_bid_cents == 0) or (yes_ask_cents == 100) if yes_bid_cents is not None and yes_ask_cents is not None else None
 
         row = {
             "source_type": "live_execution",
             "run_name": run_dir.name,
             "model": model,
-            "ticker": _clean_string((settled_payload or {}).get("ticker")) or _clean_string(payload.get("ticker")),
+            "ticker": _clean_string((settled_payload or {}).get("ticker")) or _clean_string((latest_exec_payload or {}).get("ticker")) or _clean_string(context_payload.get("ticker")),
             "decision_id": decision_id,
             "thesis_id": thesis_id,
             "sample_id": None,
             "side": side,
-            "recorded_at": approved_at,
+            "recorded_at": context_time,
             "settled_at": settled_at,
-            "status": "settled" if settled_payload is not None else "open",
+            "status": "settled" if settled_payload is not None else _clean_string((latest_exec_payload or {}).get("status")) or "open",
             "settlement_result": settlement_result,
             "is_win": None if settled_payload is None else bool(realized_pnl is not None and realized_pnl > 0.0),
             "realized_pnl_dollars": realized_pnl,
@@ -774,64 +928,79 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
             "submit_error_message": submit_error_message,
             "submit_error_detail": submit_error_detail,
             "order_id": _clean_string((order_snapshot or {}).get("order_id")),
-            "price_bucket": _clean_string(payload.get("price_bucket")) or _price_bucket_label(reference_price_cents),
-            "probability_bucket": _clean_string(payload.get("chosen_side_probability_bucket")) or _probability_bucket_label(chosen_probability),
-            "edge_bucket": _clean_string(payload.get("chosen_side_edge_bucket")) or _edge_bucket_label(None if chosen_edge is None else chosen_edge * 100.0),
-            "tau_bucket": _clean_string(payload.get("tau_bucket")) or _tau_bucket_label(_safe_float(payload.get("tau_minutes"))),
+            "price_bucket": _clean_string(context_payload.get("price_bucket")) or _price_bucket_label(reference_price_cents),
+            "probability_bucket": _clean_string(context_payload.get("chosen_side_probability_bucket")) or _clean_string(context_payload.get("probability_bucket")) or _probability_bucket_label(chosen_probability),
+            "edge_bucket": _clean_string(context_payload.get("chosen_side_edge_bucket")) or _clean_string(context_payload.get("edge_bucket")) or _edge_bucket_label(None if chosen_edge is None else chosen_edge * 100.0),
+            "tau_bucket": _clean_string(context_payload.get("tau_bucket")) or _tau_bucket_label(_safe_float(context_payload.get("tau_minutes"))),
             "reference_price_cents": reference_price_cents,
             "chosen_side_probability": chosen_probability,
             "chosen_post_cost_edge_cents": None if chosen_edge is None else chosen_edge * 100.0,
-            "tau_minutes": _safe_float(payload.get("tau_minutes")),
-            "cash_required_dollars": _safe_float((settled_payload or {}).get("cash_required_dollars")),
-            "quote_spread_cents": _safe_int(payload.get("quote_spread_cents")),
-            "quote_spread_bucket": _spread_bucket_label(_safe_int(payload.get("quote_spread_cents"))),
-            "quote_age_seconds": _safe_float(payload.get("quote_age_seconds")),
-            "quote_age_bucket": _age_bucket_label(_safe_float(payload.get("quote_age_seconds"))),
-            "quote_mid_prob": _safe_float(payload.get("quote_mid_prob")),
-            "buy_yes_price_cents": _safe_int(payload.get("buy_yes_price_cents")),
-            "buy_no_price_cents": _safe_int(payload.get("buy_no_price_cents")),
+            "tau_minutes": _safe_float(context_payload.get("tau_minutes")),
+            "cash_required_dollars": _safe_float((settled_payload or {}).get("cash_required_dollars")) or _safe_float((latest_exec_payload or {}).get("cash_required_dollars")) or _safe_float(context_payload.get("estimated_cash_required_dollars")),
+            "quote_spread_cents": _safe_int(context_payload.get("quote_spread_cents")),
+            "quote_spread_bucket": _spread_bucket_label(_safe_int(context_payload.get("quote_spread_cents"))),
+            "quote_age_seconds": _safe_float(context_payload.get("quote_age_seconds")),
+            "quote_age_bucket": _age_bucket_label(_safe_float(context_payload.get("quote_age_seconds"))),
+            "quote_mid_prob": _safe_float(context_payload.get("quote_mid_prob")),
+            "buy_yes_price_cents": _safe_int(context_payload.get("buy_yes_price_cents")),
+            "buy_no_price_cents": _safe_int(context_payload.get("buy_no_price_cents")),
             "predicted_yes_probability": predicted_yes_probability,
-            "predicted_no_probability": _safe_float(payload.get("predicted_no_probability")),
+            "predicted_no_probability": _safe_float(context_payload.get("predicted_no_probability")),
             "feature_basis_market_prob": feature_basis_market_prob,
-            "raw_model_edge": _safe_float(payload.get("raw_model_edge")),
+            "raw_model_edge": _safe_float(context_payload.get("raw_model_edge")),
             "yes_post_cost_edge_cents": None if yes_edge is None else yes_edge * 100.0,
             "no_post_cost_edge_cents": None if no_edge is None else no_edge * 100.0,
-            "regime_label": _clean_string(payload.get("regime_label")) or "unknown",
-            "bearish_vote_count": _safe_int(payload.get("bearish_vote_count")),
-            "bullish_vote_count": _safe_int(payload.get("bullish_vote_count")),
-            "regime_price_momentum_bearish": payload.get("regime_price_momentum_bearish"),
-            "regime_signed_flow_bearish": payload.get("regime_signed_flow_bearish"),
-            "regime_yes_share_bearish": payload.get("regime_yes_share_bearish"),
-            "regime_price_momentum_bullish": payload.get("regime_price_momentum_bullish"),
-            "regime_signed_flow_bullish": payload.get("regime_signed_flow_bullish"),
-            "regime_yes_share_bullish": payload.get("regime_yes_share_bullish"),
-            "bucket_policy_side": _clean_string(payload.get("bucket_policy_side")),
-            "bucket_policy_dimension": _clean_string(payload.get("bucket_policy_dimension")),
-            "bucket_policy_bucket": _clean_string(payload.get("bucket_policy_bucket")),
+            "regime_label": _clean_string(context_payload.get("regime_label")) or "unknown",
+            "bearish_vote_count": _safe_int(context_payload.get("bearish_vote_count")),
+            "bullish_vote_count": _safe_int(context_payload.get("bullish_vote_count")),
+            "regime_price_momentum_bearish": context_payload.get("regime_price_momentum_bearish"),
+            "regime_signed_flow_bearish": context_payload.get("regime_signed_flow_bearish"),
+            "regime_yes_share_bearish": context_payload.get("regime_yes_share_bearish"),
+            "regime_price_momentum_bullish": context_payload.get("regime_price_momentum_bullish"),
+            "regime_signed_flow_bullish": context_payload.get("regime_signed_flow_bullish"),
+            "regime_yes_share_bullish": context_payload.get("regime_yes_share_bullish"),
+            "bucket_policy_side": _clean_string(context_payload.get("bucket_policy_side")),
+            "bucket_policy_dimension": _clean_string(context_payload.get("bucket_policy_dimension")),
+            "bucket_policy_bucket": _clean_string(context_payload.get("bucket_policy_bucket")),
             "tranche_index": _safe_int((settled_payload or {}).get("tranche_index"))
             if (settled_payload or {}).get("tranche_index") is not None
-            else _safe_int(payload.get("tranche_index")),
+            else _safe_int((latest_exec_payload or {}).get("tranche_index"))
+            if (latest_exec_payload or {}).get("tranche_index") is not None
+            else _safe_int(context_payload.get("tranche_index")),
             "tranche_window": _clean_string((settled_payload or {}).get("tranche_window"))
-            or _clean_string(payload.get("tranche_window")),
+            or _clean_string((latest_exec_payload or {}).get("tranche_window"))
+            or _clean_string(context_payload.get("tranche_window")),
             "tranche_reason": _clean_string((settled_payload or {}).get("tranche_reason"))
-            or _clean_string(payload.get("tranche_reason")),
+            or _clean_string((latest_exec_payload or {}).get("tranche_reason"))
+            or _clean_string(context_payload.get("tranche_reason")),
             "lifecycle_state": _clean_string((settled_payload or {}).get("lifecycle_state"))
-            or _clean_string(payload.get("lifecycle_state")),
+            or _clean_string((latest_exec_payload or {}).get("lifecycle_state"))
+            or _clean_string(context_payload.get("lifecycle_state")),
             "total_thesis_budget_dollars": _safe_float((settled_payload or {}).get("total_thesis_budget_dollars"))
             if (settled_payload or {}).get("total_thesis_budget_dollars") is not None
-            else _safe_float(payload.get("total_thesis_budget_dollars")),
+            else _safe_float((latest_exec_payload or {}).get("total_thesis_budget_dollars"))
+            if (latest_exec_payload or {}).get("total_thesis_budget_dollars") is not None
+            else _safe_float(context_payload.get("total_thesis_budget_dollars")),
             "payout_if_yes_dollars": _safe_float((settled_payload or {}).get("payout_if_yes_dollars"))
             if (settled_payload or {}).get("payout_if_yes_dollars") is not None
-            else _safe_float(payload.get("payout_if_yes_dollars")),
+            else _safe_float((latest_exec_payload or {}).get("payout_if_yes_dollars"))
+            if (latest_exec_payload or {}).get("payout_if_yes_dollars") is not None
+            else _safe_float(context_payload.get("payout_if_yes_dollars")),
             "payout_if_no_dollars": _safe_float((settled_payload or {}).get("payout_if_no_dollars"))
             if (settled_payload or {}).get("payout_if_no_dollars") is not None
-            else _safe_float(payload.get("payout_if_no_dollars")),
+            else _safe_float((latest_exec_payload or {}).get("payout_if_no_dollars"))
+            if (latest_exec_payload or {}).get("payout_if_no_dollars") is not None
+            else _safe_float(context_payload.get("payout_if_no_dollars")),
             "expected_value_dollars": _safe_float((settled_payload or {}).get("expected_value_dollars"))
             if (settled_payload or {}).get("expected_value_dollars") is not None
-            else _safe_float(payload.get("expected_value_dollars")),
+            else _safe_float((latest_exec_payload or {}).get("expected_value_dollars"))
+            if (latest_exec_payload or {}).get("expected_value_dollars") is not None
+            else _safe_float(context_payload.get("expected_value_dollars")),
             "worst_case_loss_dollars": _safe_float((settled_payload or {}).get("worst_case_loss_dollars"))
             if (settled_payload or {}).get("worst_case_loss_dollars") is not None
-            else _safe_float(payload.get("worst_case_loss_dollars")),
+            else _safe_float((latest_exec_payload or {}).get("worst_case_loss_dollars"))
+            if (latest_exec_payload or {}).get("worst_case_loss_dollars") is not None
+            else _safe_float(context_payload.get("worst_case_loss_dollars")),
             "offline_rule_side": offline_rule_side,
             "same_as_offline_rule": same_as_offline_rule,
             "one_sided_quote": one_sided_quote,

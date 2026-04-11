@@ -212,6 +212,20 @@ def _make_live_execution_run(base: Path) -> Path:
     return run_dir
 
 
+def _write_strategy_events_parquet(run_dir: Path, rows: list[dict]) -> None:
+    path = (
+        run_dir
+        / "archive"
+        / "strategy_events"
+        / "environment=demo"
+        / "date=2026-04-01"
+        / "hour=12"
+        / "part-test.parquet"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_parquet(path, index=False)
+
+
 def _make_live_research_run(base: Path) -> Path:
     run_dir = base / "output" / "live_research" / "my_research_run"
     research_path = run_dir / "research" / "lasso" / "demo" / "2026-04-01" / "events.jsonl"
@@ -426,6 +440,156 @@ def test_generate_kalshi_performance_reports_for_live_execution(tmp_path: Path) 
     assert "Skip Reasons" in report_text
     assert "Quote Quality Effects" in report_text
     assert "Execution Quality" in report_text
+
+
+def test_generate_kalshi_performance_reports_for_live_execution_archive_fallback(tmp_path: Path) -> None:
+    live_run = tmp_path / "output" / "live" / "archive_only_live_run"
+    (live_run / "signal" / "bagged_lasso" / "demo" / "2026-04-01").mkdir(parents=True, exist_ok=True)
+    (live_run / "execution" / "bagged_lasso" / "demo" / "2026-04-01").mkdir(parents=True, exist_ok=True)
+    _write_jsonl(
+        live_run / "execution" / "bagged_lasso" / "demo" / "2026-04-01" / "events.jsonl",
+        [
+            {
+                "logged_at": "2026-04-01T12:05:00+00:00",
+                "event_type": "submit_requested",
+                "payload": {
+                    "decision_id": "dec-archive-1",
+                    "ticker": "KXBTC15M-ARCHIVE1",
+                    "side": "NO",
+                    "contracts": 1,
+                    "limit_price_cents": 50,
+                    "reference_price_cents": 32,
+                    "subaccount": 0,
+                },
+            }
+        ],
+    )
+    _write_strategy_events_parquet(
+        live_run,
+        [
+            {
+                "run_name": "archive_only_live_run",
+                "environment": "demo",
+                "model_label": "bagged_lasso",
+                "model_family": "bagged_lasso",
+                "strategy_event_id": "strategy:bagged_lasso:signal:dec-archive-1",
+                "event_kind": "signal_approved",
+                "event_time": "2026-04-01T12:05:00+00:00",
+                "ticker": "KXBTC15M-ARCHIVE1",
+                "side": "NO",
+                "decision_id": "dec-archive-1",
+                "approved": True,
+                "status": "approved",
+                "reason": None,
+                "reference_price_cents": 32,
+                "limit_price_cents": 50,
+                "predicted_yes_probability": 0.34,
+                "predicted_no_probability": 0.66,
+                "feature_basis_market_prob": 0.48,
+                "raw_model_edge": -0.14,
+                "post_cost_edge": 0.08,
+                "yes_post_cost_edge": -0.20,
+                "no_post_cost_edge": 0.08,
+                "tau_minutes": 5.0,
+                "last_yes_price_cents": 68,
+                "yes_bid_cents": 67,
+                "yes_ask_cents": 68,
+                "buy_yes_price_cents": 68,
+                "buy_no_price_cents": 32,
+                "quote_mid_prob": 0.33,
+                "quote_spread_cents": 1,
+                "quote_age_seconds": 0.2,
+                "regime_label": "downtrend",
+                "bearish_vote_count": 2,
+                "bullish_vote_count": 0,
+                "regime_price_momentum_bearish": False,
+                "regime_signed_flow_bearish": True,
+                "regime_yes_share_bearish": True,
+                "regime_price_momentum_bullish": False,
+                "regime_signed_flow_bullish": False,
+                "regime_yes_share_bullish": False,
+                "tau_bucket": "4-6",
+                "price_bucket": "30-40",
+                "probability_bucket": "60-70",
+                "edge_bucket": "5-10",
+                "bucket_policy_dimension": None,
+                "bucket_policy_bucket": None,
+                "bucket_policy_side": None,
+                "contracts": 1,
+                "estimated_entry_cost_dollars": 0.32,
+                "estimated_fees_dollars": 0.02,
+                "estimated_cash_required_dollars": 0.34,
+                "thesis_id": "thesis-1",
+                "tranche_index": 0,
+                "tranche_window": "10m",
+                "tranche_reason": "opened",
+                "lifecycle_state": "opened",
+                "total_thesis_budget_dollars": 1.0,
+                "payout_if_yes_dollars": -0.32,
+                "payout_if_no_dollars": 0.68,
+                "expected_value_dollars": 0.08,
+                "worst_case_loss_dollars": 0.34,
+                "execution_mode": "live",
+                "subaccount": 0,
+            },
+            {
+                "run_name": "archive_only_live_run",
+                "environment": "demo",
+                "model_label": "bagged_lasso",
+                "model_family": "bagged_lasso",
+                "strategy_event_id": "strategy:bagged_lasso:execution:dec-archive-1:cancelled",
+                "event_kind": "execution_cancelled",
+                "event_time": "2026-04-01T12:05:01+00:00",
+                "ticker": "KXBTC15M-ARCHIVE1",
+                "side": "NO",
+                "decision_id": "dec-archive-1",
+                "client_order_id": "dec-archive-1",
+                "order_id": "order-archive-1",
+                "approved": None,
+                "status": "cancelled",
+                "reason": "order_cancelled",
+                "reference_price_cents": 32,
+                "limit_price_cents": 50,
+                "contracts": 1,
+                "filled_contracts": 0,
+                "remaining_contracts": 0,
+                "fill_price_cents": None,
+                "entry_cost_dollars": 0.0,
+                "fees_dollars": 0.0,
+                "cash_required_dollars": 0.0,
+                "available_cash_dollars": 10.0,
+                "realized_pnl_dollars": None,
+                "cumulative_realized_pnl_dollars": None,
+                "settlement_result": None,
+                "thesis_id": "thesis-1",
+                "tranche_index": 0,
+                "tranche_window": "10m",
+                "tranche_reason": "opened",
+                "lifecycle_state": "opened",
+                "total_thesis_budget_dollars": 1.0,
+                "payout_if_yes_dollars": -0.32,
+                "payout_if_no_dollars": 0.68,
+                "expected_value_dollars": 0.08,
+                "worst_case_loss_dollars": 0.34,
+                "execution_mode": "live",
+                "subaccount": 0,
+            },
+        ],
+    )
+
+    outputs = generate_kalshi_performance_reports(
+        live_run,
+        output_dir=tmp_path / "reports_archive_fallback",
+        environment="demo",
+    )
+    artifacts = outputs["runs"][0]["artifacts"]
+    execution_df = pd.read_csv(artifacts["execution_rows.csv"])
+    row = execution_df.loc[execution_df["decision_id"] == "dec-archive-1"].iloc[0]
+    assert row["price_bucket"] == "30-40"
+    assert row["tranche_window"] == "10m"
+    assert row["execution_outcome"] == "cancelled_zero_fill"
+    model_totals_df = pd.read_csv(artifacts["model_totals.csv"])
+    assert int(model_totals_df.iloc[0]["recorded_count"]) == 1
 
 
 def test_generate_kalshi_performance_reports_for_live_research(tmp_path: Path) -> None:
