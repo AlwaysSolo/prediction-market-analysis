@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -43,6 +44,19 @@ def _parse_bool(value: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Unsupported boolean value: {value}")
+
+
+def _normalize_time_in_force(value: str) -> str:
+    normalized = value.strip().lower()
+    aliases = {
+        "ioc": "immediate_or_cancel",
+        "fok": "fill_or_kill",
+        "gtc": "good_till_canceled",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"immediate_or_cancel", "fill_or_kill", "good_till_canceled"}:
+        raise ValueError(f"Unsupported time_in_force value: {value}")
+    return normalized
 
 
 def _env_var_names(environment: KalshiEnvironment, suffix: str) -> tuple[str, str]:
@@ -121,6 +135,8 @@ class KalshiExecutionConfig:
     shadow_fill_latency_seconds: float = 0.25
     enable_pre_submit_orderbook_check: bool = True
     pre_submit_orderbook_depth: int = 1
+    probe_order_time_in_force: str = "good_till_canceled"
+    probe_order_ttl_seconds: float = 2.0
     subaccount: int = 0
     reconcile_interval_seconds: float = 15.0
     order_reconcile_timeout_seconds: float = 10.0
@@ -134,10 +150,17 @@ class KalshiExecutionConfig:
             raise ValueError("shadow_fill_latency_seconds must be non-negative")
         if self.pre_submit_orderbook_depth <= 0:
             raise ValueError("pre_submit_orderbook_depth must be positive")
+        if self.probe_order_ttl_seconds < 0:
+            raise ValueError("probe_order_ttl_seconds must be non-negative")
         if self.reconcile_interval_seconds <= 0:
             raise ValueError("reconcile_interval_seconds must be positive")
         if self.order_reconcile_timeout_seconds <= 0:
             raise ValueError("order_reconcile_timeout_seconds must be positive")
+        object.__setattr__(
+            self,
+            "probe_order_time_in_force",
+            _normalize_time_in_force(self.probe_order_time_in_force),
+        )
 
     @property
     def live_order_submission_allowed(self) -> bool:
@@ -159,6 +182,10 @@ class KalshiExecutionConfig:
                 _resolve_env_value(environment, "ENABLE_PRE_SUBMIT_ORDERBOOK_CHECK") or "true"
             ),
             pre_submit_orderbook_depth=int(_resolve_env_value(environment, "PRE_SUBMIT_ORDERBOOK_DEPTH") or 1),
+            probe_order_time_in_force=_normalize_time_in_force(
+                _resolve_env_value(environment, "PROBE_ORDER_TIME_IN_FORCE") or "good_till_canceled"
+            ),
+            probe_order_ttl_seconds=float(_resolve_env_value(environment, "PROBE_ORDER_TTL_SECONDS") or 2.0),
             subaccount=int(_resolve_env_value(environment, "SUBACCOUNT") or 0),
             reconcile_interval_seconds=float(_resolve_env_value(environment, "RECONCILE_INTERVAL_SECONDS") or 15.0),
             order_reconcile_timeout_seconds=float(
@@ -188,6 +215,16 @@ class _LiveOrderbookSnapshot:
 
 
 @dataclass(frozen=True)
+class _FeedQuoteContext:
+    ticker_update_time: datetime | None
+    received_at: datetime | None
+    top_book_side: str | None
+    top_book_price_cents: int | None
+    top_book_contracts: int | None
+    executable_ask_cents: int | None
+
+
+@dataclass(frozen=True)
 class _LiveOrderbookCheckResult:
     passed: bool
     reason: str | None
@@ -196,6 +233,10 @@ class _LiveOrderbookCheckResult:
     top_book_price_cents: int | None
     top_book_contracts: int | None
     executable_ask_cents: int | None
+    feed_top_book_side: str | None
+    feed_top_book_price_cents: int | None
+    feed_top_book_contracts: int | None
+    feed_executable_ask_cents: int | None
     ticker_update_time: datetime | None
     received_at: datetime | None
     ticker_update_to_check_ms: float | None
@@ -465,7 +506,13 @@ def portfolio_position_from_live_order(record: KalshiLiveOrderRecord) -> KalshiP
     )
 
 
-def build_create_order_payload(intent: KalshiTradeIntent, *, subaccount: int | None = None) -> dict[str, Any]:
+def build_create_order_payload(
+    intent: KalshiTradeIntent,
+    *,
+    subaccount: int | None = None,
+    time_in_force: str = "immediate_or_cancel",
+    expiration_ts: int | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ticker": intent.ticker,
         "client_order_id": intent.decision_id,
@@ -473,10 +520,12 @@ def build_create_order_payload(intent: KalshiTradeIntent, *, subaccount: int | N
         "action": "buy",
         "count": intent.contracts,
         "type": "limit",
-        "time_in_force": "immediate_or_cancel",
+        "time_in_force": time_in_force,
     }
     price_field = "yes_price" if intent.side.upper() == "YES" else "no_price"
     payload[price_field] = intent.max_acceptable_entry_price_cents
+    if expiration_ts is not None:
+        payload["expiration_ts"] = expiration_ts
     if subaccount is not None:
         payload["subaccount"] = subaccount
     return payload
@@ -728,14 +777,70 @@ class KalshiExecutionEngine:
             message="shadow_fill_requoted",
         )
 
-    def _current_quote_timestamps(self, ticker: str) -> tuple[datetime | None, datetime | None]:
+    def _current_quote_context(self, ticker: str, side: str) -> _FeedQuoteContext:
         collector_state = self._collector.get_state(ticker)
         if collector_state is not None:
-            return collector_state.ticker_update_time, collector_state.received_at
+            if side.upper() == "NO":
+                return _FeedQuoteContext(
+                    ticker_update_time=collector_state.ticker_update_time,
+                    received_at=collector_state.received_at,
+                    top_book_side="yes_bid",
+                    top_book_price_cents=collector_state.yes_bid_cents,
+                    top_book_contracts=collector_state.yes_bid_size,
+                    executable_ask_cents=collector_state.buy_no_price_cents,
+                )
+            return _FeedQuoteContext(
+                ticker_update_time=collector_state.ticker_update_time,
+                received_at=collector_state.received_at,
+                top_book_side="no_bid",
+                top_book_price_cents=collector_state.no_bid_cents,
+                top_book_contracts=collector_state.no_bid_size,
+                executable_ask_cents=collector_state.buy_yes_price_cents,
+            )
         score_state = self.signal_engine.scorer.get_state(ticker)
         if score_state is not None:
-            return score_state.ticker_update_time, score_state.received_at
-        return None, None
+            executable_ask_cents = score_state.buy_no_price_cents if side.upper() == "NO" else score_state.buy_yes_price_cents
+            top_book_side = "yes_bid" if side.upper() == "NO" else "no_bid"
+            top_book_price_cents = score_state.yes_bid_cents if side.upper() == "NO" else score_state.no_bid_cents
+            return _FeedQuoteContext(
+                ticker_update_time=score_state.ticker_update_time,
+                received_at=score_state.received_at,
+                top_book_side=top_book_side,
+                top_book_price_cents=top_book_price_cents,
+                top_book_contracts=None,
+                executable_ask_cents=executable_ask_cents,
+            )
+        return _FeedQuoteContext(
+            ticker_update_time=None,
+            received_at=None,
+            top_book_side="yes_bid" if side.upper() == "NO" else "no_bid",
+            top_book_price_cents=None,
+            top_book_contracts=None,
+            executable_ask_cents=None,
+        )
+
+    def _is_probe_order_intent(self, intent: KalshiTradeIntent) -> bool:
+        return (
+            intent.tranche_index == 0
+            and intent.tranche_window == "10m"
+            and intent.tranche_reason == "opened"
+            and intent.lifecycle_state == "probe_pending"
+        )
+
+    def _build_live_submission_policy(
+        self,
+        intent: KalshiTradeIntent,
+        *,
+        submitted_at: datetime,
+    ) -> tuple[str, int | None, bool]:
+        if not self._is_probe_order_intent(intent):
+            return "immediate_or_cancel", None, False
+        time_in_force = self.config.probe_order_time_in_force
+        expiration_ts: int | None = None
+        if time_in_force == "good_till_canceled" and self.config.probe_order_ttl_seconds > 0:
+            expires_at = submitted_at + timedelta(seconds=self.config.probe_order_ttl_seconds)
+            expiration_ts = max(math.ceil(expires_at.timestamp()), math.floor(submitted_at.timestamp()) + 1)
+        return time_in_force, expiration_ts, True
 
     def _orderbook_check_log_payload(
         self,
@@ -757,6 +862,10 @@ class KalshiExecutionEngine:
             "top_book_price_cents": result.top_book_price_cents,
             "top_book_contracts": result.top_book_contracts,
             "current_executable_ask_cents": result.executable_ask_cents,
+            "feed_top_book_side": result.feed_top_book_side,
+            "feed_top_book_price_cents": result.feed_top_book_price_cents,
+            "feed_top_book_contracts": result.feed_top_book_contracts,
+            "feed_executable_ask_cents": result.feed_executable_ask_cents,
             "ticker_update_time": (
                 result.ticker_update_time.isoformat() if result.ticker_update_time is not None else None
             ),
@@ -772,7 +881,7 @@ class KalshiExecutionEngine:
         intent: KalshiTradeIntent,
     ) -> _LiveOrderbookCheckResult:
         checked_at = utc_now()
-        ticker_update_time, received_at = self._current_quote_timestamps(intent.ticker)
+        quote_context = self._current_quote_context(intent.ticker, intent.side)
         if not self.config.enable_pre_submit_orderbook_check:
             return _LiveOrderbookCheckResult(
                 passed=True,
@@ -782,10 +891,14 @@ class KalshiExecutionEngine:
                 top_book_price_cents=None,
                 top_book_contracts=None,
                 executable_ask_cents=None,
-                ticker_update_time=ticker_update_time,
-                received_at=received_at,
-                ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
-                received_to_check_ms=_latency_ms(received_at, checked_at),
+                feed_top_book_side=quote_context.top_book_side,
+                feed_top_book_price_cents=quote_context.top_book_price_cents,
+                feed_top_book_contracts=quote_context.top_book_contracts,
+                feed_executable_ask_cents=quote_context.executable_ask_cents,
+                ticker_update_time=quote_context.ticker_update_time,
+                received_at=quote_context.received_at,
+                ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
+                received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
                 orderbook_roundtrip_ms=0.0,
             )
 
@@ -806,10 +919,14 @@ class KalshiExecutionEngine:
                 top_book_price_cents=None,
                 top_book_contracts=None,
                 executable_ask_cents=None,
-                ticker_update_time=ticker_update_time,
-                received_at=received_at,
-                ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
-                received_to_check_ms=_latency_ms(received_at, checked_at),
+                feed_top_book_side=quote_context.top_book_side,
+                feed_top_book_price_cents=quote_context.top_book_price_cents,
+                feed_top_book_contracts=quote_context.top_book_contracts,
+                feed_executable_ask_cents=quote_context.executable_ask_cents,
+                ticker_update_time=quote_context.ticker_update_time,
+                received_at=quote_context.received_at,
+                ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
+                received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
                 orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
                 error=_compact_error_detail(repr(exc)),
             )
@@ -831,10 +948,14 @@ class KalshiExecutionEngine:
                 top_book_price_cents=None,
                 top_book_contracts=None,
                 executable_ask_cents=None,
-                ticker_update_time=ticker_update_time,
-                received_at=received_at,
-                ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
-                received_to_check_ms=_latency_ms(received_at, checked_at),
+                feed_top_book_side=quote_context.top_book_side,
+                feed_top_book_price_cents=quote_context.top_book_price_cents,
+                feed_top_book_contracts=quote_context.top_book_contracts,
+                feed_executable_ask_cents=quote_context.executable_ask_cents,
+                ticker_update_time=quote_context.ticker_update_time,
+                received_at=quote_context.received_at,
+                ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
+                received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
                 orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
             )
 
@@ -852,10 +973,14 @@ class KalshiExecutionEngine:
             top_book_price_cents=top_level.price_cents,
             top_book_contracts=top_level.contracts,
             executable_ask_cents=executable_ask_cents,
-            ticker_update_time=ticker_update_time,
-            received_at=received_at,
-            ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
-            received_to_check_ms=_latency_ms(received_at, checked_at),
+            feed_top_book_side=quote_context.top_book_side,
+            feed_top_book_price_cents=quote_context.top_book_price_cents,
+            feed_top_book_contracts=quote_context.top_book_contracts,
+            feed_executable_ask_cents=quote_context.executable_ask_cents,
+            ticker_update_time=quote_context.ticker_update_time,
+            received_at=quote_context.received_at,
+            ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
+            received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
             orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
         )
 
@@ -1122,8 +1247,17 @@ class KalshiExecutionEngine:
             await self._finalize_cancelled(intent.decision_id, orderbook_check.reason or "live_orderbook_blocked")
             return
 
-        payload = build_create_order_payload(intent, subaccount=self.config.subaccount)
         submit_requested_at = utc_now()
+        time_in_force, expiration_ts, is_probe_order = self._build_live_submission_policy(
+            intent,
+            submitted_at=submit_requested_at,
+        )
+        payload = build_create_order_payload(
+            intent,
+            subaccount=self.config.subaccount,
+            time_in_force=time_in_force,
+            expiration_ts=expiration_ts,
+        )
         await self._logger.write(
             "submit_requested",
             {
@@ -1134,6 +1268,9 @@ class KalshiExecutionEngine:
                 "limit_price_cents": intent.max_acceptable_entry_price_cents,
                 "reference_price_cents": intent.reference_price_cents,
                 "subaccount": self.config.subaccount,
+                "is_probe_order": is_probe_order,
+                "time_in_force": time_in_force,
+                "expiration_ts": expiration_ts,
                 "ticker_update_time": (
                     orderbook_check.ticker_update_time.isoformat()
                     if orderbook_check.ticker_update_time is not None
@@ -1156,6 +1293,10 @@ class KalshiExecutionEngine:
                 "top_book_side": orderbook_check.top_book_side,
                 "top_book_price_cents": orderbook_check.top_book_price_cents,
                 "top_book_contracts": orderbook_check.top_book_contracts,
+                "feed_top_book_side": orderbook_check.feed_top_book_side,
+                "feed_top_book_price_cents": orderbook_check.feed_top_book_price_cents,
+                "feed_top_book_contracts": orderbook_check.feed_top_book_contracts,
+                "feed_executable_ask_cents": orderbook_check.feed_executable_ask_cents,
                 "payload": payload,
             },
             event_time=submit_requested_at,
@@ -1247,12 +1388,32 @@ class KalshiExecutionEngine:
             await self._apply_order_record(record, allow_signal_feedback=True)
             return True
 
+        retry_requested_at = utc_now()
+        time_in_force, expiration_ts, _is_probe_order = self._build_live_submission_policy(
+            intent,
+            submitted_at=retry_requested_at,
+        )
+        retry_payload = build_create_order_payload(
+            intent,
+            subaccount=self.config.subaccount,
+            time_in_force=time_in_force,
+            expiration_ts=expiration_ts,
+        )
         try:
             response = await self._call_rest(
                 self._rest_client.create_order,
-                build_create_order_payload(intent, subaccount=self.config.subaccount),
+                retry_payload,
             )
-            await self._logger.write("submit_retry_response", {"decision_id": intent.decision_id, "response": response})
+            await self._logger.write(
+                "submit_retry_response",
+                {
+                    "decision_id": intent.decision_id,
+                    "time_in_force": time_in_force,
+                    "expiration_ts": expiration_ts,
+                    "response": response,
+                },
+                event_time=retry_requested_at,
+            )
         except httpx.HTTPStatusError as exc:
             await self._logger.write(
                 "submit_retry_error",
@@ -1260,6 +1421,8 @@ class KalshiExecutionEngine:
                     "decision_id": intent.decision_id,
                     "status_code": exc.response.status_code,
                     "response": exc.response.text,
+                    "time_in_force": time_in_force,
+                    "expiration_ts": expiration_ts,
                 },
             )
             if exc.response.status_code == 409:
@@ -1271,7 +1434,12 @@ class KalshiExecutionEngine:
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             await self._logger.write(
                 "submit_retry_error",
-                {"decision_id": intent.decision_id, "error": repr(exc)},
+                {
+                    "decision_id": intent.decision_id,
+                    "error": repr(exc),
+                    "time_in_force": time_in_force,
+                    "expiration_ts": expiration_ts,
+                },
             )
             return False
 

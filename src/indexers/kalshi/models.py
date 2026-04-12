@@ -36,6 +36,14 @@ def parse_count(value: Optional[object], fp_value: Optional[object]) -> int:
     return 0
 
 
+def parse_optional_count(value: Optional[object], fp_value: Optional[object]) -> Optional[int]:
+    if value is not None and value != "":
+        return int(value)
+    if fp_value is not None and fp_value != "":
+        return int(Decimal(str(fp_value)))
+    return None
+
+
 @dataclass
 class Trade:
     trade_id: str
@@ -80,6 +88,8 @@ class Market:
     created_time: Optional[datetime]
     open_time: Optional[datetime]
     close_time: Optional[datetime]
+    yes_bid_size: Optional[int] = None
+    yes_ask_size: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "Market":
@@ -108,4 +118,6 @@ class Market:
             created_time=parse_time(data.get("created_time")),
             open_time=parse_time(data.get("open_time")),
             close_time=parse_time(data.get("close_time")),
+            yes_bid_size=parse_optional_count(data.get("yes_bid_size"), data.get("yes_bid_size_fp")),
+            yes_ask_size=parse_optional_count(data.get("yes_ask_size"), data.get("yes_ask_size_fp")),
         )

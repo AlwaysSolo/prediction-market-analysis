@@ -383,6 +383,10 @@ class KalshiResearchArchiveManager:
             "yes_ask_cents": update.yes_ask_cents,
             "no_bid_cents": update.no_bid_cents,
             "no_ask_cents": update.no_ask_cents,
+            "yes_bid_size": update.yes_bid_size,
+            "yes_ask_size": update.yes_ask_size,
+            "no_bid_size": update.no_bid_size,
+            "no_ask_size": update.no_ask_size,
             "quote_mid_prob": (
                 (update.yes_bid_cents + update.yes_ask_cents) / 200.0
                 if update.yes_bid_cents is not None and update.yes_ask_cents is not None
@@ -406,10 +410,20 @@ class KalshiResearchArchiveManager:
                 if update.yes_ask_cents is not None
                 else (100 - update.no_bid_cents if update.no_bid_cents is not None else None)
             ),
+            "buy_yes_size": (
+                update.yes_ask_size
+                if update.yes_ask_size is not None
+                else update.no_bid_size
+            ),
             "buy_no_price_cents": (
                 update.no_ask_cents
                 if update.no_ask_cents is not None
                 else (100 - update.yes_bid_cents if update.yes_bid_cents is not None else None)
+            ),
+            "buy_no_size": (
+                update.no_ask_size
+                if update.no_ask_size is not None
+                else update.yes_bid_size
             ),
             "quote_age_seconds": (
                 max(0.0, (update.event_time - update.ticker_update_time).total_seconds())

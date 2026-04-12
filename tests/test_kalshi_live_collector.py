@@ -191,6 +191,8 @@ def test_ticker_message_updates_quote_fields(tmp_path: Path):
                 "price_dollars": "0.560",
                 "yes_bid_dollars": "0.540",
                 "yes_ask_dollars": "0.570",
+                "yes_bid_size_fp": "2.00",
+                "yes_ask_size_fp": "5.00",
                 "volume_fp": "123.00",
                 "open_interest_fp": "77.00",
                 "dollar_volume": 456,
@@ -208,6 +210,10 @@ def test_ticker_message_updates_quote_fields(tmp_path: Path):
     assert state.yes_ask_cents == 57
     assert state.no_bid_cents == 43
     assert state.no_ask_cents == 46
+    assert state.yes_bid_size == 2
+    assert state.yes_ask_size == 5
+    assert state.no_bid_size == 5
+    assert state.no_ask_size == 2
     assert state.volume == 123
     assert state.open_interest == 77
     assert state.dollar_volume == 456
@@ -238,6 +244,8 @@ def test_ticker_message_replaces_stale_no_side_with_yes_implied_quotes(tmp_path:
                 "price_dollars": "0.090",
                 "yes_bid_dollars": "0.080",
                 "yes_ask_dollars": "0.100",
+                "yes_bid_size_fp": "1.00",
+                "yes_ask_size_fp": "4.00",
                 "time": "2026-01-01T12:01:00Z",
             }
         )
@@ -249,6 +257,10 @@ def test_ticker_message_replaces_stale_no_side_with_yes_implied_quotes(tmp_path:
     assert state.yes_ask_cents == 10
     assert state.no_bid_cents == 90
     assert state.no_ask_cents == 92
+    assert state.yes_bid_size == 1
+    assert state.yes_ask_size == 4
+    assert state.no_bid_size == 4
+    assert state.no_ask_size == 1
 
 
 def test_get_market_returns_cached_market_and_lifecycle_updates_result(tmp_path: Path):

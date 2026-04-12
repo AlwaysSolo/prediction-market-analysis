@@ -58,6 +58,8 @@ def _ticker_update(
     previous_yes_price_cents: int | None = 54,
     yes_bid_cents: int | None = None,
     yes_ask_cents: int | None = None,
+    yes_bid_size: int | None = None,
+    yes_ask_size: int | None = None,
     ticker_update_time: datetime | None = None,
     close_time: datetime | None = None,
     is_open: bool = True,
@@ -84,6 +86,10 @@ def _ticker_update(
         tau_minutes=None,
         yes_bid_cents=yes_bid_cents,
         yes_ask_cents=yes_ask_cents,
+        yes_bid_size=yes_bid_size,
+        yes_ask_size=yes_ask_size,
+        no_bid_size=yes_ask_size,
+        no_ask_size=yes_bid_size,
         ticker_update_time=ticker_update_time,
     )
 
@@ -338,9 +344,29 @@ def test_build_create_order_payload_uses_side_specific_price_field():
     assert yes_payload["yes_price"] == 58
     assert "no_price" not in yes_payload
     assert yes_payload["subaccount"] == 7
+    assert yes_payload["time_in_force"] == "immediate_or_cancel"
     assert no_payload["no_price"] == 41
     assert "yes_price" not in no_payload
     assert no_payload["subaccount"] == 7
+
+    probe_payload = build_create_order_payload(
+        type(
+            "Intent",
+            (),
+            {
+                "ticker": "TEST",
+                "decision_id": "id-3",
+                "side": "YES",
+                "contracts": 1,
+                "max_acceptable_entry_price_cents": 58,
+            },
+        )(),
+        subaccount=7,
+        time_in_force="good_till_canceled",
+        expiration_ts=1767225602,
+    )
+    assert probe_payload["time_in_force"] == "good_till_canceled"
+    assert probe_payload["expiration_ts"] == 1767225602
 
 
 def test_live_rest_client_create_order_uses_post_and_auth_headers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -764,6 +790,10 @@ def test_execution_engine_live_cancels_when_orderbook_moves_beyond_limit(
             yes_ask_cents=37,
             no_bid_cents=63,
             no_ask_cents=64,
+            yes_bid_size=3,
+            yes_ask_size=6,
+            no_bid_size=6,
+            no_ask_size=3,
             ticker_update_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
             received_at=datetime(2026, 1, 1, 12, 0, 0, 150000, tzinfo=UTC),
         )
@@ -854,6 +884,10 @@ def test_execution_engine_live_cancels_when_top_of_book_size_is_too_small(
             yes_ask_cents=37,
             no_bid_cents=63,
             no_ask_cents=64,
+            yes_bid_size=3,
+            yes_ask_size=6,
+            no_bid_size=6,
+            no_ask_size=3,
             ticker_update_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
             received_at=datetime(2026, 1, 1, 12, 0, 0, 150000, tzinfo=UTC),
         )
@@ -946,6 +980,10 @@ def test_execution_engine_live_submit_logs_pre_submit_timing_and_top_of_book(
             yes_ask_cents=37,
             no_bid_cents=63,
             no_ask_cents=64,
+            yes_bid_size=3,
+            yes_ask_size=6,
+            no_bid_size=6,
+            no_ask_size=3,
             ticker_update_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
             received_at=datetime(2026, 1, 1, 12, 0, 0, 150000, tzinfo=UTC),
         )
@@ -970,6 +1008,10 @@ def test_execution_engine_live_submit_logs_pre_submit_timing_and_top_of_book(
         assert pre_submit_payload["top_book_side"] == "yes_bid"
         assert pre_submit_payload["current_executable_ask_cents"] == 64
         assert pre_submit_payload["top_book_contracts"] == 4
+        assert pre_submit_payload["feed_top_book_side"] == "yes_bid"
+        assert pre_submit_payload["feed_top_book_price_cents"] == 36
+        assert pre_submit_payload["feed_top_book_contracts"] == 3
+        assert pre_submit_payload["feed_executable_ask_cents"] == 64
         assert pre_submit_payload["ticker_update_to_check_ms"] is not None
         assert pre_submit_payload["received_at_to_check_ms"] is not None
 
@@ -977,10 +1019,107 @@ def test_execution_engine_live_submit_logs_pre_submit_timing_and_top_of_book(
         submit_payload = submit_event["payload"]
         assert submit_payload["current_executable_ask_cents"] == 64
         assert submit_payload["top_book_contracts"] == 4
+        assert submit_payload["feed_top_book_contracts"] == 3
+        assert submit_payload["time_in_force"] == "immediate_or_cancel"
+        assert submit_payload["expiration_ts"] is None
         assert submit_payload["ticker_update_to_submit_requested_ms"] is not None
         assert submit_payload["received_at_to_submit_requested_ms"] is not None
         assert submit_payload["pre_submit_orderbook_roundtrip_ms"] is not None
         assert fake_rest.get_market_orderbook_calls == [{"ticker": ticker, "depth": 1}]
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+def test_execution_engine_live_probe_orders_use_short_ttl_gtc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+    monkeypatch.setattr(KalshiExecutionEngine, "_private_ws_loop", _noop_private_ws)
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=True,
+            probe_order_time_in_force="good_till_canceled",
+            probe_order_ttl_seconds=2.0,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    execution_engine._rest_client = fake_rest
+    logger = _CapturingAsyncLogger()
+    execution_engine._logger = logger  # type: ignore[assignment]
+    signal_queue = signal_engine.subscribe_queue()
+    execution_queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update(ticker="KXBTC15M-TEST", yes_bid_size=2, yes_ask_size=3))
+
+        approved = await asyncio.wait_for(signal_queue.get(), timeout=0.5)
+        assert approved.approved is True
+
+        collector._states["KXBTC15M-TEST"] = KalshiTickerState(
+            ticker="KXBTC15M-TEST",
+            last_yes_price_cents=55,
+            last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            previous_yes_price_cents=54,
+            close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            is_open=True,
+            yes_bid_cents=54,
+            yes_ask_cents=56,
+            no_bid_cents=44,
+            no_ask_cents=46,
+            yes_bid_size=2,
+            yes_ask_size=3,
+            no_bid_size=3,
+            no_ask_size=2,
+            ticker_update_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            received_at=datetime(2026, 1, 1, 12, 0, 0, 200000, tzinfo=UTC),
+        )
+        fake_rest.orderbook_results["KXBTC15M-TEST"] = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.5400", "2.00"]],
+                "no_dollars": [["0.4400", "3.00"]],
+            }
+        }
+
+        probe_intent = signal_engine.reserve_manual_trade_intent(
+            decision_state=approved,
+            side="YES",
+            entry_price_cents=56,
+            contracts=1,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+            thesis_id="thesis-1",
+            tranche_index=0,
+            tranche_window="10m",
+            tranche_reason="opened",
+            lifecycle_state="probe_pending",
+        )
+        assert probe_intent is not None
+        await execution_engine._submit_live_intent(probe_intent)
+
+        filled = await _wait_for_status(execution_queue, "filled", timeout=2.0)
+        assert filled.order_id == "server-order"
+        submit_event = next(event for event in logger.events if event["event_type"] == "submit_requested")
+        submit_payload = submit_event["payload"]
+        assert submit_payload["is_probe_order"] is True
+        assert submit_payload["time_in_force"] == "good_till_canceled"
+        assert isinstance(submit_payload["expiration_ts"], int)
+        assert submit_payload["expiration_ts"] > int(datetime(2026, 1, 1, 12, 0, tzinfo=UTC).timestamp())
+        assert fake_rest.create_order_calls[0]["time_in_force"] == "good_till_canceled"
+        assert "expiration_ts" in fake_rest.create_order_calls[0]
 
         await execution_engine.stop()
         await signal_engine.stop()

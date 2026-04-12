@@ -352,7 +352,7 @@ def test_layering_engine_flip_and_reflip_flow(tmp_path: Path) -> None:
             _score_state(
                 ticker=ticker,
                 event_time=datetime(2026, 1, 1, 12, 12, 30, tzinfo=UTC),
-                tau_minutes=2.5,
+                tau_minutes=3.5,
                 predicted_yes_probability=0.05,
                 last_yes_price_cents=41,
                 yes_bid_cents=40,
@@ -361,14 +361,14 @@ def test_layering_engine_flip_and_reflip_flow(tmp_path: Path) -> None:
         )
         add_no = await _wait_for_layering_action(layering_queue, "flip_add")
         third_fill = await _wait_for_execution_fill(execution_queue, 1)
-        assert add_no.decision_window == "3m"
+        assert add_no.decision_window == "4m"
         assert third_fill.side == "NO"
 
         await scorer.publish(
             _score_state(
                 ticker=ticker,
                 event_time=datetime(2026, 1, 1, 12, 14, 30, tzinfo=UTC),
-                tau_minutes=0.5,
+                tau_minutes=2.5,
                 predicted_yes_probability=0.90,
                 last_yes_price_cents=50,
                 yes_bid_cents=49,
@@ -377,15 +377,15 @@ def test_layering_engine_flip_and_reflip_flow(tmp_path: Path) -> None:
         )
         add_yes_again = await _wait_for_layering_action(layering_queue, "flip_add")
         fourth_fill = await _wait_for_execution_fill(execution_queue, 2)
-        assert add_yes_again.decision_window == "1m"
+        assert add_yes_again.decision_window == "3m"
         assert fourth_fill.side == "YES"
 
         ledger = layering_engine.get_active_ledger(ticker)
         assert ledger is not None
-        assert ledger.decision_windows_hit == ("10m", "3m", "1m")
+        assert ledger.decision_windows_hit == ("10m", "4m", "3m")
         assert ledger.lifecycle_state == "max_size_reached"
         assert [tranche.side for tranche in ledger.tranches] == ["YES", "NO", "YES"]
-        assert [tranche.decision_window for tranche in ledger.tranches] == ["10m", "3m", "1m"]
+        assert [tranche.decision_window for tranche in ledger.tranches] == ["10m", "4m", "3m"]
 
         await layering_engine.stop()
         await execution_engine.stop()

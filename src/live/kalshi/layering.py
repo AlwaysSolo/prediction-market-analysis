@@ -23,7 +23,7 @@ from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource
 
 LayeringCallback = Callable[["KalshiLayeringDecision"], Awaitable[None] | None]
 
-WINDOW_ORDER: tuple[str, ...] = ("10m", "5m", "3m", "1m")
+WINDOW_ORDER: tuple[str, ...] = ("10m", "5m", "4m", "3m")
 
 
 def utc_now() -> datetime:
@@ -701,7 +701,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             tranche_index=next_index,
             tranche_window=next_window,
             tranche_reason=action,
-            lifecycle_state="max_size_reached" if next_window == "1m" else "scaling_active",
+            lifecycle_state="max_size_reached" if next_window == WINDOW_ORDER[-1] else "scaling_active",
             total_thesis_budget_dollars=ledger.total_thesis_budget_dollars,
             payout_if_yes_dollars=projected_payout_yes,
             payout_if_no_dollars=projected_payout_no,
@@ -753,7 +753,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         )
         updated_ledger = replace(
             ledger,
-            lifecycle_state="max_size_reached" if next_window == "1m" else "scaling_active",
+            lifecycle_state="max_size_reached" if next_window == WINDOW_ORDER[-1] else "scaling_active",
             latest_signal_side=update.side,
             latest_predicted_yes_probability=update.predicted_yes_probability,
             decision_windows_hit=updated_windows,
@@ -851,12 +851,12 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         if supported:
             if 5.0 < tau_minutes <= 10.0:
                 window_label = "10m"
-            elif 3.0 < tau_minutes <= 5.0:
+            elif 4.0 < tau_minutes <= 5.0:
                 window_label = "5m"
-            elif 1.0 < tau_minutes <= 3.0:
+            elif 3.0 < tau_minutes <= 4.0:
+                window_label = "4m"
+            elif 0.0 <= tau_minutes <= 3.0:
                 window_label = "3m"
-            elif 0.0 <= tau_minutes <= 1.0:
-                window_label = "1m"
         return KalshiLayeringWindowState(
             ticker=update.ticker,
             event_time=update.event_time,

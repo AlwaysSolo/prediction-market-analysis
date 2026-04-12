@@ -11,7 +11,7 @@ from typing import Any
 
 from websockets.asyncio.client import connect
 
-from src.indexers.kalshi.models import Market, parse_count, parse_price_cents
+from src.indexers.kalshi.models import Market, parse_count, parse_optional_count, parse_price_cents
 from src.live.kalshi.auth import build_auth_headers
 from src.live.kalshi.client import KalshiLiveRestClient
 from src.live.kalshi.config import KalshiCollectorConfig, KalshiEnvironment
@@ -88,6 +88,60 @@ def _merge_binary_quote_fields(
         fallback_ask_cents=fallback_no_ask_cents,
     )
     return yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents
+
+
+def _merge_quote_side_sizes(
+    *,
+    direct_bid_size: int | None,
+    direct_ask_size: int | None,
+    opposite_direct_bid_size: int | None,
+    opposite_direct_ask_size: int | None,
+    fallback_bid_size: int | None,
+    fallback_ask_size: int | None,
+) -> tuple[int | None, int | None]:
+    bid_size = direct_bid_size
+    if bid_size is None and opposite_direct_ask_size is not None:
+        bid_size = opposite_direct_ask_size
+    if bid_size is None:
+        bid_size = fallback_bid_size
+
+    ask_size = direct_ask_size
+    if ask_size is None and opposite_direct_bid_size is not None:
+        ask_size = opposite_direct_bid_size
+    if ask_size is None:
+        ask_size = fallback_ask_size
+
+    return bid_size, ask_size
+
+
+def _merge_binary_quote_sizes(
+    *,
+    source_yes_bid_size: int | None,
+    source_yes_ask_size: int | None,
+    source_no_bid_size: int | None,
+    source_no_ask_size: int | None,
+    fallback_yes_bid_size: int | None,
+    fallback_yes_ask_size: int | None,
+    fallback_no_bid_size: int | None,
+    fallback_no_ask_size: int | None,
+) -> tuple[int | None, int | None, int | None, int | None]:
+    yes_bid_size, yes_ask_size = _merge_quote_side_sizes(
+        direct_bid_size=source_yes_bid_size,
+        direct_ask_size=source_yes_ask_size,
+        opposite_direct_bid_size=source_no_bid_size,
+        opposite_direct_ask_size=source_no_ask_size,
+        fallback_bid_size=fallback_yes_bid_size,
+        fallback_ask_size=fallback_yes_ask_size,
+    )
+    no_bid_size, no_ask_size = _merge_quote_side_sizes(
+        direct_bid_size=source_no_bid_size,
+        direct_ask_size=source_no_ask_size,
+        opposite_direct_bid_size=source_yes_bid_size,
+        opposite_direct_ask_size=source_yes_ask_size,
+        fallback_bid_size=fallback_no_bid_size,
+        fallback_ask_size=fallback_no_ask_size,
+    )
+    return yes_bid_size, yes_ask_size, no_bid_size, no_ask_size
 
 
 class JsonlEventLogger:
@@ -228,6 +282,16 @@ class KalshiMarketDataCollector:
             fallback_no_bid_cents=(current.no_bid_cents if current else None),
             fallback_no_ask_cents=(current.no_ask_cents if current else None),
         )
+        yes_bid_size, yes_ask_size, no_bid_size, no_ask_size = _merge_binary_quote_sizes(
+            source_yes_bid_size=market.yes_bid_size,
+            source_yes_ask_size=market.yes_ask_size,
+            source_no_bid_size=None,
+            source_no_ask_size=None,
+            fallback_yes_bid_size=(current.yes_bid_size if current else None),
+            fallback_yes_ask_size=(current.yes_ask_size if current else None),
+            fallback_no_bid_size=(current.no_bid_size if current else None),
+            fallback_no_ask_size=(current.no_ask_size if current else None),
+        )
         updated_state = KalshiTickerState(
             ticker=ticker,
             last_yes_price_cents=(
@@ -248,6 +312,10 @@ class KalshiMarketDataCollector:
             yes_ask_cents=yes_ask_cents,
             no_bid_cents=no_bid_cents,
             no_ask_cents=no_ask_cents,
+            yes_bid_size=yes_bid_size,
+            yes_ask_size=yes_ask_size,
+            no_bid_size=no_bid_size,
+            no_ask_size=no_ask_size,
             volume=market.volume if market.volume or market.volume == 0 else (current.volume if current else None),
             open_interest=(
                 market.open_interest
@@ -356,6 +424,20 @@ class KalshiMarketDataCollector:
                 fallback_no_bid_cents=None,
                 fallback_no_ask_cents=None,
             )
+            yes_bid_size, yes_ask_size, no_bid_size, no_ask_size = _merge_binary_quote_sizes(
+                source_yes_bid_size=(
+                    existing.yes_bid_size if existing and existing.yes_bid_size is not None else market.yes_bid_size
+                ),
+                source_yes_ask_size=(
+                    existing.yes_ask_size if existing and existing.yes_ask_size is not None else market.yes_ask_size
+                ),
+                source_no_bid_size=(existing.no_bid_size if existing and existing.no_bid_size is not None else None),
+                source_no_ask_size=(existing.no_ask_size if existing and existing.no_ask_size is not None else None),
+                fallback_yes_bid_size=None,
+                fallback_yes_ask_size=None,
+                fallback_no_bid_size=None,
+                fallback_no_ask_size=None,
+            )
             updated = KalshiTickerState(
                 ticker=market.ticker,
                 last_yes_price_cents=existing.last_yes_price_cents if existing else None,
@@ -372,6 +454,10 @@ class KalshiMarketDataCollector:
                 yes_ask_cents=yes_ask_cents,
                 no_bid_cents=no_bid_cents,
                 no_ask_cents=no_ask_cents,
+                yes_bid_size=yes_bid_size,
+                yes_ask_size=yes_ask_size,
+                no_bid_size=no_bid_size,
+                no_ask_size=no_ask_size,
                 volume=existing.volume if existing and existing.volume is not None else market.volume,
                 open_interest=(
                     existing.open_interest if existing and existing.open_interest is not None else market.open_interest
@@ -631,6 +717,16 @@ class KalshiMarketDataCollector:
             fallback_no_bid_cents=(current.no_bid_cents if current else (market.no_bid if market else None)),
             fallback_no_ask_cents=(current.no_ask_cents if current else (market.no_ask if market else None)),
         )
+        yes_bid_size, yes_ask_size, no_bid_size, no_ask_size = _merge_binary_quote_sizes(
+            source_yes_bid_size=None,
+            source_yes_ask_size=None,
+            source_no_bid_size=None,
+            source_no_ask_size=None,
+            fallback_yes_bid_size=(current.yes_bid_size if current else (market.yes_bid_size if market else None)),
+            fallback_yes_ask_size=(current.yes_ask_size if current else (market.yes_ask_size if market else None)),
+            fallback_no_bid_size=(current.no_bid_size if current else None),
+            fallback_no_ask_size=(current.no_ask_size if current else None),
+        )
         updated_state = KalshiTickerState(
             ticker=ticker,
             last_yes_price_cents=yes_price_cents,
@@ -647,6 +743,10 @@ class KalshiMarketDataCollector:
             yes_ask_cents=yes_ask_cents,
             no_bid_cents=no_bid_cents,
             no_ask_cents=no_ask_cents,
+            yes_bid_size=yes_bid_size,
+            yes_ask_size=yes_ask_size,
+            no_bid_size=no_bid_size,
+            no_ask_size=no_ask_size,
             volume=current.volume if current else (market.volume if market else None),
             open_interest=current.open_interest if current else (market.open_interest if market else None),
             dollar_volume=current.dollar_volume if current else None,
@@ -677,6 +777,10 @@ class KalshiMarketDataCollector:
         yes_ask_cents = parse_price_cents(msg.get("yes_ask", msg.get("yes_ask_dollars")))
         no_bid_cents = parse_price_cents(msg.get("no_bid", msg.get("no_bid_dollars")))
         no_ask_cents = parse_price_cents(msg.get("no_ask", msg.get("no_ask_dollars")))
+        yes_bid_size = parse_optional_count(msg.get("yes_bid_size", msg.get("bid_size")), msg.get("yes_bid_size_fp", msg.get("bid_size_fp")))
+        yes_ask_size = parse_optional_count(msg.get("yes_ask_size", msg.get("ask_size")), msg.get("yes_ask_size_fp", msg.get("ask_size_fp")))
+        no_bid_size = parse_optional_count(msg.get("no_bid_size"), msg.get("no_bid_size_fp"))
+        no_ask_size = parse_optional_count(msg.get("no_ask_size"), msg.get("no_ask_size_fp"))
         volume = parse_count(msg.get("volume"), msg.get("volume_fp"))
         open_interest = parse_count(msg.get("open_interest"), msg.get("open_interest_fp"))
         dollar_volume_raw = msg.get("dollar_volume")
@@ -704,6 +808,16 @@ class KalshiMarketDataCollector:
             fallback_no_bid_cents=(current.no_bid_cents if current else (market.no_bid if market else None)),
             fallback_no_ask_cents=(current.no_ask_cents if current else (market.no_ask if market else None)),
         )
+        resolved_yes_bid_size, resolved_yes_ask_size, resolved_no_bid_size, resolved_no_ask_size = _merge_binary_quote_sizes(
+            source_yes_bid_size=yes_bid_size,
+            source_yes_ask_size=yes_ask_size,
+            source_no_bid_size=no_bid_size,
+            source_no_ask_size=no_ask_size,
+            fallback_yes_bid_size=(current.yes_bid_size if current else None),
+            fallback_yes_ask_size=(current.yes_ask_size if current else None),
+            fallback_no_bid_size=(current.no_bid_size if current else None),
+            fallback_no_ask_size=(current.no_ask_size if current else None),
+        )
         updated_state = KalshiTickerState(
             ticker=ticker,
             last_yes_price_cents=preserved_trade_price,
@@ -720,6 +834,10 @@ class KalshiMarketDataCollector:
             yes_ask_cents=resolved_yes_ask_cents,
             no_bid_cents=resolved_no_bid_cents,
             no_ask_cents=resolved_no_ask_cents,
+            yes_bid_size=resolved_yes_bid_size,
+            yes_ask_size=resolved_yes_ask_size,
+            no_bid_size=resolved_no_bid_size,
+            no_ask_size=resolved_no_ask_size,
             volume=volume if volume or volume == 0 else (current.volume if current else (market.volume if market else None)),
             open_interest=(
                 open_interest
@@ -784,6 +902,10 @@ class KalshiMarketDataCollector:
             yes_ask_cents=current.yes_ask_cents if current else None,
             no_bid_cents=current.no_bid_cents if current else (market.no_bid if market else None),
             no_ask_cents=current.no_ask_cents if current else (market.no_ask if market else None),
+            yes_bid_size=current.yes_bid_size if current else (market.yes_bid_size if market else None),
+            yes_ask_size=current.yes_ask_size if current else (market.yes_ask_size if market else None),
+            no_bid_size=current.no_bid_size if current else None,
+            no_ask_size=current.no_ask_size if current else None,
             volume=current.volume if current else (market.volume if market else None),
             open_interest=current.open_interest if current else (market.open_interest if market else None),
             dollar_volume=current.dollar_volume if current else None,
@@ -814,6 +936,8 @@ class KalshiMarketDataCollector:
                 created_time=market.created_time,
                 open_time=market.open_time,
                 close_time=updated_state.close_time,
+                yes_bid_size=market.yes_bid_size,
+                yes_ask_size=market.yes_ask_size,
             )
         if updated_state == current:
             return

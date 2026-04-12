@@ -25,6 +25,10 @@ class KalshiTickerState:
     yes_ask_cents: int | None = None
     no_bid_cents: int | None = None
     no_ask_cents: int | None = None
+    yes_bid_size: int | None = None
+    yes_ask_size: int | None = None
+    no_bid_size: int | None = None
+    no_ask_size: int | None = None
     volume: int | None = None
     open_interest: int | None = None
     dollar_volume: int | None = None
@@ -89,6 +93,18 @@ class KalshiTickerState:
         return 100 - self.yes_bid_cents
 
     @property
+    def buy_yes_size(self) -> int | None:
+        if self.yes_ask_size is not None:
+            return self.yes_ask_size
+        return self.no_bid_size
+
+    @property
+    def buy_no_size(self) -> int | None:
+        if self.no_ask_size is not None:
+            return self.no_ask_size
+        return self.yes_bid_size
+
+    @property
     def last_to_mid_gap(self) -> float | None:
         trade_yes_prob = self.trade_yes_prob
         quote_mid_prob = self.quote_mid_prob
@@ -143,6 +159,10 @@ class KalshiTickerUpdate:
     yes_ask_cents: int | None = None
     no_bid_cents: int | None = None
     no_ask_cents: int | None = None
+    yes_bid_size: int | None = None
+    yes_ask_size: int | None = None
+    no_bid_size: int | None = None
+    no_ask_size: int | None = None
     volume: int | None = None
     open_interest: int | None = None
     dollar_volume: int | None = None
@@ -193,6 +213,10 @@ def state_to_update(
         yes_ask_cents=state.yes_ask_cents,
         no_bid_cents=state.no_bid_cents,
         no_ask_cents=state.no_ask_cents,
+        yes_bid_size=state.yes_bid_size,
+        yes_ask_size=state.yes_ask_size,
+        no_bid_size=state.no_bid_size,
+        no_ask_size=state.no_ask_size,
         volume=state.volume,
         open_interest=state.open_interest,
         dollar_volume=state.dollar_volume,
