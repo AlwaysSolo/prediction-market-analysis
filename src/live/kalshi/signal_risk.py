@@ -36,6 +36,7 @@ from src.live.kalshi.scorer import (
 )
 
 Callback = Callable[["KalshiSignalDecisionUpdate"], Awaitable[None] | None]
+TradeIntentCallback = Callable[["KalshiTradeIntent"], Awaitable[None] | None]
 StackingSignature = tuple[str | None, str | None, str | None, str | None, str | None]
 
 
@@ -658,6 +659,7 @@ class KalshiSignalRiskEngine:
         self._callbacks: list[Callback] = []
         self._queues: list[asyncio.Queue[KalshiSignalDecisionUpdate]] = []
         self._intent_queues: list[asyncio.Queue[KalshiTradeIntent]] = []
+        self._intent_callbacks: list[TradeIntentCallback] = []
         self._task: asyncio.Task[Any] | None = None
         self._reservation_task: asyncio.Task[Any] | None = None
         self._stop_event = asyncio.Event()
@@ -769,6 +771,15 @@ class KalshiSignalRiskEngine:
         queue: asyncio.Queue[KalshiTradeIntent] = asyncio.Queue(maxsize=maxsize)
         self._intent_queues.append(queue)
         return queue
+
+    def subscribe_trade_intent_callback(self, callback: TradeIntentCallback) -> None:
+        self._intent_callbacks.append(callback)
+
+    def unsubscribe_trade_intent_callback(self, callback: TradeIntentCallback) -> None:
+        try:
+            self._intent_callbacks.remove(callback)
+        except ValueError:
+            pass
 
     def get_portfolio_state(self) -> KalshiSignalPortfolioState:
         available_cash, deployed_capital, equity, reserved_cash = self._portfolio_metrics()
@@ -2223,5 +2234,9 @@ class KalshiSignalRiskEngine:
         for queue in self._queues:
             await queue.put(update)
         if update.approved and update.trade_intent is not None:
+            for callback in list(self._intent_callbacks):
+                result = callback(update.trade_intent)
+                if inspect.isawaitable(result):
+                    await result
             for queue in self._intent_queues:
                 await queue.put(update.trade_intent)

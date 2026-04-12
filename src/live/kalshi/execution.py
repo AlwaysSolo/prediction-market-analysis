@@ -32,6 +32,7 @@ from src.live.kalshi.signal_risk import (
 from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource
 
 Callback = Callable[["KalshiExecutionUpdate"], Awaitable[None] | None]
+TradeIntentDispatchCallback = Callable[[KalshiTradeIntent], Awaitable[None] | None]
 
 
 def utc_now() -> datetime:
@@ -115,6 +116,7 @@ class KalshiExecutionConfig:
     shadow_fill_latency_seconds: float = 0.25
     enable_pre_submit_orderbook_check: bool = True
     skip_rest_orderbook_check_for_immediate_orders: bool = False
+    enable_direct_trade_intent_handoff_in_live_mode: bool = False
     pre_submit_orderbook_depth: int = 1
     probe_order_time_in_force: str = "good_till_canceled"
     probe_order_ttl_seconds: float = 2.0
@@ -164,6 +166,9 @@ class KalshiExecutionConfig:
             ),
             skip_rest_orderbook_check_for_immediate_orders=_parse_bool(
                 _resolve_env_value(environment, "SKIP_REST_ORDERBOOK_CHECK_FOR_IMMEDIATE_ORDERS") or "false"
+            ),
+            enable_direct_trade_intent_handoff_in_live_mode=_parse_bool(
+                _resolve_env_value(environment, "ENABLE_DIRECT_TRADE_INTENT_HANDOFF_IN_LIVE_MODE") or "false"
             ),
             pre_submit_orderbook_depth=int(_resolve_env_value(environment, "PRE_SUBMIT_ORDERBOOK_DEPTH") or 1),
             probe_order_time_in_force=_normalize_time_in_force(
@@ -599,9 +604,18 @@ class KalshiExecutionEngine:
         self._last_portfolio_snapshot: KalshiPortfolioSnapshot | None = None
         self._simulated_realized_pnl_dollars = 0.0
         self._live_realized_pnl_dollars = 0.0
+        self._intent_dispatch_lock = asyncio.Lock()
+        self._direct_trade_intent_handoff_active = False
+        self._direct_trade_intent_tasks: set[asyncio.Task[Any]] = set()
 
     async def start(self) -> None:
-        if self._consume_task and not self._consume_task.done():
+        if (
+            self._direct_trade_intent_handoff_active
+            or any(
+                task is not None and not task.done()
+                for task in (self._consume_task, self._ws_task, self._reconcile_task)
+            )
+        ):
             return
 
         if (
@@ -617,7 +631,9 @@ class KalshiExecutionEngine:
         self._ready_event.clear()
         self._reconcile_event = asyncio.Event()
         self._full_reconcile_requested = False
-        if self._signal_queue is None:
+        if self._should_use_direct_trade_intent_handoff():
+            self._subscribe_direct_trade_intent_handoff()
+        elif self._signal_queue is None:
             self._signal_queue = self.trade_intent_source.subscribe_trade_intent_queue()
 
         await self._logger.write(
@@ -628,6 +644,7 @@ class KalshiExecutionEngine:
                 "simulate_immediate_fills": self._simulation_enabled(),
                 "shadow_fill_latency_seconds": self.config.shadow_fill_latency_seconds,
                 "subaccount": self.config.subaccount,
+                "direct_trade_intent_handoff_active": self._direct_trade_intent_handoff_active,
             },
         )
         if self.config.mode is KalshiExecutionMode.SHADOW:
@@ -648,12 +665,16 @@ class KalshiExecutionEngine:
 
         if self.trade_intent_source is self.signal_engine:
             await self._bootstrap_from_signal_engine()
-        self._consume_task = asyncio.create_task(self._consume_loop(), name="kalshi-execution-consume")
+        if not self._direct_trade_intent_handoff_active:
+            self._consume_task = asyncio.create_task(self._consume_loop(), name="kalshi-execution-consume")
         self._ready_event.set()
 
     async def stop(self) -> None:
         self._stop_event.set()
-        for task in (self._consume_task, self._ws_task, self._reconcile_task):
+        self._unsubscribe_direct_trade_intent_handoff()
+        for task in tuple(self._direct_trade_intent_tasks):
+            task.cancel()
+        for task in (*tuple(self._direct_trade_intent_tasks), self._consume_task, self._ws_task, self._reconcile_task):
             if task is None:
                 continue
             task.cancel()
@@ -661,6 +682,7 @@ class KalshiExecutionEngine:
                 await task
             except asyncio.CancelledError:
                 pass
+        self._direct_trade_intent_tasks.clear()
         self._consume_task = None
         self._ws_task = None
         self._reconcile_task = None
@@ -711,6 +733,60 @@ class KalshiExecutionEngine:
         if self.config.mode is KalshiExecutionMode.SHADOW:
             return "shadow"
         return "simulated"
+
+    def _should_use_direct_trade_intent_handoff(self) -> bool:
+        if self.config.mode is not KalshiExecutionMode.LIVE:
+            return False
+        if not self.config.enable_direct_trade_intent_handoff_in_live_mode:
+            return False
+        subscribe = getattr(self.trade_intent_source, "subscribe_trade_intent_callback", None)
+        unsubscribe = getattr(self.trade_intent_source, "unsubscribe_trade_intent_callback", None)
+        return callable(subscribe) and callable(unsubscribe)
+
+    def _subscribe_direct_trade_intent_handoff(self) -> None:
+        if self._direct_trade_intent_handoff_active:
+            return
+        subscribe = getattr(self.trade_intent_source, "subscribe_trade_intent_callback", None)
+        if not callable(subscribe):
+            return
+        subscribe(self._handle_trade_intent_callback)
+        self._direct_trade_intent_handoff_active = True
+
+    def _unsubscribe_direct_trade_intent_handoff(self) -> None:
+        if not self._direct_trade_intent_handoff_active:
+            return
+        unsubscribe = getattr(self.trade_intent_source, "unsubscribe_trade_intent_callback", None)
+        if callable(unsubscribe):
+            unsubscribe(self._handle_trade_intent_callback)
+        self._direct_trade_intent_handoff_active = False
+
+    def _handle_trade_intent_callback(self, intent: KalshiTradeIntent) -> None:
+        if self._stop_event.is_set():
+            return
+        task = asyncio.create_task(
+            self._consume_direct_trade_intent(intent, source="live_signal_direct"),
+            name=f"kalshi-execution-direct-{intent.decision_id}",
+        )
+        self._direct_trade_intent_tasks.add(task)
+        task.add_done_callback(self._direct_trade_intent_tasks.discard)
+
+    async def _consume_direct_trade_intent(self, intent: KalshiTradeIntent, *, source: str) -> None:
+        try:
+            async with self._intent_dispatch_lock:
+                await self._handle_trade_intent(intent, source=source)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._logger.write(
+                "consume_error",
+                {
+                    "decision_id": intent.decision_id,
+                    "ticker": intent.ticker,
+                    "side": intent.side,
+                    "error": repr(exc),
+                    "source": source,
+                },
+            )
 
     def _simulated_fill_latency_seconds(self) -> float:
         if self.config.mode is KalshiExecutionMode.SHADOW:

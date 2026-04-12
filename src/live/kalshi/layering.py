@@ -20,7 +20,7 @@ from src.live.kalshi.signal_risk import (
     KalshiTradeIntent,
     calculate_cost_metrics,
 )
-from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource
+from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource, TradeIntentCallback
 
 LayeringCallback = Callable[["KalshiLayeringDecision"], Awaitable[None] | None]
 
@@ -150,6 +150,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         self._signal_queue: asyncio.Queue[KalshiSignalDecisionUpdate] | None = None
         self._execution_queue: asyncio.Queue[KalshiExecutionUpdate] | None = None
         self._trade_intent_queues: list[asyncio.Queue[KalshiTradeIntent]] = []
+        self._trade_intent_callbacks: list[TradeIntentCallback] = []
         self._callbacks: list[LayeringCallback] = []
         self._queues: list[asyncio.Queue[KalshiLayeringDecision]] = []
         self._signal_task: asyncio.Task[Any] | None = None
@@ -214,6 +215,23 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         queue: asyncio.Queue[KalshiTradeIntent] = asyncio.Queue(maxsize=maxsize)
         self._trade_intent_queues.append(queue)
         return queue
+
+    def subscribe_trade_intent_callback(self, callback: TradeIntentCallback) -> None:
+        self._trade_intent_callbacks.append(callback)
+
+    def unsubscribe_trade_intent_callback(self, callback: TradeIntentCallback) -> None:
+        try:
+            self._trade_intent_callbacks.remove(callback)
+        except ValueError:
+            pass
+
+    async def _emit_trade_intent(self, intent: KalshiTradeIntent) -> None:
+        for callback in list(self._trade_intent_callbacks):
+            result = callback(intent)
+            if inspect.isawaitable(result):
+                await result
+        for queue in self._trade_intent_queues:
+            await queue.put(intent)
 
     def snapshot_ledgers(self) -> dict[str, KalshiBinaryThesisLedger]:
         return dict(self._ledgers)
@@ -478,16 +496,15 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         ledger = self._recompute_ledger_metrics(ledger)
         self._store_ledger(ledger)
         self._thesis_by_decision_id[intent.decision_id] = thesis_id
-        for queue in self._trade_intent_queues:
-            await queue.put(
-                replace(
-                    intent,
-                    payout_if_yes_dollars=ledger.payout_if_yes_dollars,
-                    payout_if_no_dollars=ledger.payout_if_no_dollars,
-                    expected_value_dollars=ledger.current_expected_value_dollars,
-                    worst_case_loss_dollars=ledger.worst_case_loss_dollars,
-                )
+        await self._emit_trade_intent(
+            replace(
+                intent,
+                payout_if_yes_dollars=ledger.payout_if_yes_dollars,
+                payout_if_no_dollars=ledger.payout_if_no_dollars,
+                expected_value_dollars=ledger.current_expected_value_dollars,
+                worst_case_loss_dollars=ledger.worst_case_loss_dollars,
             )
+        )
         await self._publish_decision(
             KalshiLayeringDecision(
                 event_time=update.event_time,
@@ -748,8 +765,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         updated_ledger = self._recompute_ledger_metrics(updated_ledger)
         self._store_ledger(updated_ledger)
         self._thesis_by_decision_id[intent.decision_id] = ledger.thesis_id
-        for queue in self._trade_intent_queues:
-            await queue.put(intent)
+        await self._emit_trade_intent(intent)
         await self._publish_decision(
             KalshiLayeringDecision(
                 event_time=update.event_time,

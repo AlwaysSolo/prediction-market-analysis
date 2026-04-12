@@ -133,6 +133,7 @@ def _build_execution_config(
         mode=execution_mode,
         log_dir=log_dir,
         skip_rest_orderbook_check_for_immediate_orders=True,
+        enable_direct_trade_intent_handoff_in_live_mode=True,
     )
 
 
