@@ -119,6 +119,8 @@ class KalshiExecutionConfig:
     enable_live_trading: bool = False
     simulate_immediate_fills: bool = False
     shadow_fill_latency_seconds: float = 0.25
+    enable_pre_submit_orderbook_check: bool = True
+    pre_submit_orderbook_depth: int = 1
     subaccount: int = 0
     reconcile_interval_seconds: float = 15.0
     order_reconcile_timeout_seconds: float = 10.0
@@ -130,6 +132,8 @@ class KalshiExecutionConfig:
             raise ValueError("subaccount must be non-negative")
         if self.shadow_fill_latency_seconds < 0:
             raise ValueError("shadow_fill_latency_seconds must be non-negative")
+        if self.pre_submit_orderbook_depth <= 0:
+            raise ValueError("pre_submit_orderbook_depth must be positive")
         if self.reconcile_interval_seconds <= 0:
             raise ValueError("reconcile_interval_seconds must be positive")
         if self.order_reconcile_timeout_seconds <= 0:
@@ -151,6 +155,10 @@ class KalshiExecutionConfig:
             shadow_fill_latency_seconds=float(
                 _resolve_env_value(environment, "SHADOW_FILL_LATENCY_SECONDS") or 0.25
             ),
+            enable_pre_submit_orderbook_check=_parse_bool(
+                _resolve_env_value(environment, "ENABLE_PRE_SUBMIT_ORDERBOOK_CHECK") or "true"
+            ),
+            pre_submit_orderbook_depth=int(_resolve_env_value(environment, "PRE_SUBMIT_ORDERBOOK_DEPTH") or 1),
             subaccount=int(_resolve_env_value(environment, "SUBACCOUNT") or 0),
             reconcile_interval_seconds=float(_resolve_env_value(environment, "RECONCILE_INTERVAL_SECONDS") or 15.0),
             order_reconcile_timeout_seconds=float(
@@ -164,6 +172,36 @@ class _SimulatedFillResolution:
     filled: bool
     fill_price_cents: int | None
     message: str
+
+
+@dataclass(frozen=True)
+class _OrderbookLevel:
+    price_cents: int
+    contracts: int
+
+
+@dataclass(frozen=True)
+class _LiveOrderbookSnapshot:
+    checked_at: datetime
+    yes_bids: tuple[_OrderbookLevel, ...]
+    no_bids: tuple[_OrderbookLevel, ...]
+
+
+@dataclass(frozen=True)
+class _LiveOrderbookCheckResult:
+    passed: bool
+    reason: str | None
+    checked_at: datetime
+    top_book_side: str | None
+    top_book_price_cents: int | None
+    top_book_contracts: int | None
+    executable_ask_cents: int | None
+    ticker_update_time: datetime | None
+    received_at: datetime | None
+    ticker_update_to_check_ms: float | None
+    received_to_check_ms: float | None
+    orderbook_roundtrip_ms: float | None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -444,6 +482,47 @@ def build_create_order_payload(intent: KalshiTradeIntent, *, subaccount: int | N
     return payload
 
 
+def _parse_orderbook_levels(payload: Any) -> tuple[_OrderbookLevel, ...]:
+    if not isinstance(payload, list):
+        return ()
+    levels: list[_OrderbookLevel] = []
+    for raw_level in payload:
+        if not isinstance(raw_level, (list, tuple)) or len(raw_level) < 2:
+            continue
+        price_cents = parse_price_cents(raw_level[0])
+        contracts = parse_count(None, raw_level[1])
+        if price_cents is None or contracts <= 0:
+            continue
+        levels.append(_OrderbookLevel(price_cents=price_cents, contracts=contracts))
+    return tuple(levels)
+
+
+def parse_live_orderbook_snapshot(payload: dict[str, Any], *, checked_at: datetime | None = None) -> _LiveOrderbookSnapshot:
+    checked_at = checked_at or utc_now()
+    orderbook_payload = payload.get("orderbook_fp")
+    if not isinstance(orderbook_payload, dict):
+        orderbook_payload = payload.get("orderbook")
+    if not isinstance(orderbook_payload, dict):
+        orderbook_payload = {}
+    yes_levels = orderbook_payload.get("yes_dollars")
+    if yes_levels is None:
+        yes_levels = orderbook_payload.get("yes")
+    no_levels = orderbook_payload.get("no_dollars")
+    if no_levels is None:
+        no_levels = orderbook_payload.get("no")
+    return _LiveOrderbookSnapshot(
+        checked_at=checked_at,
+        yes_bids=_parse_orderbook_levels(yes_levels),
+        no_bids=_parse_orderbook_levels(no_levels),
+    )
+
+
+def _latency_ms(reference_time: datetime | None, target_time: datetime) -> float | None:
+    if reference_time is None:
+        return None
+    return max(0.0, (target_time - reference_time).total_seconds() * 1000.0)
+
+
 class KalshiExecutionEngine:
     def __init__(
         self,
@@ -647,6 +726,137 @@ class KalshiExecutionEngine:
             filled=True,
             fill_price_cents=fill_price_cents,
             message="shadow_fill_requoted",
+        )
+
+    def _current_quote_timestamps(self, ticker: str) -> tuple[datetime | None, datetime | None]:
+        collector_state = self._collector.get_state(ticker)
+        if collector_state is not None:
+            return collector_state.ticker_update_time, collector_state.received_at
+        score_state = self.signal_engine.scorer.get_state(ticker)
+        if score_state is not None:
+            return score_state.ticker_update_time, score_state.received_at
+        return None, None
+
+    def _orderbook_check_log_payload(
+        self,
+        intent: KalshiTradeIntent,
+        result: _LiveOrderbookCheckResult,
+    ) -> dict[str, Any]:
+        return {
+            "decision_id": intent.decision_id,
+            "ticker": intent.ticker,
+            "side": intent.side,
+            "contracts": intent.contracts,
+            "limit_price_cents": intent.max_acceptable_entry_price_cents,
+            "reference_price_cents": intent.reference_price_cents,
+            "depth": self.config.pre_submit_orderbook_depth,
+            "passed": result.passed,
+            "reason": result.reason,
+            "checked_at": result.checked_at.isoformat(),
+            "top_book_side": result.top_book_side,
+            "top_book_price_cents": result.top_book_price_cents,
+            "top_book_contracts": result.top_book_contracts,
+            "current_executable_ask_cents": result.executable_ask_cents,
+            "ticker_update_time": (
+                result.ticker_update_time.isoformat() if result.ticker_update_time is not None else None
+            ),
+            "received_at": result.received_at.isoformat() if result.received_at is not None else None,
+            "ticker_update_to_check_ms": result.ticker_update_to_check_ms,
+            "received_at_to_check_ms": result.received_to_check_ms,
+            "orderbook_roundtrip_ms": result.orderbook_roundtrip_ms,
+            "error": result.error,
+        }
+
+    async def _check_live_orderbook_before_submit(
+        self,
+        intent: KalshiTradeIntent,
+    ) -> _LiveOrderbookCheckResult:
+        checked_at = utc_now()
+        ticker_update_time, received_at = self._current_quote_timestamps(intent.ticker)
+        if not self.config.enable_pre_submit_orderbook_check:
+            return _LiveOrderbookCheckResult(
+                passed=True,
+                reason="disabled",
+                checked_at=checked_at,
+                top_book_side=None,
+                top_book_price_cents=None,
+                top_book_contracts=None,
+                executable_ask_cents=None,
+                ticker_update_time=ticker_update_time,
+                received_at=received_at,
+                ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
+                received_to_check_ms=_latency_ms(received_at, checked_at),
+                orderbook_roundtrip_ms=0.0,
+            )
+
+        request_started_at = utc_now()
+        try:
+            payload = await self._call_rest(
+                self._rest_client.get_market_orderbook,
+                intent.ticker,
+                depth=self.config.pre_submit_orderbook_depth,
+            )
+        except Exception as exc:
+            checked_at = utc_now()
+            return _LiveOrderbookCheckResult(
+                passed=False,
+                reason="live_orderbook_check_failed",
+                checked_at=checked_at,
+                top_book_side=None,
+                top_book_price_cents=None,
+                top_book_contracts=None,
+                executable_ask_cents=None,
+                ticker_update_time=ticker_update_time,
+                received_at=received_at,
+                ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
+                received_to_check_ms=_latency_ms(received_at, checked_at),
+                orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
+                error=_compact_error_detail(repr(exc)),
+            )
+
+        checked_at = utc_now()
+        snapshot = parse_live_orderbook_snapshot(payload, checked_at=checked_at)
+        if intent.side.upper() == "NO":
+            top_level = snapshot.yes_bids[0] if snapshot.yes_bids else None
+            top_book_side = "yes_bid"
+        else:
+            top_level = snapshot.no_bids[0] if snapshot.no_bids else None
+            top_book_side = "no_bid"
+        if top_level is None:
+            return _LiveOrderbookCheckResult(
+                passed=False,
+                reason="live_orderbook_missing_top_of_book",
+                checked_at=checked_at,
+                top_book_side=top_book_side,
+                top_book_price_cents=None,
+                top_book_contracts=None,
+                executable_ask_cents=None,
+                ticker_update_time=ticker_update_time,
+                received_at=received_at,
+                ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
+                received_to_check_ms=_latency_ms(received_at, checked_at),
+                orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
+            )
+
+        executable_ask_cents = 100 - top_level.price_cents
+        reason: str | None = None
+        if executable_ask_cents > intent.max_acceptable_entry_price_cents:
+            reason = "live_orderbook_limit_moved_away"
+        elif top_level.contracts < intent.contracts:
+            reason = "live_orderbook_insufficient_size"
+        return _LiveOrderbookCheckResult(
+            passed=reason is None,
+            reason=reason,
+            checked_at=checked_at,
+            top_book_side=top_book_side,
+            top_book_price_cents=top_level.price_cents,
+            top_book_contracts=top_level.contracts,
+            executable_ask_cents=executable_ask_cents,
+            ticker_update_time=ticker_update_time,
+            received_at=received_at,
+            ticker_update_to_check_ms=_latency_ms(ticker_update_time, checked_at),
+            received_to_check_ms=_latency_ms(received_at, checked_at),
+            orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
         )
 
     def _current_open_positions(self) -> tuple[KalshiPortfolioPosition, ...]:
@@ -906,7 +1116,14 @@ class KalshiExecutionEngine:
         await self._execute_simulated_intent(intent)
 
     async def _submit_live_intent(self, intent: KalshiTradeIntent) -> None:
+        orderbook_check = await self._check_live_orderbook_before_submit(intent)
+        await self._logger.write("pre_submit_orderbook_check", self._orderbook_check_log_payload(intent, orderbook_check))
+        if not orderbook_check.passed:
+            await self._finalize_cancelled(intent.decision_id, orderbook_check.reason or "live_orderbook_blocked")
+            return
+
         payload = build_create_order_payload(intent, subaccount=self.config.subaccount)
+        submit_requested_at = utc_now()
         await self._logger.write(
             "submit_requested",
             {
@@ -917,8 +1134,31 @@ class KalshiExecutionEngine:
                 "limit_price_cents": intent.max_acceptable_entry_price_cents,
                 "reference_price_cents": intent.reference_price_cents,
                 "subaccount": self.config.subaccount,
+                "ticker_update_time": (
+                    orderbook_check.ticker_update_time.isoformat()
+                    if orderbook_check.ticker_update_time is not None
+                    else None
+                ),
+                "received_at": (
+                    orderbook_check.received_at.isoformat() if orderbook_check.received_at is not None else None
+                ),
+                "ticker_update_to_submit_requested_ms": _latency_ms(
+                    orderbook_check.ticker_update_time,
+                    submit_requested_at,
+                ),
+                "received_at_to_submit_requested_ms": _latency_ms(
+                    orderbook_check.received_at,
+                    submit_requested_at,
+                ),
+                "pre_submit_orderbook_checked_at": orderbook_check.checked_at.isoformat(),
+                "pre_submit_orderbook_roundtrip_ms": orderbook_check.orderbook_roundtrip_ms,
+                "current_executable_ask_cents": orderbook_check.executable_ask_cents,
+                "top_book_side": orderbook_check.top_book_side,
+                "top_book_price_cents": orderbook_check.top_book_price_cents,
+                "top_book_contracts": orderbook_check.top_book_contracts,
                 "payload": payload,
             },
+            event_time=submit_requested_at,
         )
         try:
             response = await self._call_rest(self._rest_client.create_order, payload)

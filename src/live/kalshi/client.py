@@ -123,6 +123,10 @@ class KalshiLiveRestClient:
         payload = self._get(f"/markets/{ticker}")
         return Market.from_dict(payload["market"])
 
+    def get_market_orderbook(self, ticker: str, *, depth: int = 1) -> dict[str, Any]:
+        params = {"depth": depth} if depth > 0 else None
+        return self._get(f"/markets/{ticker}/orderbook", params=params)
+
     def get_public_market(self, ticker: str, environment: KalshiEnvironment | None = None) -> Market:
         target_environment = environment or self.environment
         with httpx.Client(base_url=target_environment.api_base_url, timeout=30.0) as public_client:
