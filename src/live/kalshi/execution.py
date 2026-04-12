@@ -572,6 +572,14 @@ def _latency_ms(reference_time: datetime | None, target_time: datetime) -> float
     return max(0.0, (target_time - reference_time).total_seconds() * 1000.0)
 
 
+@dataclass(frozen=True)
+class _LiveSubmissionPolicy:
+    time_in_force: str
+    expiration_ts: int | None
+    is_probe_order: bool
+    requires_immediate_match: bool
+
+
 class KalshiExecutionEngine:
     def __init__(
         self,
@@ -832,20 +840,32 @@ class KalshiExecutionEngine:
         intent: KalshiTradeIntent,
         *,
         submitted_at: datetime,
-    ) -> tuple[str, int | None, bool]:
+    ) -> _LiveSubmissionPolicy:
         if not self._is_probe_order_intent(intent):
-            return "immediate_or_cancel", None, False
+            return _LiveSubmissionPolicy(
+                time_in_force="immediate_or_cancel",
+                expiration_ts=None,
+                is_probe_order=False,
+                requires_immediate_match=True,
+            )
         time_in_force = self.config.probe_order_time_in_force
         expiration_ts: int | None = None
         if time_in_force == "good_till_canceled" and self.config.probe_order_ttl_seconds > 0:
             expires_at = submitted_at + timedelta(seconds=self.config.probe_order_ttl_seconds)
             expiration_ts = max(math.ceil(expires_at.timestamp()), math.floor(submitted_at.timestamp()) + 1)
-        return time_in_force, expiration_ts, True
+        return _LiveSubmissionPolicy(
+            time_in_force=time_in_force,
+            expiration_ts=expiration_ts,
+            is_probe_order=True,
+            requires_immediate_match=(time_in_force != "good_till_canceled"),
+        )
 
     def _orderbook_check_log_payload(
         self,
         intent: KalshiTradeIntent,
         result: _LiveOrderbookCheckResult,
+        *,
+        policy: _LiveSubmissionPolicy | None = None,
     ) -> dict[str, Any]:
         return {
             "decision_id": intent.decision_id,
@@ -854,6 +874,10 @@ class KalshiExecutionEngine:
             "contracts": intent.contracts,
             "limit_price_cents": intent.max_acceptable_entry_price_cents,
             "reference_price_cents": intent.reference_price_cents,
+            "time_in_force": None if policy is None else policy.time_in_force,
+            "expiration_ts": None if policy is None else policy.expiration_ts,
+            "is_probe_order": None if policy is None else policy.is_probe_order,
+            "requires_immediate_match": None if policy is None else policy.requires_immediate_match,
             "depth": self.config.pre_submit_orderbook_depth,
             "passed": result.passed,
             "reason": result.reason,
@@ -1241,22 +1265,25 @@ class KalshiExecutionEngine:
         await self._execute_simulated_intent(intent)
 
     async def _submit_live_intent(self, intent: KalshiTradeIntent) -> None:
-        orderbook_check = await self._check_live_orderbook_before_submit(intent)
-        await self._logger.write("pre_submit_orderbook_check", self._orderbook_check_log_payload(intent, orderbook_check))
-        if not orderbook_check.passed:
-            await self._finalize_cancelled(intent.decision_id, orderbook_check.reason or "live_orderbook_blocked")
-            return
-
         submit_requested_at = utc_now()
-        time_in_force, expiration_ts, is_probe_order = self._build_live_submission_policy(
+        submission_policy = self._build_live_submission_policy(
             intent,
             submitted_at=submit_requested_at,
         )
+        orderbook_check = await self._check_live_orderbook_before_submit(intent)
+        await self._logger.write(
+            "pre_submit_orderbook_check",
+            self._orderbook_check_log_payload(intent, orderbook_check, policy=submission_policy),
+        )
+        if submission_policy.requires_immediate_match and not orderbook_check.passed:
+            await self._finalize_cancelled(intent.decision_id, orderbook_check.reason or "live_orderbook_blocked")
+            return
+
         payload = build_create_order_payload(
             intent,
             subaccount=self.config.subaccount,
-            time_in_force=time_in_force,
-            expiration_ts=expiration_ts,
+            time_in_force=submission_policy.time_in_force,
+            expiration_ts=submission_policy.expiration_ts,
         )
         await self._logger.write(
             "submit_requested",
@@ -1268,9 +1295,10 @@ class KalshiExecutionEngine:
                 "limit_price_cents": intent.max_acceptable_entry_price_cents,
                 "reference_price_cents": intent.reference_price_cents,
                 "subaccount": self.config.subaccount,
-                "is_probe_order": is_probe_order,
-                "time_in_force": time_in_force,
-                "expiration_ts": expiration_ts,
+                "is_probe_order": submission_policy.is_probe_order,
+                "time_in_force": submission_policy.time_in_force,
+                "expiration_ts": submission_policy.expiration_ts,
+                "requires_immediate_match": submission_policy.requires_immediate_match,
                 "ticker_update_time": (
                     orderbook_check.ticker_update_time.isoformat()
                     if orderbook_check.ticker_update_time is not None
@@ -1389,15 +1417,15 @@ class KalshiExecutionEngine:
             return True
 
         retry_requested_at = utc_now()
-        time_in_force, expiration_ts, _is_probe_order = self._build_live_submission_policy(
+        submission_policy = self._build_live_submission_policy(
             intent,
             submitted_at=retry_requested_at,
         )
         retry_payload = build_create_order_payload(
             intent,
             subaccount=self.config.subaccount,
-            time_in_force=time_in_force,
-            expiration_ts=expiration_ts,
+            time_in_force=submission_policy.time_in_force,
+            expiration_ts=submission_policy.expiration_ts,
         )
         try:
             response = await self._call_rest(
@@ -1408,8 +1436,8 @@ class KalshiExecutionEngine:
                 "submit_retry_response",
                 {
                     "decision_id": intent.decision_id,
-                    "time_in_force": time_in_force,
-                    "expiration_ts": expiration_ts,
+                    "time_in_force": submission_policy.time_in_force,
+                    "expiration_ts": submission_policy.expiration_ts,
                     "response": response,
                 },
                 event_time=retry_requested_at,
@@ -1421,8 +1449,8 @@ class KalshiExecutionEngine:
                     "decision_id": intent.decision_id,
                     "status_code": exc.response.status_code,
                     "response": exc.response.text,
-                    "time_in_force": time_in_force,
-                    "expiration_ts": expiration_ts,
+                    "time_in_force": submission_policy.time_in_force,
+                    "expiration_ts": submission_policy.expiration_ts,
                 },
             )
             if exc.response.status_code == 409:
@@ -1437,8 +1465,8 @@ class KalshiExecutionEngine:
                 {
                     "decision_id": intent.decision_id,
                     "error": repr(exc),
-                    "time_in_force": time_in_force,
-                    "expiration_ts": expiration_ts,
+                    "time_in_force": submission_policy.time_in_force,
+                    "expiration_ts": submission_policy.expiration_ts,
                 },
             )
             return False

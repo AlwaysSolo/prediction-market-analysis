@@ -1108,6 +1108,7 @@ def test_execution_engine_live_probe_orders_use_short_ttl_gtc(tmp_path: Path, mo
             lifecycle_state="probe_pending",
         )
         assert probe_intent is not None
+        probe_intent = replace(probe_intent, max_acceptable_entry_price_cents=56)
         await execution_engine._submit_live_intent(probe_intent)
 
         filled = await _wait_for_status(execution_queue, "filled", timeout=2.0)
@@ -1120,6 +1121,205 @@ def test_execution_engine_live_probe_orders_use_short_ttl_gtc(tmp_path: Path, mo
         assert submit_payload["expiration_ts"] > int(datetime(2026, 1, 1, 12, 0, tzinfo=UTC).timestamp())
         assert fake_rest.create_order_calls[0]["time_in_force"] == "good_till_canceled"
         assert "expiration_ts" in fake_rest.create_order_calls[0]
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_live_probe_gtc_submits_even_when_book_has_moved_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+    monkeypatch.setattr(KalshiExecutionEngine, "_private_ws_loop", _noop_private_ws)
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=True,
+            probe_order_time_in_force="good_till_canceled",
+            probe_order_ttl_seconds=2.0,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    execution_engine._rest_client = fake_rest
+    logger = _CapturingAsyncLogger()
+    execution_engine._logger = logger  # type: ignore[assignment]
+    signal_queue = signal_engine.subscribe_queue()
+    execution_queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update(ticker="KXBTC15M-TEST", yes_bid_size=2, yes_ask_size=3))
+
+        approved = await asyncio.wait_for(signal_queue.get(), timeout=0.5)
+        assert approved.approved is True
+
+        collector._states["KXBTC15M-TEST"] = KalshiTickerState(
+            ticker="KXBTC15M-TEST",
+            last_yes_price_cents=55,
+            last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            previous_yes_price_cents=54,
+            close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            is_open=True,
+            yes_bid_cents=54,
+            yes_ask_cents=56,
+            no_bid_cents=44,
+            no_ask_cents=46,
+            yes_bid_size=2,
+            yes_ask_size=3,
+            no_bid_size=3,
+            no_ask_size=2,
+            ticker_update_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            received_at=datetime(2026, 1, 1, 12, 0, 0, 200000, tzinfo=UTC),
+        )
+        fake_rest.orderbook_results["KXBTC15M-TEST"] = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.5400", "2.00"]],
+                "no_dollars": [["0.3900", "3.00"]],
+            }
+        }
+
+        probe_intent = signal_engine.reserve_manual_trade_intent(
+            decision_state=approved,
+            side="YES",
+            entry_price_cents=56,
+            contracts=1,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+            thesis_id="thesis-1",
+            tranche_index=0,
+            tranche_window="10m",
+            tranche_reason="opened",
+            lifecycle_state="probe_pending",
+        )
+        assert probe_intent is not None
+        probe_intent = replace(probe_intent, max_acceptable_entry_price_cents=56)
+        await execution_engine._submit_live_intent(probe_intent)
+
+        filled = await _wait_for_status(execution_queue, "filled", timeout=2.0)
+        assert filled.order_id == "server-order"
+        pre_submit_event = next(event for event in logger.events if event["event_type"] == "pre_submit_orderbook_check")
+        pre_submit_payload = pre_submit_event["payload"]
+        assert pre_submit_payload["requires_immediate_match"] is False
+        assert pre_submit_payload["passed"] is False
+        assert pre_submit_payload["reason"] == "live_orderbook_limit_moved_away"
+        assert fake_rest.create_order_calls[0]["time_in_force"] == "good_till_canceled"
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_live_probe_gtc_submits_even_when_top_of_book_size_is_small(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.20))
+    monkeypatch.setattr(KalshiExecutionEngine, "_private_ws_loop", _noop_private_ws)
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            starting_cash_dollars=100.0,
+            contracts_per_order=2,
+        ),
+    )
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.LIVE,
+            enable_live_trading=True,
+            probe_order_time_in_force="good_till_canceled",
+            probe_order_ttl_seconds=2.0,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    execution_engine._rest_client = fake_rest
+    logger = _CapturingAsyncLogger()
+    execution_engine._logger = logger  # type: ignore[assignment]
+    signal_queue = signal_engine.subscribe_queue()
+    execution_queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update(ticker="KXBTC15M-TEST", yes_bid_size=2, yes_ask_size=3))
+
+        approved = await asyncio.wait_for(signal_queue.get(), timeout=0.5)
+        assert approved.approved is True
+
+        collector._states["KXBTC15M-TEST"] = KalshiTickerState(
+            ticker="KXBTC15M-TEST",
+            last_yes_price_cents=36,
+            last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            previous_yes_price_cents=35,
+            close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            is_open=True,
+            yes_bid_cents=36,
+            yes_ask_cents=37,
+            no_bid_cents=63,
+            no_ask_cents=64,
+            yes_bid_size=1,
+            yes_ask_size=6,
+            no_bid_size=6,
+            no_ask_size=1,
+            ticker_update_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            received_at=datetime(2026, 1, 1, 12, 0, 0, 150000, tzinfo=UTC),
+        )
+        fake_rest.orderbook_results["KXBTC15M-TEST"] = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.3600", "1.00"]],
+                "no_dollars": [["0.6300", "8.00"]],
+            }
+        }
+
+        probe_intent = signal_engine.reserve_manual_trade_intent(
+            decision_state=approved,
+            side="NO",
+            entry_price_cents=64,
+            contracts=2,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+            thesis_id="thesis-2",
+            tranche_index=0,
+            tranche_window="10m",
+            tranche_reason="opened",
+            lifecycle_state="probe_pending",
+        )
+        assert probe_intent is not None
+        probe_intent = replace(probe_intent, max_acceptable_entry_price_cents=90)
+        await execution_engine._submit_live_intent(probe_intent)
+
+        filled = await _wait_for_status(execution_queue, "filled", timeout=2.0)
+        assert filled.order_id == "server-order"
+        pre_submit_event = next(event for event in logger.events if event["event_type"] == "pre_submit_orderbook_check")
+        pre_submit_payload = pre_submit_event["payload"]
+        assert pre_submit_payload["requires_immediate_match"] is False
+        assert pre_submit_payload["passed"] is False
+        assert pre_submit_payload["reason"] == "live_orderbook_insufficient_size"
+        assert fake_rest.create_order_calls[0]["time_in_force"] == "good_till_canceled"
 
         await execution_engine.stop()
         await signal_engine.stop()
