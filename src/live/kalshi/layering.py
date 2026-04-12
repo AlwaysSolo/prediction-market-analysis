@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from src.live.kalshi.execution import KalshiExecutionEngine, KalshiExecutionUpdate
+from src.live.kalshi.jsonl_logger import JsonlEventLogger
 from src.live.kalshi.signal_risk import (
     KalshiSignalDecisionState,
     KalshiSignalDecisionUpdate,
@@ -28,27 +29,6 @@ WINDOW_ORDER: tuple[str, ...] = ("10m", "5m", "4m", "3m")
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-class JsonlEventLogger:
-    def __init__(self, base_dir: Path, environment: str):
-        self.base_dir = base_dir
-        self.environment = environment
-        self._lock = asyncio.Lock()
-
-    async def write(self, event_type: str, payload: dict[str, Any], event_time: datetime | None = None) -> None:
-        event_time = event_time or utc_now()
-        date_dir = self.base_dir / self.environment / event_time.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
-        path = date_dir / "events.jsonl"
-        row = {
-            "logged_at": utc_now().isoformat(),
-            "event_type": event_type,
-            "payload": payload,
-        }
-        async with self._lock:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(row, default=str) + "\n")
 
 
 @dataclass(frozen=True)
@@ -213,6 +193,11 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
                 pass
         self._signal_task = None
         self._execution_task = None
+        close = getattr(self._logger, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     async def wait_until_ready(self) -> None:
         await self._ready_event.wait()

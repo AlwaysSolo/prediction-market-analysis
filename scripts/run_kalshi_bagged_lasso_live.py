@@ -132,6 +132,7 @@ def _build_execution_config(
         base,
         mode=execution_mode,
         log_dir=log_dir,
+        skip_rest_orderbook_check_for_immediate_orders=True,
     )
 
 

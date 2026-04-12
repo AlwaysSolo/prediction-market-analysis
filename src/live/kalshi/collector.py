@@ -15,6 +15,7 @@ from src.indexers.kalshi.models import Market, parse_count, parse_optional_count
 from src.live.kalshi.auth import build_auth_headers
 from src.live.kalshi.client import KalshiLiveRestClient
 from src.live.kalshi.config import KalshiCollectorConfig, KalshiEnvironment
+from src.live.kalshi.jsonl_logger import JsonlEventLogger
 from src.live.kalshi.types import (
     KalshiRawStreamEvent,
     KalshiTickerState,
@@ -144,27 +145,6 @@ def _merge_binary_quote_sizes(
     return yes_bid_size, yes_ask_size, no_bid_size, no_ask_size
 
 
-class JsonlEventLogger:
-    def __init__(self, base_dir: Path, environment: str):
-        self.base_dir = base_dir
-        self.environment = environment
-        self._lock = asyncio.Lock()
-
-    async def write(self, event_type: str, payload: dict[str, Any], event_time: datetime | None = None) -> None:
-        event_time = event_time or datetime.now(UTC)
-        date_dir = self.base_dir / self.environment / event_time.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
-        path = date_dir / "events.jsonl"
-        row = {
-            "logged_at": datetime.now(UTC).isoformat(),
-            "event_type": event_type,
-            "payload": payload,
-        }
-        async with self._lock:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(row, default=str) + "\n")
-
-
 class KalshiMarketDataCollector:
     def __init__(self, config: KalshiCollectorConfig):
         self.config = config
@@ -214,6 +194,11 @@ class KalshiMarketDataCollector:
         self._tasks.clear()
         self._rest_client.close()
         await self._logger.write("collector_stopped", {"environment": self.config.environment.value})
+        close = getattr(self._logger, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     def get_state(self, ticker: str) -> KalshiTickerState | None:
         return self._states.get(ticker)

@@ -31,6 +31,7 @@ from src.live.kalshi.bucket_policy import (
 )
 from src.live.kalshi.collector import KalshiMarketDataCollector
 from src.live.kalshi.config import KalshiEnvironment
+from src.live.kalshi.jsonl_logger import JsonlEventLogger
 from src.live.kalshi.regime import KalshiRegimeEvaluation, evaluate_kxbtc15m_regime_for_state
 from src.live.kalshi.scorer import KalshiLightGBMScoreState, KalshiLightGBMScoreUpdate
 from src.live.kalshi.signal_risk import (
@@ -48,27 +49,6 @@ RECOVERY_RECONCILE_INTERVAL_SECONDS = 15.0
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-class JsonlEventLogger:
-    def __init__(self, base_dir: Path, environment: str):
-        self.base_dir = base_dir
-        self.environment = environment
-        self._lock = asyncio.Lock()
-
-    async def write(self, event_type: str, payload: dict[str, Any], event_time: datetime | None = None) -> None:
-        event_time = event_time or utc_now()
-        date_dir = self.base_dir / self.environment / event_time.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
-        path = date_dir / "events.jsonl"
-        row = {
-            "logged_at": utc_now().isoformat(),
-            "event_type": event_type,
-            "payload": payload,
-        }
-        async with self._lock:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(row, default=str) + "\n")
 
 
 def _env_var_names(environment: KalshiEnvironment, suffix: str) -> tuple[str, str]:
@@ -401,6 +381,11 @@ class KalshiResearchSampler:
             pass
         self._task = None
         await self._logger.write("research_stopped", {})
+        close = getattr(self._logger, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     async def wait_until_ready(self) -> None:
         await self._ready_event.wait()
@@ -913,6 +898,11 @@ class KalshiResearchLedger:
             except asyncio.CancelledError:
                 pass
         self._tasks.clear()
+        close = getattr(self._logger, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     async def wait_until_ready(self) -> None:
         await self._ready_event.wait()

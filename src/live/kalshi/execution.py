@@ -20,6 +20,7 @@ from src.indexers.kalshi.models import parse_count, parse_datetime, parse_price_
 from src.live.kalshi.auth import build_auth_headers
 from src.live.kalshi.client import KalshiLiveRestClient
 from src.live.kalshi.config import KalshiEnvironment, KalshiReconnectConfig
+from src.live.kalshi.jsonl_logger import JsonlEventLogger
 from src.live.kalshi.signal_risk import (
     KalshiExecutionFeedback,
     KalshiPortfolioPosition,
@@ -100,27 +101,6 @@ def _compact_error_detail(value: str | None, *, max_length: int = 180) -> str | 
     return f"{compact[: max_length - 3]}..."
 
 
-class JsonlEventLogger:
-    def __init__(self, base_dir: Path, environment: str):
-        self.base_dir = base_dir
-        self.environment = environment
-        self._lock = asyncio.Lock()
-
-    async def write(self, event_type: str, payload: dict[str, Any], event_time: datetime | None = None) -> None:
-        event_time = event_time or utc_now()
-        date_dir = self.base_dir / self.environment / event_time.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
-        path = date_dir / "events.jsonl"
-        row = {
-            "logged_at": utc_now().isoformat(),
-            "event_type": event_type,
-            "payload": payload,
-        }
-        async with self._lock:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(row, default=str) + "\n")
-
-
 class KalshiExecutionMode(str, Enum):
     PAPER = "paper"
     SHADOW = "shadow"
@@ -134,6 +114,7 @@ class KalshiExecutionConfig:
     simulate_immediate_fills: bool = False
     shadow_fill_latency_seconds: float = 0.25
     enable_pre_submit_orderbook_check: bool = True
+    skip_rest_orderbook_check_for_immediate_orders: bool = False
     pre_submit_orderbook_depth: int = 1
     probe_order_time_in_force: str = "good_till_canceled"
     probe_order_ttl_seconds: float = 2.0
@@ -180,6 +161,9 @@ class KalshiExecutionConfig:
             ),
             enable_pre_submit_orderbook_check=_parse_bool(
                 _resolve_env_value(environment, "ENABLE_PRE_SUBMIT_ORDERBOOK_CHECK") or "true"
+            ),
+            skip_rest_orderbook_check_for_immediate_orders=_parse_bool(
+                _resolve_env_value(environment, "SKIP_REST_ORDERBOOK_CHECK_FOR_IMMEDIATE_ORDERS") or "false"
             ),
             pre_submit_orderbook_depth=int(_resolve_env_value(environment, "PRE_SUBMIT_ORDERBOOK_DEPTH") or 1),
             probe_order_time_in_force=_normalize_time_in_force(
@@ -243,6 +227,7 @@ class _LiveOrderbookCheckResult:
     received_to_check_ms: float | None
     orderbook_roundtrip_ms: float | None
     error: str | None = None
+    check_source: str = "rest_orderbook"
 
 
 @dataclass(frozen=True)
@@ -688,6 +673,11 @@ class KalshiExecutionEngine:
                 "subaccount": self.config.subaccount,
             },
         )
+        close = getattr(self._logger, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     async def wait_until_ready(self) -> None:
         await self._ready_event.wait()
@@ -879,6 +869,7 @@ class KalshiExecutionEngine:
             "is_probe_order": None if policy is None else policy.is_probe_order,
             "requires_immediate_match": None if policy is None else policy.requires_immediate_match,
             "depth": self.config.pre_submit_orderbook_depth,
+            "check_source": result.check_source,
             "passed": result.passed,
             "reason": result.reason,
             "checked_at": result.checked_at.isoformat(),
@@ -924,6 +915,7 @@ class KalshiExecutionEngine:
                 ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
                 received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
                 orderbook_roundtrip_ms=0.0,
+                check_source="disabled",
             )
 
         request_started_at = utc_now()
@@ -953,6 +945,7 @@ class KalshiExecutionEngine:
                 received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
                 orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
                 error=_compact_error_detail(repr(exc)),
+                check_source="rest_orderbook",
             )
 
         checked_at = utc_now()
@@ -981,6 +974,7 @@ class KalshiExecutionEngine:
                 ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
                 received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
                 orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
+                check_source="rest_orderbook",
             )
 
         executable_ask_cents = 100 - top_level.price_cents
@@ -1006,6 +1000,44 @@ class KalshiExecutionEngine:
             ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
             received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
             orderbook_roundtrip_ms=_latency_ms(request_started_at, checked_at),
+            check_source="rest_orderbook",
+        )
+
+    def _check_feed_quote_before_submit(
+        self,
+        intent: KalshiTradeIntent,
+    ) -> _LiveOrderbookCheckResult:
+        checked_at = utc_now()
+        quote_context = self._current_quote_context(intent.ticker, intent.side)
+        reason: str | None = None
+        if (
+            quote_context.executable_ask_cents is not None
+            and quote_context.executable_ask_cents > intent.max_acceptable_entry_price_cents
+        ):
+            reason = "feed_limit_moved_away"
+        elif (
+            quote_context.top_book_contracts is not None
+            and quote_context.top_book_contracts < intent.contracts
+        ):
+            reason = "feed_insufficient_size"
+        return _LiveOrderbookCheckResult(
+            passed=reason is None,
+            reason=reason,
+            checked_at=checked_at,
+            top_book_side=quote_context.top_book_side,
+            top_book_price_cents=quote_context.top_book_price_cents,
+            top_book_contracts=quote_context.top_book_contracts,
+            executable_ask_cents=quote_context.executable_ask_cents,
+            feed_top_book_side=quote_context.top_book_side,
+            feed_top_book_price_cents=quote_context.top_book_price_cents,
+            feed_top_book_contracts=quote_context.top_book_contracts,
+            feed_executable_ask_cents=quote_context.executable_ask_cents,
+            ticker_update_time=quote_context.ticker_update_time,
+            received_at=quote_context.received_at,
+            ticker_update_to_check_ms=_latency_ms(quote_context.ticker_update_time, checked_at),
+            received_to_check_ms=_latency_ms(quote_context.received_at, checked_at),
+            orderbook_roundtrip_ms=0.0,
+            check_source="feed_quote",
         )
 
     def _current_open_positions(self) -> tuple[KalshiPortfolioPosition, ...]:
@@ -1270,7 +1302,13 @@ class KalshiExecutionEngine:
             intent,
             submitted_at=submit_requested_at,
         )
-        orderbook_check = await self._check_live_orderbook_before_submit(intent)
+        if (
+            submission_policy.requires_immediate_match
+            and self.config.skip_rest_orderbook_check_for_immediate_orders
+        ):
+            orderbook_check = self._check_feed_quote_before_submit(intent)
+        else:
+            orderbook_check = await self._check_live_orderbook_before_submit(intent)
         await self._logger.write(
             "pre_submit_orderbook_check",
             self._orderbook_check_log_payload(intent, orderbook_check, policy=submission_policy),
@@ -1317,6 +1355,7 @@ class KalshiExecutionEngine:
                 ),
                 "pre_submit_orderbook_checked_at": orderbook_check.checked_at.isoformat(),
                 "pre_submit_orderbook_roundtrip_ms": orderbook_check.orderbook_roundtrip_ms,
+                "pre_submit_check_source": orderbook_check.check_source,
                 "current_executable_ask_cents": orderbook_check.executable_ask_cents,
                 "top_book_side": orderbook_check.top_book_side,
                 "top_book_price_cents": orderbook_check.top_book_price_cents,
