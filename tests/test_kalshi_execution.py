@@ -1342,8 +1342,10 @@ def test_execution_engine_live_no_probe_ioc_cushion_increases_submitted_limit(
         filled = await _wait_for_status(execution_queue, "filled", timeout=2.0)
         assert filled.order_id == "server-order"
         assert filled.limit_price_cents == 67
+        assert filled.cash_required_dollars == pytest.approx(0.56)
         assert fake_rest.get_market_orderbook_calls == []
         assert fake_rest.create_order_calls[0]["no_price"] == 67
+        assert signal_engine.get_portfolio_state().open_positions[0].cash_required_dollars == pytest.approx(0.56)
 
         pre_submit_event = next(event for event in logger.events if event["event_type"] == "pre_submit_orderbook_check")
         pre_submit_payload = pre_submit_event["payload"]
@@ -2125,8 +2127,8 @@ def test_execution_engine_live_fill_emits_settled_state(tmp_path: Path, monkeypa
         )
         settled = await _wait_for_status(queue, "settled", timeout=1.5)
         assert settled.settlement_result == "YES"
-        assert settled.realized_pnl_dollars == pytest.approx(0.4245)
-        assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.4245)
+        assert settled.realized_pnl_dollars == pytest.approx(0.44)
+        assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.44)
         assert fake_rest.get_market_calls >= 1
 
         await execution_engine.stop()

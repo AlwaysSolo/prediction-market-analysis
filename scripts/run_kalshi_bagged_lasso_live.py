@@ -134,7 +134,7 @@ def _build_execution_config(
         log_dir=log_dir,
         skip_rest_orderbook_check_for_immediate_orders=True,
         enable_direct_trade_intent_handoff_in_live_mode=True,
-        no_probe_immediate_limit_cushion_cents=3,
+        no_probe_immediate_limit_cushion_cents=2,
     )
 
 

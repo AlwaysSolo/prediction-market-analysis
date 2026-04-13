@@ -950,9 +950,18 @@ class KalshiExecutionEngine:
             )
             limit_adjustment_cents = max(0, adjusted_limit_cents - intent.max_acceptable_entry_price_cents)
             if limit_adjustment_cents > 0:
+                adjusted_entry_cost_dollars, adjusted_fees_dollars, adjusted_cash_required_dollars = (
+                    calculate_realized_cash_metrics(
+                        entry_price_cents=adjusted_limit_cents,
+                        contracts=intent.contracts,
+                    )
+                )
                 return replace(
                     intent,
                     max_acceptable_entry_price_cents=adjusted_limit_cents,
+                    estimated_entry_cost_dollars=adjusted_entry_cost_dollars,
+                    estimated_fees_dollars=adjusted_fees_dollars,
+                    estimated_cash_required_dollars=adjusted_cash_required_dollars,
                 ), limit_adjustment_cents
         return intent, 0
 
@@ -1236,7 +1245,6 @@ class KalshiExecutionEngine:
         existing = self._states.get(intent.decision_id)
         if existing is not None:
             return
-        self.signal_engine.claim_trade_intent_reservation(intent)
 
         execution_intent = intent
         limit_adjustment_cents = 0
@@ -1249,6 +1257,7 @@ class KalshiExecutionEngine:
                 intent,
                 submission_policy=preview_submission_policy,
             )
+        self.signal_engine.claim_trade_intent_reservation(execution_intent)
 
         claimed_state = KalshiExecutionIntentState(
             decision_id=execution_intent.decision_id,
@@ -1800,7 +1809,23 @@ class KalshiExecutionEngine:
             position = portfolio_position_from_live_order(record)
             if position is not None:
                 self._ws_market_positions[record.ticker] = position
+            entry_cost_dollars = record.taker_fill_cost_dollars or record.maker_fill_cost_dollars or existing.entry_cost_dollars
+            fees_dollars = (
+                record.taker_fees_dollars + record.maker_fees_dollars
+                if (record.taker_fees_dollars or record.maker_fees_dollars)
+                else existing.fees_dollars
+            )
+            cash_required_dollars = entry_cost_dollars + fees_dollars
             if allow_signal_feedback:
+                if record.displayed_price_cents is not None:
+                    self.signal_engine.update_pending_reservation_fill_pricing(
+                        decision_id,
+                        fill_price_cents=record.displayed_price_cents,
+                        contracts=record.fill_count,
+                        entry_cost_dollars=entry_cost_dollars,
+                        fees_dollars=fees_dollars,
+                        cash_required_dollars=cash_required_dollars,
+                    )
                 await self.signal_engine.apply_execution_feedback(
                     KalshiExecutionFeedback(
                         decision_id=decision_id,
@@ -1818,6 +1843,9 @@ class KalshiExecutionEngine:
                 filled_contracts=record.fill_count,
                 remaining_contracts=record.remaining_count,
                 fill_price_cents=record.displayed_price_cents,
+                entry_cost_dollars=entry_cost_dollars,
+                fees_dollars=fees_dollars,
+                cash_required_dollars=cash_required_dollars,
                 available_cash_dollars=self._current_available_cash_dollars(),
                 message="order_terminal_fill",
                 live_order=record,

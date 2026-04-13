@@ -747,14 +747,26 @@ class KalshiSignalRiskEngine:
     def snapshot_states(self) -> dict[str, KalshiSignalDecisionState]:
         return dict(self._states)
 
-    def update_pending_reservation_fill_pricing(self, decision_id: str, *, fill_price_cents: int) -> None:
+    def update_pending_reservation_fill_pricing(
+        self,
+        decision_id: str,
+        *,
+        fill_price_cents: int,
+        contracts: int | None = None,
+        entry_cost_dollars: float | None = None,
+        fees_dollars: float | None = None,
+        cash_required_dollars: float | None = None,
+    ) -> None:
         reservation, _reservation_source = self._lookup_reservation(decision_id)
         if reservation is None:
             raise KeyError(f"Unknown reservation decision id: {decision_id}")
-        entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_realized_cash_metrics(
-            entry_price_cents=fill_price_cents,
-            contracts=reservation.contracts,
-        )
+        contracts_to_use = reservation.contracts if contracts is None else max(0, contracts)
+        if entry_cost_dollars is None or fees_dollars is None or cash_required_dollars is None:
+            entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_realized_cash_metrics(
+                entry_price_cents=fill_price_cents,
+                contracts=contracts_to_use,
+            )
+        reservation.contracts = contracts_to_use
         reservation.entry_cost_dollars = entry_cost_dollars
         reservation.fees_dollars = fees_dollars
         reservation.cash_required_dollars = cash_required_dollars

@@ -10,6 +10,7 @@ This document explains the live-execution latency reductions that were implement
 2. remove synchronous JSONL file appends from the event loop by moving them to a background writer
 3. collapse the last queue hop before execution by handing trade intents directly into the execution engine in live mode
 4. add an asymmetric `NO`-probe IOC limit cushion so `NO` opening probes can bid a few cents more aggressively than the model limit
+5. make live reservation and settled-PnL accounting follow the execution-adjusted and actual filled price instead of the stale pre-adjustment estimate
 
 This is a detailed implementation note, not a strategy note. It focuses on what changed in code, why it changed, what behavior now differs in live mode, and what is still intentionally unchanged.
 
@@ -369,11 +370,53 @@ That makes the next live run much easier to interpret. We will be able to tell:
 
 The dedicated bagged-lasso live runner now sets:
 
-- `no_probe_immediate_limit_cushion_cents=3`
+- `no_probe_immediate_limit_cushion_cents=2`
 
 in [run_kalshi_bagged_lasso_live.py](/c:/prediction-market-analysis/scripts/run_kalshi_bagged_lasso_live.py:137).
 
-I chose `3` cents because the observed live IOC gap was large enough that `+1` would likely be too small to be conclusive, while `+3` is still modest enough to remain an execution test rather than a wholesale strategy rewrite.
+The runner originally used `+3`, but after the first live comparison that proved a little too aggressive. The dedicated runner now defaults to `+2`, which is still enough to materially loosen `NO` probes without moving as far away from the model limit.
+
+## Change 5: Live Reservation and Settled PnL Accounting Now Follow the Actual Execution Price
+
+### Why this was added
+
+Once the execution layer was allowed to add a live-only `NO` probe cushion, there were now two different prices in play:
+
+1. the model's original maximum acceptable entry price
+2. the execution-adjusted submitted limit price
+
+The original implementation correctly logged both values, but local reservation and settled-PnL bookkeeping could still remain anchored to the pre-adjustment estimate. That created two problems:
+
+1. pending reservations could temporarily reserve too little cash when a live execution cushion was applied
+2. filled/settled PnL could be computed from stale estimated cash instead of the actual fill cost and fees reported by Kalshi
+
+This was a correctness bug, not just a reporting bug.
+
+### What changed
+
+The live execution path now updates estimated cash fields when it applies an execution-time limit adjustment in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:950).
+
+The reservation claim now happens after the execution-adjusted intent is built in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:1257), so the signal engine reserves cash against the price that will actually be submitted, not the older model-only estimate.
+
+When a live order reaches terminal fill, the execution engine now recomputes:
+
+- `entry_cost_dollars`
+- `fees_dollars`
+- `cash_required_dollars`
+
+from the actual live order record in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:1809).
+
+It also updates the corresponding pending signal reservation with the actual fill economics from the live order record, using the reported fill cost and fees when available, in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:1818) and [signal_risk.py](/c:/prediction-market-analysis/src/live/kalshi/signal_risk.py:750).
+
+### Operational effect
+
+This means the live stack now keeps three layers aligned:
+
+1. submitted execution limit
+2. reserved cash in the signal engine
+3. settled PnL in the execution engine
+
+So if execution chooses to be slightly more aggressive than the model limit, local cash accounting and final realized PnL now move with that decision instead of silently lagging behind it.
 
 ## Logging and Telemetry Improvements
 
@@ -421,6 +464,7 @@ I also added asymmetric execution tests for the new `NO`-probe cushion in [test_
 1. `NO` IOC probe orders get the configured extra submitted limit
 2. the logs expose both the model limit and the execution adjustment
 3. `YES` IOC probe orders remain unchanged even when the cushion config is enabled
+4. filled cash accounting on the execution and signal sides reflects the actual live fill dollars
 
 ## Validation Performed
 
