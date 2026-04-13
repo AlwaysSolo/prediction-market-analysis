@@ -442,6 +442,75 @@ def test_generate_kalshi_performance_reports_for_live_execution(tmp_path: Path) 
     assert "Execution Quality" in report_text
 
 
+def test_generate_kalshi_performance_reports_for_live_execution_low_cpu_mode(tmp_path: Path) -> None:
+    live_run = _make_live_execution_run(tmp_path)
+    outputs = generate_kalshi_performance_reports(
+        live_run,
+        output_dir=tmp_path / "reports_low_cpu",
+        include_archive=False,
+        include_row_exports=False,
+    )
+    artifacts = outputs["runs"][0]["artifacts"]
+
+    assert "canonical_rows.csv" not in artifacts
+    assert "execution_rows.csv" not in artifacts
+    assert Path(artifacts["execution_quality_summary.csv"]).exists()
+
+    metadata = json.loads(Path(artifacts["run_metadata.json"]).read_text(encoding="utf-8"))
+    assert any("Strategy archive scan skipped" in note for note in metadata["notes"])
+
+
+def test_generate_kalshi_performance_reports_lookback_prunes_old_live_event_paths(tmp_path: Path) -> None:
+    live_run = _make_live_execution_run(tmp_path)
+    _write_jsonl(
+        live_run / "signal" / "lasso" / "demo" / "2026-03-01" / "events.jsonl",
+        [
+            {
+                "logged_at": "2026-03-01T12:00:00+00:00",
+                "event_type": "signal_decision",
+                "payload": {
+                    "approved": True,
+                    "decision_id": "old-dec-1",
+                    "ticker": "KXBTC15M-OLD1",
+                    "side": "YES",
+                    "predicted_yes_probability": 0.75,
+                    "feature_basis_market_prob": 0.55,
+                    "reference_price_cents": 54,
+                },
+            }
+        ],
+    )
+    _write_jsonl(
+        live_run / "execution" / "lasso" / "demo" / "2026-03-01" / "events.jsonl",
+        [
+            {
+                "logged_at": "2026-03-01T12:10:00+00:00",
+                "event_type": "simulated_position_settled",
+                "payload": {
+                    "decision_id": "old-dec-1",
+                    "ticker": "KXBTC15M-OLD1",
+                    "side": "YES",
+                    "settlement_result": "YES",
+                    "contracts": 1,
+                    "cash_required_dollars": 0.56,
+                    "realized_pnl_dollars": 0.44,
+                    "cumulative_realized_pnl_dollars": 0.44,
+                },
+            }
+        ],
+    )
+
+    outputs = generate_kalshi_performance_reports(
+        live_run,
+        output_dir=tmp_path / "reports_lookback",
+        lookback_days=1,
+        include_archive=False,
+    )
+    artifacts = outputs["runs"][0]["artifacts"]
+    canonical_df = pd.read_csv(artifacts["canonical_rows.csv"])
+    assert "old-dec-1" not in set(canonical_df["decision_id"])
+
+
 def test_generate_kalshi_performance_reports_for_live_execution_archive_fallback(tmp_path: Path) -> None:
     live_run = tmp_path / "output" / "live" / "archive_only_live_run"
     (live_run / "signal" / "bagged_lasso" / "demo" / "2026-04-01").mkdir(parents=True, exist_ok=True)

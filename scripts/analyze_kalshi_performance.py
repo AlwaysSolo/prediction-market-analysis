@@ -52,6 +52,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Minimum settled rows required before a combo bucket is included.",
     )
+    parser.add_argument(
+        "--skip-archive",
+        action="store_true",
+        help="For live execution runs, skip archive/strategy_events scanning and derive the report from signal/execution logs only.",
+    )
+    parser.add_argument(
+        "--skip-row-exports",
+        action="store_true",
+        help="Do not write large row-level CSV exports such as canonical_rows.csv and execution_rows.csv.",
+    )
+    parser.add_argument(
+        "--low-cpu",
+        action="store_true",
+        help="Convenience mode for small instances: implies --skip-archive and --skip-row-exports.",
+    )
     return parser
 
 
@@ -66,6 +81,8 @@ def main() -> None:
         model_filters=tuple(args.model),
         lookback_days=args.lookback_days,
         min_combo_count=args.min_combo_count,
+        include_archive=not (args.skip_archive or args.low_cpu),
+        include_row_exports=not (args.skip_row_exports or args.low_cpu),
     )
     print(json.dumps(outputs, indent=2))
 

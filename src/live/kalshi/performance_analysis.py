@@ -6,7 +6,7 @@ import json
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -258,10 +258,35 @@ def _iter_jsonl_zst_tolerant(path: Path) -> tuple[list[dict[str, Any]], int]:
     return rows, skipped
 
 
+def _partition_date_from_path(path: Path) -> date | None:
+    for part in reversed(path.parts):
+        candidate = part
+        if candidate.startswith("date="):
+            candidate = candidate[5:]
+        if len(candidate) == 10 and candidate[4] == "-" and candidate[7] == "-":
+            try:
+                return date.fromisoformat(candidate)
+            except ValueError:
+                continue
+    return None
+
+
+def _filter_paths_by_lookback(paths: list[Path], lookback_days: int | None) -> list[Path]:
+    if lookback_days is None:
+        return paths
+    dated_paths = [(path, _partition_date_from_path(path)) for path in paths]
+    latest = max((path_date for _path, path_date in dated_paths if path_date is not None), default=None)
+    if latest is None:
+        return paths
+    cutoff = latest - timedelta(days=lookback_days)
+    return [path for path, path_date in dated_paths if path_date is None or path_date >= cutoff]
+
+
 def _load_strategy_event_archive_rows(
     run_dir: Path,
     *,
     environment: str | None = None,
+    lookback_days: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     archive_root = run_dir / "archive"
     strategy_root = archive_root / "strategy_events"
@@ -271,6 +296,7 @@ def _load_strategy_event_archive_rows(
 
     if strategy_root.exists():
         parquet_paths = sorted(strategy_root.rglob("*.parquet"))
+        parquet_paths = _filter_paths_by_lookback(parquet_paths, lookback_days)
         for parquet_path in parquet_paths:
             if environment and f"environment={environment}" not in str(parquet_path):
                 continue
@@ -280,6 +306,7 @@ def _load_strategy_event_archive_rows(
 
     if strategy_staging_root.exists():
         zst_paths = sorted(strategy_staging_root.rglob("*.jsonl.zst"))
+        zst_paths = _filter_paths_by_lookback(zst_paths, lookback_days)
         for zst_path in zst_paths:
             if environment and f"environment={environment}" not in str(zst_path):
                 continue
@@ -631,7 +658,13 @@ def _time_lag_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> SourceLoadResult:
+def _load_live_execution_run(
+    run_dir: Path,
+    environment: str | None = None,
+    *,
+    lookback_days: int | None = None,
+    include_archive: bool = True,
+) -> SourceLoadResult:
     approvals: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     settlements: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     execution_context_rows: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
@@ -645,12 +678,23 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
     skip_reason_counter: Counter[tuple[str, str, str | None, str | None, str | None]] = Counter()
     approval_counts: Counter[str] = Counter()
     quoted_rows: list[dict[str, Any]] = []
+    notes: list[str] = []
 
     signal_root = run_dir / "signal"
     execution_root = run_dir / "execution"
-    archive_rows, archive_skipped_lines = _load_strategy_event_archive_rows(run_dir, environment=environment)
-    for file_path, skipped in archive_skipped_lines.items():
-        skipped_lines_by_file[file_path] = skipped_lines_by_file.get(file_path, 0) + skipped
+    if include_archive:
+        archive_rows, archive_skipped_lines = _load_strategy_event_archive_rows(
+            run_dir,
+            environment=environment,
+            lookback_days=lookback_days,
+        )
+        for file_path, skipped in archive_skipped_lines.items():
+            skipped_lines_by_file[file_path] = skipped_lines_by_file.get(file_path, 0) + skipped
+    else:
+        archive_rows = []
+        notes.append(
+            "Strategy archive scan skipped for lower CPU usage; report is derived from signal/execution logs only."
+        )
     models = sorted(
         {path.name for path in signal_root.iterdir() if path.is_dir()}
         & {path.name for path in execution_root.iterdir() if path.is_dir()}
@@ -710,7 +754,8 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
         for env_path in sorted(env_paths):
             if not env_path.exists():
                 continue
-            for events_path in sorted(env_path.rglob("events.jsonl")):
+            event_paths = _filter_paths_by_lookback(sorted(env_path.rglob("events.jsonl")), lookback_days)
+            for events_path in event_paths:
                 rows, skipped = _iter_jsonl_tolerant(events_path)
                 if skipped:
                     skipped_lines_by_file[str(events_path)] = skipped_lines_by_file.get(str(events_path), 0) + skipped
@@ -751,7 +796,8 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
         for env_path in sorted(env_paths):
             if not env_path.exists():
                 continue
-            for events_path in sorted(env_path.rglob("events.jsonl")):
+            event_paths = _filter_paths_by_lookback(sorted(env_path.rglob("events.jsonl")), lookback_days)
+            for events_path in event_paths:
                 rows, skipped = _iter_jsonl_tolerant(events_path)
                 if skipped:
                     skipped_lines_by_file[str(events_path)] = skipped_lines_by_file.get(str(events_path), 0) + skipped
@@ -1178,6 +1224,7 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
         run_name=run_dir.name,
         canonical_rows=canonical_rows,
         skipped_lines_by_file=skipped_lines_by_file,
+        notes=notes,
         skip_reason_rows=skip_reason_rows,
         quote_quality_rows=quote_quality_rows,
         thesis_summary_rows=thesis_summary_rows,
@@ -1187,7 +1234,12 @@ def _load_live_execution_run(run_dir: Path, environment: str | None = None) -> S
     )
 
 
-def _load_live_research_run(run_dir: Path, environment: str | None = None) -> SourceLoadResult:
+def _load_live_research_run(
+    run_dir: Path,
+    environment: str | None = None,
+    *,
+    lookback_days: int | None = None,
+) -> SourceLoadResult:
     recorded: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     settled: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     skipped_lines_by_file: dict[str, int] = {}
@@ -1200,7 +1252,8 @@ def _load_live_research_run(run_dir: Path, environment: str | None = None) -> So
         model_root = research_root / model
         env_paths = [model_root / environment] if environment else [path for path in model_root.iterdir() if path.is_dir()]
         for env_path in sorted(env_paths):
-            for events_path in sorted(env_path.rglob("events.jsonl")):
+            event_paths = _filter_paths_by_lookback(sorted(env_path.rglob("events.jsonl")), lookback_days)
+            for events_path in event_paths:
                 rows, skipped = _iter_jsonl_tolerant(events_path)
                 if skipped:
                     skipped_lines_by_file[str(events_path)] = skipped_lines_by_file.get(str(events_path), 0) + skipped
@@ -2299,6 +2352,7 @@ def _write_run_outputs(
     *,
     output_dir: Path,
     min_combo_count: int,
+    include_row_exports: bool,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     result.quote_quality_rows = _quote_quality_summary_rows(result.canonical_rows)
@@ -2313,7 +2367,6 @@ def _write_run_outputs(
 
     artifacts: dict[str, str] = {}
     files_to_write = {
-        "canonical_rows.csv": result.canonical_rows,
         "model_totals.csv": model_totals,
         "bucket_summary.csv": bucket_rows,
         "side_bucket_summary.csv": side_bucket_rows,
@@ -2321,6 +2374,8 @@ def _write_run_outputs(
         "combo_summary.csv": combo_rows,
         "timeline_summary.csv": timeline_rows,
     }
+    if include_row_exports:
+        files_to_write["canonical_rows.csv"] = result.canonical_rows
     optional_files = {
         "skip_reason_summary.csv": result.skip_reason_rows,
         "prediction_metrics.csv": result.prediction_metrics_rows,
@@ -2328,9 +2383,10 @@ def _write_run_outputs(
         "calibration_summary.csv": result.calibration_summary_rows,
         "quote_quality_summary.csv": result.quote_quality_rows,
         "thesis_summary.csv": result.thesis_summary_rows,
-        "execution_rows.csv": result.execution_rows,
         "execution_quality_summary.csv": result.execution_quality_rows,
     }
+    if include_row_exports:
+        optional_files["execution_rows.csv"] = result.execution_rows
     for filename, rows in files_to_write.items():
         path = output_dir / filename
         _write_csv(path, rows)
@@ -2372,11 +2428,26 @@ def _write_run_outputs(
     return artifacts
 
 
-def _load_target(target: AnalysisTarget, environment: str | None = None) -> SourceLoadResult:
+def _load_target(
+    target: AnalysisTarget,
+    environment: str | None = None,
+    *,
+    lookback_days: int | None = None,
+    include_archive: bool = True,
+) -> SourceLoadResult:
     if target.source_type == "live_execution":
-        return _load_live_execution_run(target.run_dir, environment=environment)
+        return _load_live_execution_run(
+            target.run_dir,
+            environment=environment,
+            lookback_days=lookback_days,
+            include_archive=include_archive,
+        )
     if target.source_type == "live_research":
-        return _load_live_research_run(target.run_dir, environment=environment)
+        return _load_live_research_run(
+            target.run_dir,
+            environment=environment,
+            lookback_days=lookback_days,
+        )
     if target.source_type == "offline_artifacts":
         return _load_offline_artifact_run(target.run_dir)
     raise ValueError(f"Unsupported source type: {target.source_type}")
@@ -2391,6 +2462,8 @@ def generate_kalshi_performance_reports(
     model_filters: tuple[str, ...] = (),
     lookback_days: int | None = None,
     min_combo_count: int = DEFAULT_MIN_COMBO_COUNT,
+    include_archive: bool = True,
+    include_row_exports: bool = True,
 ) -> dict[str, Any]:
     detection = detect_analysis_targets(input_path, mode=mode)
     base_output_dir = (
@@ -2401,13 +2474,23 @@ def generate_kalshi_performance_reports(
     results: list[dict[str, Any]] = []
 
     for target in detection.targets:
-        loaded = _load_target(target, environment=environment)
+        loaded = _load_target(
+            target,
+            environment=environment,
+            lookback_days=lookback_days,
+            include_archive=include_archive,
+        )
         loaded.canonical_rows = _apply_model_filters(loaded.canonical_rows, model_filters)
         loaded.canonical_rows = _filter_by_lookback(loaded.canonical_rows, lookback_days)
         loaded.execution_rows = _apply_model_filters(loaded.execution_rows, model_filters)
         loaded.execution_rows = _filter_by_lookback(loaded.execution_rows, lookback_days)
         output_path = base_output_dir if len(detection.targets) == 1 else base_output_dir / target.run_name
-        artifacts = _write_run_outputs(loaded, output_dir=output_path, min_combo_count=min_combo_count)
+        artifacts = _write_run_outputs(
+            loaded,
+            output_dir=output_path,
+            min_combo_count=min_combo_count,
+            include_row_exports=include_row_exports,
+        )
         results.append(
             {
                 "run_name": target.run_name,
