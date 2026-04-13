@@ -302,6 +302,13 @@ class KalshiExecutionIntentState:
     payout_if_no_dollars: float | None
     expected_value_dollars: float | None
     worst_case_loss_dollars: float | None
+    target_id: str | None = None
+    attempt_index: int | None = None
+    desired_contracts: int | None = None
+    remaining_contracts_before_submit: int | None = None
+    hard_max_price_cents: int | None = None
+    retry_reason: str | None = None
+    was_first_attempt: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +346,13 @@ class KalshiExecutionUpdate:
     payout_if_no_dollars: float | None
     expected_value_dollars: float | None
     worst_case_loss_dollars: float | None
+    target_id: str | None = None
+    attempt_index: int | None = None
+    desired_contracts: int | None = None
+    remaining_contracts_before_submit: int | None = None
+    hard_max_price_cents: int | None = None
+    retry_reason: str | None = None
+    was_first_attempt: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +412,13 @@ def execution_update_from_state(state: KalshiExecutionIntentState) -> KalshiExec
         payout_if_no_dollars=state.payout_if_no_dollars,
         expected_value_dollars=state.expected_value_dollars,
         worst_case_loss_dollars=state.worst_case_loss_dollars,
+        target_id=state.target_id,
+        attempt_index=state.attempt_index,
+        desired_contracts=state.desired_contracts,
+        remaining_contracts_before_submit=state.remaining_contracts_before_submit,
+        hard_max_price_cents=state.hard_max_price_cents,
+        retry_reason=state.retry_reason,
+        was_first_attempt=state.was_first_attempt,
     )
 
 
@@ -913,6 +934,13 @@ class KalshiExecutionEngine:
         *,
         submitted_at: datetime,
     ) -> _LiveSubmissionPolicy:
+        if intent.target_id is not None:
+            return _LiveSubmissionPolicy(
+                time_in_force="immediate_or_cancel",
+                expiration_ts=None,
+                is_probe_order=self._is_probe_order_intent(intent),
+                requires_immediate_match=True,
+            )
         if not self._is_probe_order_intent(intent):
             return _LiveSubmissionPolicy(
                 time_in_force="immediate_or_cancel",
@@ -1293,6 +1321,13 @@ class KalshiExecutionEngine:
             payout_if_no_dollars=execution_intent.payout_if_no_dollars,
             expected_value_dollars=execution_intent.expected_value_dollars,
             worst_case_loss_dollars=execution_intent.worst_case_loss_dollars,
+            target_id=execution_intent.target_id,
+            attempt_index=execution_intent.attempt_index,
+            desired_contracts=execution_intent.desired_contracts,
+            remaining_contracts_before_submit=execution_intent.remaining_contracts_before_submit,
+            hard_max_price_cents=execution_intent.hard_max_price_cents,
+            retry_reason=execution_intent.retry_reason,
+            was_first_attempt=execution_intent.was_first_attempt,
         )
         self._states[execution_intent.decision_id] = claimed_state
         self._client_order_to_decision[execution_intent.decision_id] = execution_intent.decision_id
@@ -1306,6 +1341,13 @@ class KalshiExecutionEngine:
                 "limit_price_cents": execution_intent.max_acceptable_entry_price_cents,
                 "model_limit_price_cents": intent.max_acceptable_entry_price_cents,
                 "execution_limit_adjustment_cents": limit_adjustment_cents,
+                "target_id": execution_intent.target_id,
+                "attempt_index": execution_intent.attempt_index,
+                "desired_contracts": execution_intent.desired_contracts,
+                "remaining_contracts_before_submit": execution_intent.remaining_contracts_before_submit,
+                "hard_max_price_cents": execution_intent.hard_max_price_cents,
+                "retry_reason": execution_intent.retry_reason,
+                "was_first_attempt": execution_intent.was_first_attempt,
             },
         )
         if self.config.mode in {KalshiExecutionMode.PAPER, KalshiExecutionMode.SHADOW} or self._simulation_enabled():
@@ -1491,6 +1533,13 @@ class KalshiExecutionEngine:
                 "model_limit_price_cents": model_intent.max_acceptable_entry_price_cents,
                 "execution_limit_adjustment_cents": limit_adjustment_cents,
                 "reference_price_cents": intent.reference_price_cents,
+                "target_id": intent.target_id,
+                "attempt_index": intent.attempt_index,
+                "desired_contracts": intent.desired_contracts,
+                "remaining_contracts_before_submit": intent.remaining_contracts_before_submit,
+                "hard_max_price_cents": intent.hard_max_price_cents,
+                "retry_reason": intent.retry_reason,
+                "was_first_attempt": intent.was_first_attempt,
                 "subaccount": self.config.subaccount,
                 "is_probe_order": submission_policy.is_probe_order,
                 "time_in_force": submission_policy.time_in_force,
@@ -1586,6 +1635,75 @@ class KalshiExecutionEngine:
             self._states[intent.decision_id] = accepted_state
             await self._publish_state(accepted_state)
             self._request_reconcile()
+
+    async def cancel_live_intent(self, decision_id: str, *, reason: str) -> bool:
+        state = self._states.get(decision_id)
+        if state is None:
+            return False
+        if state.mode is not KalshiExecutionMode.LIVE or self._simulation_enabled():
+            return False
+        if state.status in {"cancelled", "rejected", "error", "filled", "settled"}:
+            return False
+        await self._logger.write(
+            "cancel_requested",
+            {
+                "decision_id": decision_id,
+                "order_id": state.order_id,
+                "ticker": state.ticker,
+                "side": state.side,
+                "reason": reason,
+                "target_id": state.target_id,
+                "attempt_index": state.attempt_index,
+            },
+        )
+        if state.order_id is None:
+            await self._finalize_cancelled(decision_id, reason)
+            return True
+        try:
+            response = await self._call_rest(
+                self._rest_client.cancel_order,
+                state.order_id,
+                subaccount=self.config.subaccount,
+            )
+            await self._logger.write(
+                "cancel_response",
+                {
+                    "decision_id": decision_id,
+                    "order_id": state.order_id,
+                    "reason": reason,
+                    "response": response,
+                },
+            )
+        except httpx.HTTPStatusError as exc:
+            await self._logger.write(
+                "cancel_error",
+                {
+                    "decision_id": decision_id,
+                    "order_id": state.order_id,
+                    "status_code": exc.response.status_code,
+                    "response": exc.response.text,
+                    "reason": reason,
+                },
+            )
+            return False
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            await self._logger.write(
+                "cancel_error",
+                {
+                    "decision_id": decision_id,
+                    "order_id": state.order_id,
+                    "error": repr(exc),
+                    "reason": reason,
+                },
+            )
+            return False
+
+        order_payload = response.get("order")
+        if isinstance(order_payload, dict) and order_payload:
+            await self._apply_order_record(parse_live_order_record(order_payload), allow_signal_feedback=True)
+        else:
+            await self._finalize_cancelled(decision_id, reason)
+        return True
 
     async def _reconcile_or_retry(self, intent: KalshiTradeIntent, *, reason: str) -> bool:
         await self._ensure_signal_accepted(intent.decision_id)

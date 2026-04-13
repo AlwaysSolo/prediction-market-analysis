@@ -287,6 +287,13 @@ class KalshiTradeIntent:
     payout_if_no_dollars: float | None = None
     expected_value_dollars: float | None = None
     worst_case_loss_dollars: float | None = None
+    target_id: str | None = None
+    attempt_index: int | None = None
+    desired_contracts: int | None = None
+    remaining_contracts_before_submit: int | None = None
+    hard_max_price_cents: int | None = None
+    retry_reason: str | None = None
+    was_first_attempt: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -893,8 +900,18 @@ class KalshiSignalRiskEngine:
         payout_if_no_dollars: float | None = None,
         expected_value_dollars: float | None = None,
         worst_case_loss_dollars: float | None = None,
+        allow_unapproved_retry: bool = False,
+        ignore_post_cost_edge_threshold: bool = False,
+        max_acceptable_entry_price_cents_override: int | None = None,
+        target_id: str | None = None,
+        attempt_index: int | None = None,
+        desired_contracts: int | None = None,
+        remaining_contracts_before_submit: int | None = None,
+        hard_max_price_cents: int | None = None,
+        retry_reason: str | None = None,
+        was_first_attempt: bool | None = None,
     ) -> KalshiTradeIntent | None:
-        if not decision_state.approved or decision_state.side is None:
+        if not allow_unapproved_retry and (not decision_state.approved or decision_state.side is None):
             return None
         normalized_side = side.upper()
         if normalized_side not in {"YES", "NO"}:
@@ -917,11 +934,15 @@ class KalshiSignalRiskEngine:
         if resolved_contracts is None or resolved_contracts <= 0:
             return None
 
-        max_acceptable_entry_price_cents = find_max_acceptable_entry_price_cents(
-            side=normalized_side,
-            predicted_yes_probability=decision_state.predicted_yes_probability,
-            config=self.config,
-            contracts=resolved_contracts,
+        max_acceptable_entry_price_cents = (
+            max_acceptable_entry_price_cents_override
+            if max_acceptable_entry_price_cents_override is not None
+            else find_max_acceptable_entry_price_cents(
+                side=normalized_side,
+                predicted_yes_probability=decision_state.predicted_yes_probability,
+                config=self.config,
+                contracts=resolved_contracts,
+            )
         )
         post_cost_edge, entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_cost_metrics(
             side=normalized_side,
@@ -933,7 +954,10 @@ class KalshiSignalRiskEngine:
         if (
             max_acceptable_entry_price_cents is None
             or entry_price_cents > max_acceptable_entry_price_cents
-            or post_cost_edge + 1e-12 < self.config.edge_threshold
+            or (
+                not ignore_post_cost_edge_threshold
+                and post_cost_edge + 1e-12 < self.config.edge_threshold
+            )
         ):
             return None
         if cash_budget_dollars is not None and cash_required_dollars > cash_budget_dollars + 1e-12:
@@ -1007,6 +1031,15 @@ class KalshiSignalRiskEngine:
             payout_if_no_dollars=payout_if_no_dollars,
             expected_value_dollars=expected_value_dollars,
             worst_case_loss_dollars=worst_case_loss_dollars,
+            target_id=target_id,
+            attempt_index=attempt_index,
+            desired_contracts=desired_contracts,
+            remaining_contracts_before_submit=remaining_contracts_before_submit,
+            hard_max_price_cents=(
+                max_acceptable_entry_price_cents if hard_max_price_cents is None else hard_max_price_cents
+            ),
+            retry_reason=retry_reason,
+            was_first_attempt=was_first_attempt,
         )
 
     async def apply_portfolio_snapshot(self, snapshot: KalshiPortfolioSnapshot) -> None:
@@ -1692,31 +1725,76 @@ class KalshiSignalRiskEngine:
         )
 
     def _quote_rejection_reason(self, score_state: KalshiLightGBMScoreState) -> str | None:
-        if (
-            score_state.yes_bid_cents is None
-            or score_state.yes_ask_cents is None
-            or score_state.buy_yes_price_cents is None
-            or score_state.buy_no_price_cents is None
-        ):
-            return "missing_quote"
-        if score_state.yes_bid_cents >= score_state.yes_ask_cents:
-            return "crossed_quote"
-        tolerance_cents = self.config.quote_consistency_tolerance_cents
-        if (
-            score_state.no_ask_cents is not None
-            and abs((score_state.yes_bid_cents + score_state.no_ask_cents) - 100) > tolerance_cents
-        ):
-            return "inconsistent_quote"
-        if (
-            score_state.no_bid_cents is not None
-            and abs((score_state.yes_ask_cents + score_state.no_bid_cents) - 100) > tolerance_cents
-        ):
-            return "inconsistent_quote"
         if score_state.quote_age_seconds is None:
             return "missing_quote"
         if score_state.quote_age_seconds > self.config.quote_max_age_seconds:
             return "stale_quote"
+        if (
+            score_state.yes_bid_cents is not None
+            and score_state.yes_ask_cents is not None
+            and score_state.yes_bid_cents >= score_state.yes_ask_cents
+            and (score_state.no_bid_cents is None or score_state.no_ask_cents is None)
+        ):
+            return "crossed_quote"
+        if (
+            score_state.no_bid_cents is not None
+            and score_state.no_ask_cents is not None
+            and score_state.no_bid_cents >= score_state.no_ask_cents
+            and (score_state.yes_bid_cents is None or score_state.yes_ask_cents is None)
+        ):
+            return "crossed_quote"
+        usable_yes_quote = self._side_has_usable_quote(score_state, side="YES")
+        usable_no_quote = self._side_has_usable_quote(score_state, side="NO")
+        if not usable_yes_quote and not usable_no_quote:
+            if (
+                score_state.yes_bid_cents is not None
+                and score_state.yes_ask_cents is not None
+                and score_state.yes_bid_cents >= score_state.yes_ask_cents
+            ):
+                return "crossed_quote"
+            if (
+                score_state.no_bid_cents is not None
+                and score_state.no_ask_cents is not None
+                and score_state.no_bid_cents >= score_state.no_ask_cents
+            ):
+                return "crossed_quote"
+            return "missing_quote"
+        tolerance_cents = self.config.quote_consistency_tolerance_cents
+        if (
+            score_state.yes_bid_cents is not None
+            and score_state.no_ask_cents is not None
+            and abs((score_state.yes_bid_cents + score_state.no_ask_cents) - 100) > tolerance_cents
+        ):
+            return "inconsistent_quote"
+        if (
+            score_state.yes_ask_cents is not None
+            and score_state.no_bid_cents is not None
+            and abs((score_state.yes_ask_cents + score_state.no_bid_cents) - 100) > tolerance_cents
+        ):
+            return "inconsistent_quote"
         return None
+
+    def _side_has_usable_quote(self, score_state: KalshiLightGBMScoreState, *, side: str) -> bool:
+        normalized_side = side.upper()
+        if normalized_side == "YES":
+            if score_state.buy_yes_price_cents is None:
+                return False
+            if (
+                score_state.yes_bid_cents is not None
+                and score_state.yes_ask_cents is not None
+                and score_state.yes_bid_cents >= score_state.yes_ask_cents
+            ):
+                return False
+            return True
+        if score_state.buy_no_price_cents is None:
+            return False
+        if (
+            score_state.no_bid_cents is not None
+            and score_state.no_ask_cents is not None
+            and score_state.no_bid_cents >= score_state.no_ask_cents
+        ):
+            return False
+        return True
 
     def _evaluate_side_candidate(
         self,
@@ -1725,6 +1803,8 @@ class KalshiSignalRiskEngine:
         side: str,
         entry_price_cents: int,
     ) -> _SideEvaluation | None:
+        if not self._side_has_usable_quote(score_state, side=side):
+            return None
         if entry_price_cents < self.config.price_band_min_cents or entry_price_cents > self.config.price_band_max_cents:
             return None
         contracts = self._resolve_contracts(

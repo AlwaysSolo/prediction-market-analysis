@@ -88,6 +88,7 @@ class SourceLoadResult:
     thesis_summary_rows: list[dict[str, Any]] = field(default_factory=list)
     execution_rows: list[dict[str, Any]] = field(default_factory=list)
     execution_quality_rows: list[dict[str, Any]] = field(default_factory=list)
+    target_execution_rows: list[dict[str, Any]] = field(default_factory=list)
     metadata_extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -438,6 +439,20 @@ def _execution_limit_gap_bucket(limit_gap_cents: int | None) -> str:
     if limit_gap_cents <= 10:
         return "6-10"
     return "10+"
+
+
+def _is_closed_no_fill_row(row: dict[str, Any]) -> bool:
+    outcome = _clean_string(row.get("execution_outcome")) or ""
+    return outcome in {"cancelled_zero_fill", "submit_rejected", "exchange_rejected", "submit_error"}
+
+
+def _is_true_open_position_row(row: dict[str, Any]) -> bool:
+    if row.get("status") == "settled":
+        return False
+    outcome = _clean_string(row.get("execution_outcome"))
+    if outcome is None:
+        return True
+    return outcome in {"filled", "cancelled_partial_fill", "submitted_open", "unknown", "executed_no_fill"}
 
 
 def _sorted_skip_reason_items(
@@ -954,6 +969,10 @@ def _load_live_execution_run(
             "model": model,
             "ticker": _clean_string((settled_payload or {}).get("ticker")) or _clean_string((latest_exec_payload or {}).get("ticker")) or _clean_string(context_payload.get("ticker")),
             "decision_id": decision_id,
+            "target_id": _clean_string((settled_payload or {}).get("target_id"))
+            or _clean_string((latest_exec_payload or {}).get("target_id"))
+            or _clean_string((submit_request or ("", {}))[1].get("target_id"))
+            or _clean_string(context_payload.get("target_id")),
             "thesis_id": thesis_id,
             "sample_id": None,
             "side": side,
@@ -1028,6 +1047,47 @@ def _load_live_execution_run(
             "tranche_reason": _clean_string((settled_payload or {}).get("tranche_reason"))
             or _clean_string((latest_exec_payload or {}).get("tranche_reason"))
             or _clean_string(context_payload.get("tranche_reason")),
+            "attempt_index": _safe_int((settled_payload or {}).get("attempt_index"))
+            if (settled_payload or {}).get("attempt_index") is not None
+            else _safe_int((latest_exec_payload or {}).get("attempt_index"))
+            if (latest_exec_payload or {}).get("attempt_index") is not None
+            else _safe_int((submit_request or ("", {}))[1].get("attempt_index"))
+            if (submit_request or ("", {}))[1].get("attempt_index") is not None
+            else _safe_int(context_payload.get("attempt_index")),
+            "desired_contracts": _safe_int((settled_payload or {}).get("desired_contracts"))
+            if (settled_payload or {}).get("desired_contracts") is not None
+            else _safe_int((latest_exec_payload or {}).get("desired_contracts"))
+            if (latest_exec_payload or {}).get("desired_contracts") is not None
+            else _safe_int((submit_request or ("", {}))[1].get("desired_contracts"))
+            if (submit_request or ("", {}))[1].get("desired_contracts") is not None
+            else _safe_int(context_payload.get("desired_contracts")),
+            "remaining_contracts_before_submit": _safe_int((settled_payload or {}).get("remaining_contracts_before_submit"))
+            if (settled_payload or {}).get("remaining_contracts_before_submit") is not None
+            else _safe_int((latest_exec_payload or {}).get("remaining_contracts_before_submit"))
+            if (latest_exec_payload or {}).get("remaining_contracts_before_submit") is not None
+            else _safe_int((submit_request or ("", {}))[1].get("remaining_contracts_before_submit"))
+            if (submit_request or ("", {}))[1].get("remaining_contracts_before_submit") is not None
+            else _safe_int(context_payload.get("remaining_contracts_before_submit")),
+            "hard_max_price_cents": _safe_int((settled_payload or {}).get("hard_max_price_cents"))
+            if (settled_payload or {}).get("hard_max_price_cents") is not None
+            else _safe_int((latest_exec_payload or {}).get("hard_max_price_cents"))
+            if (latest_exec_payload or {}).get("hard_max_price_cents") is not None
+            else _safe_int((submit_request or ("", {}))[1].get("hard_max_price_cents"))
+            if (submit_request or ("", {}))[1].get("hard_max_price_cents") is not None
+            else _safe_int(context_payload.get("hard_max_price_cents")),
+            "retry_reason": _clean_string((settled_payload or {}).get("retry_reason"))
+            or _clean_string((latest_exec_payload or {}).get("retry_reason"))
+            or _clean_string((submit_request or ("", {}))[1].get("retry_reason"))
+            or _clean_string(context_payload.get("retry_reason")),
+            "was_first_attempt": (
+                (settled_payload or {}).get("was_first_attempt")
+                if (settled_payload or {}).get("was_first_attempt") is not None
+                else (latest_exec_payload or {}).get("was_first_attempt")
+                if (latest_exec_payload or {}).get("was_first_attempt") is not None
+                else (submit_request or ("", {}))[1].get("was_first_attempt")
+                if (submit_request or ("", {}))[1].get("was_first_attempt") is not None
+                else context_payload.get("was_first_attempt")
+            ),
             "lifecycle_state": _clean_string((settled_payload or {}).get("lifecycle_state"))
             or _clean_string((latest_exec_payload or {}).get("lifecycle_state"))
             or _clean_string(context_payload.get("lifecycle_state")),
@@ -1071,7 +1131,12 @@ def _load_live_execution_run(
         | set(submit_errors.keys())
         | set(live_order_updates.keys())
     )
-    missing_approval_keys = sorted(key for key in execution_keys if key not in approvals)
+    execution_row_keys = {
+        (_clean_string(row.get("model")) or "unknown", _clean_string(row.get("decision_id")) or "")
+        for row in execution_rows
+        if _clean_string(row.get("decision_id")) is not None
+    }
+    missing_approval_keys = sorted(key for key in execution_keys if key not in execution_row_keys)
     for model, decision_id in missing_approval_keys:
         submit_request = submit_requests.get((model, decision_id))
         submit_error = submit_errors.get((model, decision_id))
@@ -1106,6 +1171,7 @@ def _load_live_execution_run(
             "model": model,
             "ticker": _clean_string((order_snapshot or {}).get("ticker")) or _clean_string((submit_request or ("", {}))[1].get("ticker")),
             "decision_id": decision_id,
+            "target_id": _clean_string((submit_request or ("", {}))[1].get("target_id")),
             "thesis_id": None,
             "sample_id": None,
             "side": side,
@@ -1172,6 +1238,12 @@ def _load_live_execution_run(
             "tranche_index": None,
             "tranche_window": None,
             "tranche_reason": None,
+            "attempt_index": _safe_int((submit_request or ("", {}))[1].get("attempt_index")),
+            "desired_contracts": _safe_int((submit_request or ("", {}))[1].get("desired_contracts")),
+            "remaining_contracts_before_submit": _safe_int((submit_request or ("", {}))[1].get("remaining_contracts_before_submit")),
+            "hard_max_price_cents": _safe_int((submit_request or ("", {}))[1].get("hard_max_price_cents")),
+            "retry_reason": _clean_string((submit_request or ("", {}))[1].get("retry_reason")),
+            "was_first_attempt": (submit_request or ("", {}))[1].get("was_first_attempt"),
             "lifecycle_state": None,
             "total_thesis_budget_dollars": None,
             "payout_if_yes_dollars": None,
@@ -1218,6 +1290,7 @@ def _load_live_execution_run(
     quote_quality_rows = _quote_quality_summary_rows(canonical_rows)
     thesis_summary_rows = _thesis_summary_rows(canonical_rows)
     execution_quality_rows = _execution_quality_summary_rows(execution_rows)
+    target_execution_rows = _target_execution_summary_rows(execution_rows)
     return SourceLoadResult(
         source_type="live_execution",
         run_dir=run_dir,
@@ -1230,6 +1303,7 @@ def _load_live_execution_run(
         thesis_summary_rows=thesis_summary_rows,
         execution_rows=execution_rows,
         execution_quality_rows=execution_quality_rows,
+        target_execution_rows=target_execution_rows,
         metadata_extras=metadata_extras,
     )
 
@@ -1752,6 +1826,9 @@ def _execution_quality_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str
         rejected_rows = [row for row in group if row.get("execution_outcome") in {"submit_rejected", "exchange_rejected"}]
         error_rows = [row for row in group if row.get("execution_outcome") == "submit_error"]
         open_rows = [row for row in group if row.get("execution_outcome") in {"submitted_open", "unknown", "executed_no_fill"}]
+        attempted_contract_values = [_safe_int(row.get("requested_contracts")) for row in group]
+        filled_contract_values = [_safe_int(row.get("filled_contracts")) for row in filled_rows]
+        zero_fill_contract_values = [_safe_int(row.get("requested_contracts")) for row in zero_fill_cancel_rows]
         gap_values = [_safe_int(row.get("limit_gap_cents")) for row in group]
         slippage_values = [_safe_int(row.get("slippage_cents")) for row in filled_rows]
         fill_price_values = [_safe_int(row.get("fill_price_cents")) for row in filled_rows]
@@ -1768,6 +1845,11 @@ def _execution_quality_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str
                 "rejected_count": len(rejected_rows),
                 "error_count": len(error_rows),
                 "open_count": len(open_rows),
+                "attempted_contract_volume": sum(value for value in attempted_contract_values if value is not None),
+                "filled_contract_volume": sum(value for value in filled_contract_values if value is not None),
+                "zero_fill_cancel_contract_volume": sum(
+                    value for value in zero_fill_contract_values if value is not None
+                ),
                 "fill_rate": None if attempted == 0 else len(filled_rows) / attempted,
                 "zero_fill_cancel_rate": None if attempted == 0 else len(zero_fill_cancel_rows) / attempted,
                 "rejected_rate": None if attempted == 0 else len(rejected_rows) / attempted,
@@ -1788,6 +1870,85 @@ def _execution_quality_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str
     return summaries
 
 
+def _target_execution_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        target_id = _clean_string(row.get("target_id"))
+        if target_id is None:
+            continue
+        model = _clean_string(row.get("model")) or "unknown"
+        grouped[(model, target_id)].append(row)
+
+    summaries: list[dict[str, Any]] = []
+    for (model, target_id), group in sorted(grouped.items()):
+        attempts = sorted(
+            group,
+            key=lambda row: (
+                _safe_int(row.get("attempt_index")) if _safe_int(row.get("attempt_index")) is not None else 10**9,
+                _parse_timestamp(row.get("submitted_at")) or _parse_timestamp(row.get("recorded_at")) or datetime.max.replace(tzinfo=UTC),
+                _clean_string(row.get("decision_id")) or "",
+            ),
+        )
+        first_attempt = attempts[0]
+        desired_contract_values = [_safe_int(row.get("desired_contracts")) for row in attempts]
+        desired_contracts = max((value for value in desired_contract_values if value is not None), default=None)
+        attempted_contract_values = [_safe_int(row.get("requested_contracts")) for row in attempts]
+        filled_contract_values = [_safe_int(row.get("filled_contracts")) for row in attempts]
+        attempted_contract_volume = sum(value for value in attempted_contract_values if value is not None)
+        filled_contract_volume = sum(value for value in filled_contract_values if value is not None)
+        first_attempt_filled = (_safe_int(first_attempt.get("filled_contracts")) or 0) > 0
+        retry_attempt_count = max(0, len(attempts) - 1)
+        retry_filled = any((_safe_int(row.get("filled_contracts")) or 0) > 0 for row in attempts[1:])
+        target_filled = (
+            filled_contract_volume > 0
+            if desired_contracts is None
+            else filled_contract_volume >= desired_contracts
+        )
+        has_open_attempt = any(
+            row.get("execution_outcome") in {"submitted_open", "unknown", "executed_no_fill"}
+            for row in attempts
+        )
+        status = "filled" if target_filled else "open" if has_open_attempt else "unfilled"
+        summaries.append(
+            {
+                "model": model,
+                "target_id": target_id,
+                "thesis_id": _clean_string(first_attempt.get("thesis_id")),
+                "ticker": _clean_string(first_attempt.get("ticker")),
+                "side": _clean_string(first_attempt.get("side")) or "unknown",
+                "tranche_window": _clean_string(first_attempt.get("tranche_window")) or "unknown",
+                "desired_contracts": desired_contracts,
+                "filled_contracts": filled_contract_volume,
+                "remaining_contracts": None
+                if desired_contracts is None
+                else max(0, desired_contracts - filled_contract_volume),
+                "attempt_count": len(attempts),
+                "retry_attempt_count": retry_attempt_count,
+                "hard_max_price_cents": max(
+                    (_safe_int(row.get("hard_max_price_cents")) for row in attempts if _safe_int(row.get("hard_max_price_cents")) is not None),
+                    default=None,
+                ),
+                "first_attempt_decision_id": _clean_string(first_attempt.get("decision_id")),
+                "first_attempt_filled": first_attempt_filled,
+                "retry_filled": retry_filled,
+                "retry_rescued": target_filled and retry_attempt_count > 0 and not first_attempt_filled,
+                "status": status,
+                "attempted_contract_volume": attempted_contract_volume,
+                "filled_contract_volume": filled_contract_volume,
+                "first_submitted_at": _timestamp_iso(first_attempt.get("submitted_at") or first_attempt.get("recorded_at")),
+                "last_terminal_at": max(
+                    (
+                        _parse_timestamp(row.get("execution_terminal_at"))
+                        or _parse_timestamp(row.get("submitted_at"))
+                        or _parse_timestamp(row.get("recorded_at"))
+                    )
+                    for row in attempts
+                ).isoformat(),
+            }
+        )
+    return summaries
+
+
 def _model_totals_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_model: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -1795,7 +1956,8 @@ def _model_totals_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     totals: list[dict[str, Any]] = []
     for model, model_rows in sorted(by_model.items()):
         settled_rows = [row for row in model_rows if row.get("status") == "settled"]
-        open_rows = [row for row in model_rows if row.get("status") != "settled"]
+        open_rows = [row for row in model_rows if _is_true_open_position_row(row)]
+        closed_no_fill_rows = [row for row in model_rows if _is_closed_no_fill_row(row)]
         wins = sum(1 for row in settled_rows if row.get("is_win") is True)
         net_pnl = sum(_safe_float(row.get("realized_pnl_dollars")) or 0.0 for row in settled_rows)
         totals.append(
@@ -1805,6 +1967,7 @@ def _model_totals_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "recorded_count": len(model_rows),
                 "settled_count": len(settled_rows),
                 "open_count": len(open_rows),
+                "closed_no_fill_count": len(closed_no_fill_rows),
                 "wins": wins if settled_rows else None,
                 "losses": (len(settled_rows) - wins) if settled_rows else None,
                 "win_rate": None if not settled_rows else wins / len(settled_rows),
@@ -2069,6 +2232,7 @@ def _report_markdown(
     total_recorded = sum(_safe_int(row.get("recorded_count")) or 0 for row in model_totals)
     total_settled = sum(_safe_int(row.get("settled_count")) or 0 for row in model_totals)
     total_open = sum(_safe_int(row.get("open_count")) or 0 for row in model_totals)
+    total_closed_no_fill = sum(_safe_int(row.get("closed_no_fill_count")) or 0 for row in model_totals)
     aggregate_pnl = sum(_safe_float(row.get("net_pnl_dollars")) or 0.0 for row in model_totals if _safe_float(row.get("net_pnl_dollars")) is not None)
     profitable_buckets = _top_bucket_rows(bucket_rows, count=6, profitable=True)
     losing_buckets = _top_bucket_rows(bucket_rows, count=6, profitable=False)
@@ -2096,18 +2260,19 @@ def _report_markdown(
         f"- Analyzed path: `{result.run_dir}`",
         f"- Recorded rows: `{total_recorded:,}`",
         f"- Settled rows: `{total_settled:,}`",
-        f"- Open rows: `{total_open:,}`",
+        f"- Open positions: `{total_open:,}`",
+        f"- Closed no-fill rows: `{total_closed_no_fill:,}`",
         f"- Aggregate settled PnL: `{_format_currency(aggregate_pnl)}`",
         "",
         "## Model Totals",
         "",
-        "| Model | Recorded | Settled | Open | Win Rate | Net PnL | Avg PnL |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Model | Recorded | Settled | Open Positions | Closed No-Fill | Win Rate | Net PnL | Avg PnL |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in model_totals:
         lines.append(
             f"| {row['model']} | {_format_number(_safe_int(row.get('recorded_count')), 0)} | {_format_number(_safe_int(row.get('settled_count')), 0)} | "
-            f"{_format_number(_safe_int(row.get('open_count')), 0)} | {_format_pct(_safe_float(row.get('win_rate')))} | "
+            f"{_format_number(_safe_int(row.get('open_count')), 0)} | {_format_number(_safe_int(row.get('closed_no_fill_count')), 0)} | {_format_pct(_safe_float(row.get('win_rate')))} | "
             f"{_format_currency(_safe_float(row.get('net_pnl_dollars')))} | {_format_currency(_safe_float(row.get('avg_pnl_dollars')))} |"
         )
 
@@ -2148,15 +2313,34 @@ def _report_markdown(
         errored_live_orders = sum(
             1 for row in result.execution_rows if row.get("execution_outcome") == "submit_error"
         )
-        lines.append(f"- Live order attempts observed: `{_format_number(attempted_live_orders, 0)}`")
+        attempted_contract_volume = sum(_safe_int(row.get("requested_contracts")) or 0 for row in result.execution_rows)
+        filled_contract_volume = sum(_safe_int(row.get("filled_contracts")) or 0 for row in result.execution_rows)
+        lines.append(f"- Unique live order attempts observed: `{_format_number(attempted_live_orders, 0)}`")
         lines.append(
             f"- Live fill rate: `{_format_pct(None if attempted_live_orders == 0 else filled_live_orders / attempted_live_orders)}`"
         )
         lines.append(
             f"- Zero-fill IOC cancel rate: `{_format_pct(None if attempted_live_orders == 0 else zero_fill_cancels / attempted_live_orders)}`"
         )
+        lines.append(f"- Live contracts requested: `{_format_number(attempted_contract_volume, 0)}`")
+        lines.append(f"- Live contracts filled: `{_format_number(filled_contract_volume, 0)}`")
         lines.append(f"- Live rejected orders: `{_format_number(rejected_live_orders, 0)}`")
         lines.append(f"- Live errored orders: `{_format_number(errored_live_orders, 0)}`")
+    if result.target_execution_rows:
+        target_count = len(result.target_execution_rows)
+        filled_targets = sum(1 for row in result.target_execution_rows if row.get("status") == "filled")
+        open_targets = sum(1 for row in result.target_execution_rows if row.get("status") == "open")
+        retry_rescued_targets = sum(1 for row in result.target_execution_rows if row.get("retry_rescued") is True)
+        avg_attempts_per_target = sum(_safe_int(row.get("attempt_count")) or 0 for row in result.target_execution_rows) / max(1, target_count)
+        first_attempt_fill_rate = sum(1 for row in result.target_execution_rows if row.get("first_attempt_filled") is True) / max(1, target_count)
+        lines.append(f"- Unique live targets observed: `{_format_number(target_count, 0)}`")
+        lines.append(f"- Filled targets: `{_format_number(filled_targets, 0)}`")
+        lines.append(f"- Open targets: `{_format_number(open_targets, 0)}`")
+        lines.append(f"- Avg attempts per target: `{_format_number(avg_attempts_per_target)}`")
+        lines.append(f"- First-attempt target fill rate: `{_format_pct(first_attempt_fill_rate)}`")
+        lines.append(
+            f"- Retry-rescued targets: `{_format_number(retry_rescued_targets, 0)}`"
+        )
 
     if regime_summary_rows:
         lines.extend(["", "## Regime Summary", "", "| Regime | Settled | Win Rate | Net PnL |", "| --- | ---: | ---: | ---: |"])
@@ -2276,8 +2460,8 @@ def _report_markdown(
                 "",
                 "## Execution Quality",
                 "",
-                "| Scope | Dimension | Bucket | Attempted | Filled | Fill Rate | Zero-Fill Cancels | Zero-Fill Cancel Rate | Rejected | Avg Limit Gap | Avg Slippage |",
-                "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Scope | Dimension | Bucket | Attempted | Filled | Fill Rate | Zero-Fill Cancels | Zero-Fill Cancel Rate | Rejected | Attempted Contracts | Filled Contracts | Avg Limit Gap | Avg Slippage |",
+                "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for row in side_rows:
@@ -2285,7 +2469,8 @@ def _report_markdown(
                 f"| {row['scope']} | {row['dimension']} | {row['bucket']} | {_format_number(_safe_int(row.get('attempted_count')), 0)} | "
                 f"{_format_number(_safe_int(row.get('filled_count')), 0)} | {_format_pct(_safe_float(row.get('fill_rate')))} | "
                 f"{_format_number(_safe_int(row.get('zero_fill_cancel_count')), 0)} | {_format_pct(_safe_float(row.get('zero_fill_cancel_rate')))} | "
-                f"{_format_number(_safe_int(row.get('rejected_count')), 0)} | {_format_number(_safe_float(row.get('avg_limit_gap_cents')))} | "
+                f"{_format_number(_safe_int(row.get('rejected_count')), 0)} | {_format_number(_safe_int(row.get('attempted_contract_volume')), 0)} | "
+                f"{_format_number(_safe_int(row.get('filled_contract_volume')), 0)} | {_format_number(_safe_float(row.get('avg_limit_gap_cents')))} | "
                 f"{_format_number(_safe_float(row.get('avg_slippage_cents')))} |"
             )
 
@@ -2320,6 +2505,27 @@ def _report_markdown(
                 f"| {row['dimension']} | {row['bucket']} | {_format_number(_safe_int(row.get('attempted_count')), 0)} | "
                 f"{_format_number(_safe_int(row.get('filled_count')), 0)} | {_format_pct(_safe_float(row.get('fill_rate')))} | "
                 f"{_format_number(_safe_int(row.get('zero_fill_cancel_count')), 0)} | {_format_number(_safe_float(row.get('avg_slippage_cents')))} |"
+            )
+
+    if result.target_execution_rows:
+        lines.extend(
+            [
+                "",
+                "## Target Execution",
+                "",
+                "| Model | Target | Ticker | Window | Side | Desired | Filled | Attempts | Status | First Attempt Filled | Retry Rescued |",
+                "| --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: |",
+            ]
+        )
+        for row in result.target_execution_rows[:30]:
+            target_id = str(row["target_id"])
+            lines.append(
+                f"| {row['model']} | {target_id[:12]} | {row.get('ticker') or 'n/a'} | {row.get('tranche_window') or 'unknown'} | "
+                f"{row.get('side') or 'unknown'} | {_format_number(_safe_int(row.get('desired_contracts')), 0)} | "
+                f"{_format_number(_safe_int(row.get('filled_contracts')), 0)} | {_format_number(_safe_int(row.get('attempt_count')), 0)} | "
+                f"{row.get('status') or 'unknown'} | "
+                f"{'yes' if row.get('first_attempt_filled') is True else 'no'} | "
+                f"{'yes' if row.get('retry_rescued') is True else 'no'} |"
             )
 
     if result.thesis_summary_rows:
@@ -2358,6 +2564,7 @@ def _write_run_outputs(
     result.quote_quality_rows = _quote_quality_summary_rows(result.canonical_rows)
     result.thesis_summary_rows = _thesis_summary_rows(result.canonical_rows)
     result.execution_quality_rows = _execution_quality_summary_rows(result.execution_rows)
+    result.target_execution_rows = _target_execution_summary_rows(result.execution_rows)
     model_totals = result.model_totals_override or _model_totals_from_rows(result.canonical_rows)
     bucket_rows = _bucket_summary_rows(result.canonical_rows)
     side_bucket_rows = _side_bucket_summary_rows(result.canonical_rows)
@@ -2384,6 +2591,7 @@ def _write_run_outputs(
         "quote_quality_summary.csv": result.quote_quality_rows,
         "thesis_summary.csv": result.thesis_summary_rows,
         "execution_quality_summary.csv": result.execution_quality_rows,
+        "target_execution_summary.csv": result.target_execution_rows,
     }
     if include_row_exports:
         optional_files["execution_rows.csv"] = result.execution_rows
@@ -2408,6 +2616,7 @@ def _write_run_outputs(
             "recorded_count": sum(_safe_int(row.get("recorded_count")) or 0 for row in model_totals),
             "settled_count": sum(_safe_int(row.get("settled_count")) or 0 for row in model_totals),
             "open_count": sum(_safe_int(row.get("open_count")) or 0 for row in model_totals),
+            "closed_no_fill_count": sum(_safe_int(row.get("closed_no_fill_count")) or 0 for row in model_totals),
             "aggregate_net_pnl_dollars": sum(_safe_float(row.get("net_pnl_dollars")) or 0.0 for row in model_totals if _safe_float(row.get("net_pnl_dollars")) is not None),
         },
         "metadata_extras": result.metadata_extras,

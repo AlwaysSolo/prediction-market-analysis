@@ -14,6 +14,7 @@ from src.live.kalshi import (
     KalshiExecutionConfig,
     KalshiExecutionEngine,
     KalshiExecutionMode,
+    KalshiExecutionUpdate,
     KalshiLightGBMScoreState,
     KalshiMarketDataCollector,
     KalshiPathDependentBinaryLayeringConfig,
@@ -109,6 +110,119 @@ async def _wait_for_layering_action(queue: asyncio.Queue, action: str, *, timeou
         update = await asyncio.wait_for(queue.get(), timeout=remaining)
         if update.action == action:
             return update
+
+
+async def _wait_for_condition(predicate, *, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        if predicate():
+            return
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for condition")
+        await asyncio.sleep(min(0.01, remaining))
+
+
+async def _noop_private_ws(self) -> None:
+    await self._stop_event.wait()
+
+
+class _LiveRetryRestClient:
+    def __init__(self, *, create_order_results: list[dict] | None = None):
+        self.create_order_results = list(create_order_results or [])
+        self.create_order_calls: list[dict] = []
+        self.orders: dict[str, dict] = {}
+        self.positions: list[dict] = []
+
+    def close(self) -> None:
+        return None
+
+    def create_order(self, payload: dict) -> dict:
+        self.create_order_calls.append(payload)
+        result = self.create_order_results.pop(0)
+        order = result.get("order")
+        if isinstance(order, dict):
+            order["client_order_id"] = payload["client_order_id"]
+            order["ticker"] = payload["ticker"]
+            order["side"] = payload["side"]
+            order["action"] = payload["action"]
+            order["type"] = payload["type"]
+            order["initial_count"] = payload["count"]
+            if payload.get("yes_price") is not None:
+                order["yes_price"] = payload["yes_price"]
+                order["no_price"] = 100 - int(payload["yes_price"])
+            if payload.get("no_price") is not None:
+                order["no_price"] = payload["no_price"]
+                order["yes_price"] = 100 - int(payload["no_price"])
+            self.orders[order["order_id"]] = order
+        return result
+
+    def get_balance(self, *, subaccount: int = 0) -> dict:
+        del subaccount
+        return {"balance": 10000, "portfolio_value": 10000, "updated_ts": 1767225600}
+
+    def get_positions(self, *, subaccount: int = 0) -> list[dict]:
+        del subaccount
+        return list(self.positions)
+
+    def get_orders(self, *_, **__) -> list[dict]:
+        return list(self.orders.values())
+
+    def get_order(self, order_id: str, *, subaccount: int | None = None) -> dict:
+        del subaccount
+        return {"order": self.orders[order_id]}
+
+    def cancel_order(self, order_id: str) -> dict:
+        order = self.orders[order_id]
+        order["status"] = "canceled"
+        return {"order": order, "reduced_by": 0}
+
+    @staticmethod
+    def build_order(
+        payload: dict,
+        *,
+        order_id: str,
+        status: str,
+        fill_count: int,
+        remaining_count: int = 0,
+    ) -> dict:
+        yes_price = payload.get("yes_price")
+        no_price = payload.get("no_price")
+        if yes_price is None and no_price is not None:
+            yes_price = 100 - int(no_price)
+        if no_price is None and yes_price is not None:
+            no_price = 100 - int(yes_price)
+        return {
+            "order_id": order_id,
+            "user_id": "user-1",
+            "client_order_id": payload["client_order_id"],
+            "ticker": payload["ticker"],
+            "side": payload["side"],
+            "action": payload["action"],
+            "type": payload["type"],
+            "status": status,
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "fill_count": fill_count,
+            "remaining_count": remaining_count,
+            "initial_count": payload["count"],
+            "taker_fees_dollars": "0.0100",
+            "maker_fees_dollars": "0.0000",
+            "taker_fill_cost_dollars": "0.5500",
+            "maker_fill_cost_dollars": "0.0000",
+            "created_time": "2026-01-01T12:00:00Z",
+            "last_update_time": "2026-01-01T12:00:01Z",
+        }
+
+
+class _DummyLiveExecutionEngine:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(mode=KalshiExecutionMode.LIVE, simulate_immediate_fills=False)
+        self.queue: asyncio.Queue = asyncio.Queue()
+
+    def subscribe_queue(self, maxsize: int = 0) -> asyncio.Queue:
+        del maxsize
+        return self.queue
 
 
 def test_layering_engine_requires_10m_window_for_thesis_open(tmp_path: Path) -> None:
@@ -464,6 +578,177 @@ def test_layering_engine_opens_probe_even_when_base_signal_size_is_one_contract(
 
         await layering_engine.stop()
         await execution_engine.stop()
+        await signal_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_live_layering_retries_zero_fill_target_until_filled(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    close_time = datetime(2026, 1, 1, 12, 15, tzinfo=UTC)
+    collector._states[ticker] = KalshiTickerState(
+        ticker=ticker,
+        last_yes_price_cents=55,
+        last_trade_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        previous_yes_price_cents=54,
+        close_time=close_time,
+        is_open=True,
+        yes_bid_cents=54,
+        yes_ask_cents=56,
+        ticker_update_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        received_at=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+    )
+    scorer = _LayeringFakeScorer(collector)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            starting_cash_dollars=100.0,
+            contracts_per_order=1,
+            allow_stacking=True,
+            min_tau_minutes=0.0,
+            enable_bucket_ban_policy=False,
+            price_band_min_cents=0,
+            price_band_max_cents=100,
+        ),
+    )
+    layering_engine = KalshiPathDependentBinaryLayeringEngine(signal_engine, log_dir=tmp_path / "layering-live-retry")
+    execution_engine = _DummyLiveExecutionEngine()
+    layering_engine.bind_execution_engine(execution_engine)
+    layering_queue = layering_engine.subscribe_queue()
+    trade_intent_queue = layering_engine.subscribe_trade_intent_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        await layering_engine.start()
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 30, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=0.80,
+                last_yes_price_cents=55,
+                yes_bid_cents=54,
+                yes_ask_cents=56,
+            )
+        )
+
+        target_created = await _wait_for_layering_action(layering_queue, "target_created")
+        opened = await _wait_for_layering_action(layering_queue, "opened")
+        first_intent = await asyncio.wait_for(trade_intent_queue.get(), timeout=1.0)
+        target_attempt = await _wait_for_layering_action(layering_queue, "target_attempt_submitted")
+
+        cancelled_update = KalshiExecutionUpdate(
+            decision_id=first_intent.decision_id,
+            ticker=ticker,
+            side=first_intent.side,
+            contracts=first_intent.contracts,
+            mode=KalshiExecutionMode.LIVE,
+            status="cancelled",
+            event_time=datetime(2026, 1, 1, 12, 5, 31, tzinfo=UTC),
+            reference_price_cents=first_intent.reference_price_cents,
+            limit_price_cents=first_intent.max_acceptable_entry_price_cents,
+            client_order_id=first_intent.decision_id,
+            order_id="order-1",
+            filled_contracts=0,
+            remaining_contracts=0,
+            fill_price_cents=None,
+            entry_cost_dollars=0.0,
+            fees_dollars=0.0,
+            cash_required_dollars=first_intent.estimated_cash_required_dollars,
+            available_cash_dollars=signal_engine.get_portfolio_state().available_cash_dollars,
+            realized_pnl_dollars=None,
+            cumulative_realized_pnl_dollars=None,
+            settlement_result=None,
+            message="cancelled_zero_fill",
+            live_order=None,
+            thesis_id=first_intent.thesis_id,
+            tranche_index=first_intent.tranche_index,
+            tranche_window=first_intent.tranche_window,
+            tranche_reason=first_intent.tranche_reason,
+            lifecycle_state=first_intent.lifecycle_state,
+            total_thesis_budget_dollars=first_intent.total_thesis_budget_dollars,
+            payout_if_yes_dollars=first_intent.payout_if_yes_dollars,
+            payout_if_no_dollars=first_intent.payout_if_no_dollars,
+            expected_value_dollars=first_intent.expected_value_dollars,
+            worst_case_loss_dollars=first_intent.worst_case_loss_dollars,
+            target_id=first_intent.target_id,
+            attempt_index=first_intent.attempt_index,
+            desired_contracts=first_intent.desired_contracts,
+            remaining_contracts_before_submit=first_intent.remaining_contracts_before_submit,
+            hard_max_price_cents=first_intent.hard_max_price_cents,
+            retry_reason=first_intent.retry_reason,
+            was_first_attempt=first_intent.was_first_attempt,
+        )
+        await layering_engine._handle_execution_update(cancelled_update)
+
+        second_intent = await asyncio.wait_for(trade_intent_queue.get(), timeout=1.0)
+
+        filled_update = KalshiExecutionUpdate(
+            decision_id=second_intent.decision_id,
+            ticker=ticker,
+            side=second_intent.side,
+            contracts=second_intent.contracts,
+            mode=KalshiExecutionMode.LIVE,
+            status="filled",
+            event_time=datetime(2026, 1, 1, 12, 5, 32, tzinfo=UTC),
+            reference_price_cents=second_intent.reference_price_cents,
+            limit_price_cents=second_intent.max_acceptable_entry_price_cents,
+            client_order_id=second_intent.decision_id,
+            order_id="order-2",
+            filled_contracts=1,
+            remaining_contracts=0,
+            fill_price_cents=second_intent.max_acceptable_entry_price_cents,
+            entry_cost_dollars=second_intent.estimated_entry_cost_dollars,
+            fees_dollars=second_intent.estimated_fees_dollars,
+            cash_required_dollars=second_intent.estimated_cash_required_dollars,
+            available_cash_dollars=signal_engine.get_portfolio_state().available_cash_dollars,
+            realized_pnl_dollars=None,
+            cumulative_realized_pnl_dollars=None,
+            settlement_result=None,
+            message="order_terminal_fill",
+            live_order=None,
+            thesis_id=second_intent.thesis_id,
+            tranche_index=second_intent.tranche_index,
+            tranche_window=second_intent.tranche_window,
+            tranche_reason=second_intent.tranche_reason,
+            lifecycle_state=second_intent.lifecycle_state,
+            total_thesis_budget_dollars=second_intent.total_thesis_budget_dollars,
+            payout_if_yes_dollars=second_intent.payout_if_yes_dollars,
+            payout_if_no_dollars=second_intent.payout_if_no_dollars,
+            expected_value_dollars=second_intent.expected_value_dollars,
+            worst_case_loss_dollars=second_intent.worst_case_loss_dollars,
+            target_id=second_intent.target_id,
+            attempt_index=second_intent.attempt_index,
+            desired_contracts=second_intent.desired_contracts,
+            remaining_contracts_before_submit=second_intent.remaining_contracts_before_submit,
+            hard_max_price_cents=second_intent.hard_max_price_cents,
+            retry_reason=second_intent.retry_reason,
+            was_first_attempt=second_intent.was_first_attempt,
+        )
+        await layering_engine._handle_execution_update(filled_update)
+
+        ledger = layering_engine.get_active_ledger(ticker)
+        assert ledger is not None
+        tranche = ledger.tranches[0]
+
+        assert opened.decision_window == "10m"
+        assert target_created.target_id is not None
+        assert first_intent.target_id == target_created.target_id
+        assert target_attempt.target_id == target_created.target_id
+        assert first_intent.attempt_index == 1
+        assert first_intent.was_first_attempt is True
+        assert second_intent.target_id == first_intent.target_id
+        assert second_intent.attempt_index == 2
+        assert second_intent.was_first_attempt is False
+        assert second_intent.retry_reason == "execution_cancelled"
+        assert tranche.attempt_count == 2
+        assert tranche.filled_contracts == 1
+        assert tranche.status in {"filled", "settled"}
+
+        await layering_engine.stop()
         await signal_engine.stop()
 
     asyncio.run(run())

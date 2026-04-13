@@ -19,6 +19,7 @@ from src.live.kalshi.signal_risk import (
     KalshiSignalRiskEngine,
     KalshiTradeIntent,
     calculate_cost_metrics,
+    find_max_acceptable_entry_price_cents,
 )
 from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource, TradeIntentCallback
 
@@ -59,7 +60,8 @@ class KalshiPathDependentBinaryLayeringConfig:
 @dataclass(frozen=True)
 class KalshiBinaryTranche:
     thesis_id: str
-    decision_id: str
+    decision_id: str | None
+    target_id: str
     index: int
     side: str
     decision_window: str
@@ -74,6 +76,13 @@ class KalshiBinaryTranche:
     requested_at: datetime
     last_update_time: datetime
     status: str
+    active_decision_id: str | None = None
+    active_order_id: str | None = None
+    hard_max_price_cents: int | None = None
+    window_end_time: datetime | None = None
+    attempt_count: int = 0
+    last_attempt_status: str | None = None
+    last_counted_decision_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,12 @@ class KalshiLayeringDecision:
     total_thesis_budget_dollars: float | None
     lifecycle_state: str | None
     message: str | None = None
+    decision_id: str | None = None
+    target_id: str | None = None
+    desired_contracts: int | None = None
+    remaining_contracts: int | None = None
+    hard_max_price_cents: int | None = None
+    attempt_index: int | None = None
 
 
 class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
@@ -160,6 +175,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         self._ledgers: dict[str, KalshiBinaryThesisLedger] = {}
         self._active_thesis_by_ticker: dict[str, str] = {}
         self._thesis_by_decision_id: dict[str, str] = {}
+        self._target_by_decision_id: dict[str, str] = {}
 
     def bind_execution_engine(self, execution_engine: KalshiExecutionEngine) -> None:
         self._execution_engine = execution_engine
@@ -285,6 +301,392 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             contracts += 1
         return contracts
 
+    def _is_live_target_mode(self) -> bool:
+        if self._execution_engine is None:
+            return False
+        return self._execution_engine.config.mode.value == "live" and not self._execution_engine.config.simulate_immediate_fills
+
+    def _window_end_time(self, *, close_time: datetime, decision_window: str) -> datetime:
+        if decision_window == "10m":
+            return close_time - timedelta(minutes=5)
+        if decision_window == "5m":
+            return close_time - timedelta(minutes=4)
+        if decision_window == "4m":
+            return close_time - timedelta(minutes=3)
+        return close_time
+
+    @staticmethod
+    def _target_remaining_contracts(tranche: KalshiBinaryTranche) -> int:
+        return max(0, tranche.requested_contracts - tranche.filled_contracts)
+
+    @staticmethod
+    def _target_is_terminal(tranche: KalshiBinaryTranche) -> bool:
+        return tranche.status in {"filled", "expired_unfilled", "settled", "closed_with_warning"}
+
+    def _has_active_attempt(self, ledger: KalshiBinaryThesisLedger) -> bool:
+        return any(tranche.active_decision_id is not None for tranche in ledger.tranches)
+
+    def _select_target_to_work(self, ledger: KalshiBinaryThesisLedger) -> KalshiBinaryTranche | None:
+        for tranche in ledger.tranches:
+            if self._target_is_terminal(tranche):
+                continue
+            if self._target_remaining_contracts(tranche) <= 0:
+                continue
+            return tranche
+        return None
+
+    def _target_retry_signature(self, ledger: KalshiBinaryThesisLedger, tranche: KalshiBinaryTranche) -> tuple[str, str, str, str, str]:
+        return (
+            ledger.thesis_id,
+            tranche.decision_window,
+            tranche.side,
+            tranche.decision_reason,
+            tranche.target_id,
+        )
+
+    def _replace_tranche(
+        self,
+        ledger: KalshiBinaryThesisLedger,
+        tranche: KalshiBinaryTranche,
+        replacement: KalshiBinaryTranche,
+        *,
+        event_time: datetime,
+    ) -> KalshiBinaryThesisLedger:
+        tranches = [current if current.target_id != tranche.target_id else replacement for current in ledger.tranches]
+        updated_ledger = replace(ledger, tranches=tuple(tranches), updated_at=event_time)
+        return self._recompute_ledger_metrics(updated_ledger)
+
+    def _current_signal_update(self, ticker: str) -> KalshiSignalDecisionUpdate | None:
+        state = self.signal_engine.get_state(ticker)
+        if state is None:
+            return None
+        return _decision_update_from_state(state)
+
+    def _build_live_target_tranche(
+        self,
+        *,
+        ledger: KalshiBinaryThesisLedger | None,
+        update: KalshiSignalDecisionUpdate,
+        side: str,
+        decision_window: str,
+        decision_reason: str,
+        requested_contracts: int,
+        index: int,
+        total_thesis_budget_dollars: float,
+        payout_if_yes_dollars: float | None = None,
+        payout_if_no_dollars: float | None = None,
+        expected_value_dollars: float | None = None,
+        worst_case_loss_dollars: float | None = None,
+    ) -> KalshiBinaryTranche | None:
+        entry_price_cents = _entry_price_for_side(update, side)
+        if entry_price_cents is None or requested_contracts <= 0:
+            return None
+        hard_max_price_cents = find_max_acceptable_entry_price_cents(
+            side=side,
+            predicted_yes_probability=update.predicted_yes_probability,
+            config=self.signal_engine.config,
+            contracts=requested_contracts,
+        )
+        if hard_max_price_cents is None or entry_price_cents > hard_max_price_cents:
+            return None
+        post_cost_edge, entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_cost_metrics(
+            side=side,
+            predicted_yes_probability=update.predicted_yes_probability,
+            displayed_entry_price_cents=entry_price_cents,
+            contracts=requested_contracts,
+            slippage=self.signal_engine.config.slippage,
+        )
+        if post_cost_edge + 1e-12 < self.signal_engine.config.edge_threshold:
+            return None
+        if ledger is not None and expected_value_dollars is None:
+            projected_payout_yes, projected_payout_no = _apply_tranche_payout(
+                payout_if_yes_dollars=ledger.payout_if_yes_dollars,
+                payout_if_no_dollars=ledger.payout_if_no_dollars,
+                side=side,
+                contracts=requested_contracts,
+                price_cents=entry_price_cents,
+            )
+            payout_if_yes_dollars = projected_payout_yes
+            payout_if_no_dollars = projected_payout_no
+            expected_value_dollars = _expected_value(
+                update.predicted_yes_probability,
+                projected_payout_yes,
+                projected_payout_no,
+            )
+            worst_case_loss_dollars = _worst_case_loss(projected_payout_yes, projected_payout_no)
+        collector_state = self._collector.get_state(update.ticker)
+        close_time = ledger.close_time if ledger is not None else (
+            None if collector_state is None else collector_state.close_time
+        )
+        if close_time is None:
+            return None
+        target_id = uuid.uuid4().hex
+        return KalshiBinaryTranche(
+            thesis_id=ledger.thesis_id if ledger is not None else "",
+            decision_id=None,
+            target_id=target_id,
+            index=index,
+            side=side,
+            decision_window=decision_window,
+            decision_reason=decision_reason,
+            requested_contracts=requested_contracts,
+            filled_contracts=0,
+            entry_price_cents=entry_price_cents,
+            fill_price_cents=None,
+            cash_required_dollars=cash_required_dollars,
+            fees_dollars=fees_dollars,
+            entry_cost_dollars=entry_cost_dollars,
+            requested_at=update.event_time,
+            last_update_time=update.event_time,
+            status="pending",
+            active_decision_id=None,
+            active_order_id=None,
+            hard_max_price_cents=hard_max_price_cents,
+            window_end_time=self._window_end_time(close_time=close_time, decision_window=decision_window),
+            attempt_count=0,
+            last_attempt_status=None,
+            last_counted_decision_id=None,
+        )
+
+    async def _publish_target_lifecycle(
+        self,
+        *,
+        action: str,
+        ledger: KalshiBinaryThesisLedger,
+        tranche: KalshiBinaryTranche,
+        event_time: datetime,
+        message: str | None = None,
+        decision_id: str | None = None,
+    ) -> None:
+        await self._publish_decision(
+            KalshiLayeringDecision(
+                event_time=event_time,
+                ticker=ledger.ticker,
+                thesis_id=ledger.thesis_id,
+                action=action,
+                status="observed",
+                decision_window=tranche.decision_window,
+                side=tranche.side,
+                tranche_index=tranche.index,
+                contracts=tranche.requested_contracts,
+                entry_price_cents=tranche.entry_price_cents,
+                payout_if_yes_dollars=ledger.payout_if_yes_dollars,
+                payout_if_no_dollars=ledger.payout_if_no_dollars,
+                expected_value_dollars=ledger.current_expected_value_dollars,
+                worst_case_loss_dollars=ledger.worst_case_loss_dollars,
+                total_thesis_budget_dollars=ledger.total_thesis_budget_dollars,
+                lifecycle_state=ledger.lifecycle_state,
+                message=message,
+                decision_id=decision_id,
+                target_id=tranche.target_id,
+                desired_contracts=tranche.requested_contracts,
+                remaining_contracts=self._target_remaining_contracts(tranche),
+                hard_max_price_cents=tranche.hard_max_price_cents,
+                attempt_index=tranche.attempt_count,
+            ),
+            ledger=ledger,
+        )
+
+    async def _expire_due_targets(
+        self,
+        ledger: KalshiBinaryThesisLedger,
+        *,
+        event_time: datetime,
+    ) -> KalshiBinaryThesisLedger:
+        updated_ledger = ledger
+        for tranche in list(updated_ledger.tranches):
+            if self._target_is_terminal(tranche):
+                continue
+            if tranche.window_end_time is None or tranche.window_end_time > event_time:
+                continue
+            if self._target_remaining_contracts(tranche) <= 0:
+                continue
+            if tranche.active_decision_id is not None:
+                continue
+            expired_tranche = replace(
+                tranche,
+                status="expired_unfilled",
+                last_update_time=event_time,
+                last_attempt_status=tranche.last_attempt_status or "expired_unfilled",
+            )
+            updated_ledger = self._replace_tranche(updated_ledger, tranche, expired_tranche, event_time=event_time)
+            await self._publish_target_lifecycle(
+                action="target_expired",
+                ledger=updated_ledger,
+                tranche=expired_tranche,
+                event_time=event_time,
+                message="window expired before target was fully filled",
+            )
+        return updated_ledger
+
+    async def _emit_live_target_attempt(
+        self,
+        ledger: KalshiBinaryThesisLedger,
+        tranche: KalshiBinaryTranche,
+        update: KalshiSignalDecisionUpdate,
+        *,
+        retry_reason: str,
+    ) -> KalshiBinaryThesisLedger:
+        remaining_contracts = self._target_remaining_contracts(tranche)
+        if remaining_contracts <= 0 or tranche.hard_max_price_cents is None:
+            return ledger
+        entry_price_cents = _entry_price_for_side(update, tranche.side)
+        if entry_price_cents is None:
+            return ledger
+        if entry_price_cents > tranche.hard_max_price_cents:
+            paused_tranche = replace(
+                tranche,
+                status="paused_price",
+                last_update_time=update.event_time,
+                last_attempt_status="paused_price",
+            )
+            updated_ledger = self._replace_tranche(ledger, tranche, paused_tranche, event_time=update.event_time)
+            await self._publish_target_lifecycle(
+                action="target_paused_price",
+                ledger=updated_ledger,
+                tranche=paused_tranche,
+                event_time=update.event_time,
+                message="live executable ask moved above hard max price",
+            )
+            return updated_ledger
+
+        attempt_index = tranche.attempt_count + 1
+        limit_price_cents = (
+            min(entry_price_cents + 1, tranche.hard_max_price_cents)
+            if tranche.attempt_count == 0
+            else tranche.hard_max_price_cents
+        )
+        intent = self.signal_engine.reserve_manual_trade_intent(
+            decision_state=update,
+            side=tranche.side,
+            entry_price_cents=entry_price_cents,
+            contracts=remaining_contracts,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+            stacking_signature=self._target_retry_signature(ledger, tranche),
+            thesis_id=ledger.thesis_id,
+            tranche_index=tranche.index,
+            tranche_window=tranche.decision_window,
+            tranche_reason=tranche.decision_reason,
+            lifecycle_state=ledger.lifecycle_state,
+            total_thesis_budget_dollars=ledger.total_thesis_budget_dollars,
+            payout_if_yes_dollars=ledger.payout_if_yes_dollars,
+            payout_if_no_dollars=ledger.payout_if_no_dollars,
+            expected_value_dollars=ledger.current_expected_value_dollars,
+            worst_case_loss_dollars=ledger.worst_case_loss_dollars,
+            allow_unapproved_retry=True,
+            ignore_post_cost_edge_threshold=True,
+            max_acceptable_entry_price_cents_override=limit_price_cents,
+            target_id=tranche.target_id,
+            attempt_index=attempt_index,
+            desired_contracts=tranche.requested_contracts,
+            remaining_contracts_before_submit=remaining_contracts,
+            hard_max_price_cents=tranche.hard_max_price_cents,
+            retry_reason=retry_reason,
+            was_first_attempt=(tranche.attempt_count == 0),
+        )
+        if intent is None:
+            return ledger
+
+        next_status = "working"
+        if tranche.status == "paused_price":
+            next_status = "working"
+        updated_tranche = replace(
+            tranche,
+            decision_id=intent.decision_id,
+            active_decision_id=intent.decision_id,
+            active_order_id=None,
+            status=next_status,
+            attempt_count=attempt_index,
+            last_update_time=update.event_time,
+            last_attempt_status="submitted",
+        )
+        updated_ledger = self._replace_tranche(ledger, tranche, updated_tranche, event_time=update.event_time)
+        self._thesis_by_decision_id[intent.decision_id] = ledger.thesis_id
+        self._target_by_decision_id[intent.decision_id] = updated_tranche.target_id
+        if tranche.status == "paused_price":
+            await self._publish_target_lifecycle(
+                action="target_resumed_price",
+                ledger=updated_ledger,
+                tranche=updated_tranche,
+                event_time=update.event_time,
+                message="live executable ask re-entered hard max price range",
+                decision_id=intent.decision_id,
+            )
+        await self._publish_target_lifecycle(
+            action="target_attempt_submitted",
+            ledger=updated_ledger,
+            tranche=updated_tranche,
+            event_time=update.event_time,
+            message=retry_reason,
+            decision_id=intent.decision_id,
+        )
+        await self._emit_trade_intent(intent)
+        return updated_ledger
+
+    async def _maybe_work_live_targets(
+        self,
+        *,
+        ledger: KalshiBinaryThesisLedger,
+        update: KalshiSignalDecisionUpdate | None,
+        trigger: str,
+    ) -> KalshiBinaryThesisLedger:
+        if not self._is_live_target_mode():
+            return ledger
+        working_update = update or self._current_signal_update(ledger.ticker)
+        if working_update is None:
+            return ledger
+
+        updated_ledger = await self._expire_due_targets(ledger, event_time=working_update.event_time)
+        if self._has_active_attempt(updated_ledger):
+            return updated_ledger
+
+        target = self._select_target_to_work(updated_ledger)
+        if target is None:
+            return updated_ledger
+
+        if (
+            working_update.approved
+            and working_update.side is not None
+            and working_update.side != target.side
+            and target.filled_contracts <= 0
+        ):
+            retarget_entry_price_cents = _entry_price_for_side(working_update, working_update.side)
+            retarget_cap_cents = None if retarget_entry_price_cents is None else find_max_acceptable_entry_price_cents(
+                side=working_update.side,
+                predicted_yes_probability=working_update.predicted_yes_probability,
+                config=self.signal_engine.config,
+                contracts=max(1, self._target_remaining_contracts(target)),
+            )
+            if retarget_entry_price_cents is not None and retarget_cap_cents is not None:
+                retargeted_target = replace(
+                    target,
+                    side=working_update.side,
+                    entry_price_cents=retarget_entry_price_cents,
+                    hard_max_price_cents=retarget_cap_cents,
+                    status="pending",
+                    last_update_time=working_update.event_time,
+                    last_attempt_status="retargeted",
+                    active_decision_id=None,
+                    active_order_id=None,
+                )
+                updated_ledger = self._replace_tranche(
+                    updated_ledger,
+                    target,
+                    retargeted_target,
+                    event_time=working_update.event_time,
+                )
+                await self._publish_target_lifecycle(
+                    action="target_retargeted",
+                    ledger=updated_ledger,
+                    tranche=retargeted_target,
+                    event_time=working_update.event_time,
+                    message="approved signal flipped side while target remained unfilled",
+                )
+                target = retargeted_target
+
+        return await self._emit_live_target_attempt(updated_ledger, target, working_update, retry_reason=trigger)
+
     async def _bootstrap_from_signal_snapshot(self) -> None:
         for decision_state in self.signal_engine.snapshot_states().values():
             await self._handle_signal_update(_decision_update_from_state(decision_state))
@@ -326,11 +728,24 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             self._store_ledger(ledger)
 
         if window.window_label is None:
+            if ledger is not None:
+                updated_ledger = await self._maybe_work_live_targets(
+                    ledger=ledger,
+                    update=update,
+                    trigger="signal_update",
+                )
+                self._store_ledger(updated_ledger)
             return
         if ledger is None:
             await self._maybe_open_thesis(update, window)
             return
         if window.window_label in ledger.decision_windows_hit:
+            updated_ledger = await self._maybe_work_live_targets(
+                ledger=ledger,
+                update=update,
+                trigger="signal_update",
+            )
+            self._store_ledger(updated_ledger)
             return
         await self._maybe_add_tranche(ledger, update, window)
 
@@ -415,11 +830,141 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             slippage=self.signal_engine.config.slippage,
         )
         thesis_id = uuid.uuid4().hex
+        probe_budget = total_budget * self._tranche_fraction("10m")
+        probe_contracts = self.signal_engine.resolve_manual_trade_contracts(
+            decision_state=update,
+            side=update.side,
+            entry_price_cents=entry_price_cents,
+            cash_budget_dollars=probe_budget,
+        )
+        if probe_contracts <= 0:
+            await self._publish_decision(
+                KalshiLayeringDecision(
+                    event_time=update.event_time,
+                    ticker=update.ticker,
+                    thesis_id=thesis_id,
+                    action="budget_blocked",
+                    status="blocked",
+                    decision_window="10m",
+                    side=update.side,
+                    tranche_index=0,
+                    contracts=0,
+                    entry_price_cents=entry_price_cents,
+                    payout_if_yes_dollars=None,
+                    payout_if_no_dollars=None,
+                    expected_value_dollars=None,
+                    worst_case_loss_dollars=None,
+                    total_thesis_budget_dollars=total_budget,
+                    lifecycle_state="probe_pending",
+                    message="probe tranche budget could not afford one contract",
+                ),
+                ledger=None,
+            )
+            return
+        if self._is_live_target_mode():
+            live_target = self._build_live_target_tranche(
+                ledger=None,
+                update=update,
+                side=update.side,
+                decision_window="10m",
+                decision_reason="opened",
+                requested_contracts=probe_contracts,
+                index=0,
+                total_thesis_budget_dollars=total_budget,
+            )
+            if live_target is None:
+                await self._publish_decision(
+                    KalshiLayeringDecision(
+                        event_time=update.event_time,
+                        ticker=update.ticker,
+                        thesis_id=thesis_id,
+                        action="budget_blocked",
+                        status="blocked",
+                        decision_window="10m",
+                        side=update.side,
+                        tranche_index=0,
+                        contracts=probe_contracts,
+                        entry_price_cents=entry_price_cents,
+                        payout_if_yes_dollars=None,
+                        payout_if_no_dollars=None,
+                        expected_value_dollars=None,
+                        worst_case_loss_dollars=None,
+                        total_thesis_budget_dollars=total_budget,
+                        lifecycle_state="probe_pending",
+                        message="probe target could not be created under current hard-price rules",
+                    ),
+                    ledger=None,
+                )
+                return
+
+            tranche = replace(live_target, thesis_id=thesis_id)
+            ledger = KalshiBinaryThesisLedger(
+                thesis_id=thesis_id,
+                ticker=update.ticker,
+                close_time=window.close_time,
+                lifecycle_state="probe_pending",
+                initial_signal_side=update.side,
+                latest_signal_side=update.side,
+                latest_predicted_yes_probability=update.predicted_yes_probability,
+                decision_windows_hit=("10m",),
+                total_thesis_budget_dollars=total_budget,
+                remaining_budget_dollars=0.0,
+                tranches=(tranche,),
+                payout_if_yes_dollars=0.0,
+                payout_if_no_dollars=0.0,
+                current_expected_value_dollars=0.0,
+                worst_case_loss_dollars=0.0,
+                next_eligible_decision_window="5m",
+                opened_at=update.event_time,
+                updated_at=update.event_time,
+            )
+            ledger = self._recompute_ledger_metrics(ledger)
+            self._store_ledger(ledger)
+            await self._publish_target_lifecycle(
+                action="target_created",
+                ledger=ledger,
+                tranche=tranche,
+                event_time=update.event_time,
+                message="persistent 10m target created",
+            )
+            await self._publish_decision(
+                KalshiLayeringDecision(
+                    event_time=update.event_time,
+                    ticker=update.ticker,
+                    thesis_id=thesis_id,
+                    action="opened",
+                    status="emitted",
+                    decision_window="10m",
+                    side=tranche.side,
+                    tranche_index=0,
+                    contracts=tranche.requested_contracts,
+                    entry_price_cents=entry_price_cents,
+                    payout_if_yes_dollars=ledger.payout_if_yes_dollars,
+                    payout_if_no_dollars=ledger.payout_if_no_dollars,
+                    expected_value_dollars=ledger.current_expected_value_dollars,
+                    worst_case_loss_dollars=ledger.worst_case_loss_dollars,
+                    total_thesis_budget_dollars=ledger.total_thesis_budget_dollars,
+                    lifecycle_state=ledger.lifecycle_state,
+                    target_id=tranche.target_id,
+                    desired_contracts=tranche.requested_contracts,
+                    remaining_contracts=self._target_remaining_contracts(tranche),
+                    hard_max_price_cents=tranche.hard_max_price_cents,
+                ),
+                ledger=ledger,
+            )
+            updated_ledger = await self._maybe_work_live_targets(
+                ledger=ledger,
+                update=update,
+                trigger="target_created",
+            )
+            self._store_ledger(updated_ledger)
+            return
+
         intent = self.signal_engine.reserve_manual_trade_intent(
             decision_state=update,
             side=update.side,
             entry_price_cents=entry_price_cents,
-            cash_budget_dollars=total_budget * self._tranche_fraction("10m"),
+            cash_budget_dollars=probe_budget,
             allow_ticker_lock_bypass=True,
             ignore_trade_cooldown=True,
             stacking_signature=(thesis_id, "10m", update.side, "opened", None),
@@ -458,6 +1003,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         tranche = KalshiBinaryTranche(
             thesis_id=thesis_id,
             decision_id=intent.decision_id,
+            target_id=uuid.uuid4().hex,
             index=0,
             side=intent.side,
             decision_window="10m",
@@ -691,6 +1237,98 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             )
             return
 
+        if self._is_live_target_mode():
+            live_target = self._build_live_target_tranche(
+                ledger=ledger,
+                update=update,
+                side=update.side,
+                decision_window=next_window,
+                decision_reason=action,
+                requested_contracts=projected_contracts,
+                index=next_index,
+                total_thesis_budget_dollars=ledger.total_thesis_budget_dollars,
+                payout_if_yes_dollars=projected_payout_yes,
+                payout_if_no_dollars=projected_payout_no,
+                expected_value_dollars=projected_ev,
+                worst_case_loss_dollars=projected_worst_case,
+            )
+            if live_target is None:
+                await self._publish_decision(
+                    KalshiLayeringDecision(
+                        event_time=update.event_time,
+                        ticker=update.ticker,
+                        thesis_id=ledger.thesis_id,
+                        action="budget_blocked",
+                        status="blocked",
+                        decision_window=next_window,
+                        side=update.side,
+                        tranche_index=next_index,
+                        contracts=projected_contracts,
+                        entry_price_cents=entry_price_cents,
+                        payout_if_yes_dollars=projected_payout_yes,
+                        payout_if_no_dollars=projected_payout_no,
+                        expected_value_dollars=projected_ev,
+                        worst_case_loss_dollars=projected_worst_case,
+                        total_thesis_budget_dollars=ledger.total_thesis_budget_dollars,
+                        lifecycle_state=ledger.lifecycle_state,
+                        message="persistent tranche target could not be created under current hard-price rules",
+                    ),
+                    ledger=replace(ledger, decision_windows_hit=updated_windows, updated_at=update.event_time),
+                )
+                return
+
+            tranche = replace(live_target, thesis_id=ledger.thesis_id)
+            updated_ledger = replace(
+                ledger,
+                lifecycle_state="max_size_reached" if next_window == WINDOW_ORDER[-1] else "scaling_active",
+                latest_signal_side=update.side,
+                latest_predicted_yes_probability=update.predicted_yes_probability,
+                decision_windows_hit=updated_windows,
+                tranches=tuple([*ledger.tranches, tranche]),
+                updated_at=update.event_time,
+            )
+            updated_ledger = self._recompute_ledger_metrics(updated_ledger)
+            self._store_ledger(updated_ledger)
+            await self._publish_target_lifecycle(
+                action="target_created",
+                ledger=updated_ledger,
+                tranche=tranche,
+                event_time=update.event_time,
+                message=f"persistent {next_window} target created",
+            )
+            await self._publish_decision(
+                KalshiLayeringDecision(
+                    event_time=update.event_time,
+                    ticker=update.ticker,
+                    thesis_id=ledger.thesis_id,
+                    action=action,
+                    status="emitted",
+                    decision_window=next_window,
+                    side=tranche.side,
+                    tranche_index=next_index,
+                    contracts=tranche.requested_contracts,
+                    entry_price_cents=entry_price_cents,
+                    payout_if_yes_dollars=updated_ledger.payout_if_yes_dollars,
+                    payout_if_no_dollars=updated_ledger.payout_if_no_dollars,
+                    expected_value_dollars=updated_ledger.current_expected_value_dollars,
+                    worst_case_loss_dollars=updated_ledger.worst_case_loss_dollars,
+                    total_thesis_budget_dollars=updated_ledger.total_thesis_budget_dollars,
+                    lifecycle_state=updated_ledger.lifecycle_state,
+                    target_id=tranche.target_id,
+                    desired_contracts=tranche.requested_contracts,
+                    remaining_contracts=self._target_remaining_contracts(tranche),
+                    hard_max_price_cents=tranche.hard_max_price_cents,
+                ),
+                ledger=updated_ledger,
+            )
+            updated_ledger = await self._maybe_work_live_targets(
+                ledger=updated_ledger,
+                update=update,
+                trigger="target_created",
+            )
+            self._store_ledger(updated_ledger)
+            return
+
         intent = self.signal_engine.reserve_manual_trade_intent(
             decision_state=update,
             side=update.side,
@@ -738,6 +1376,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         tranche = KalshiBinaryTranche(
             thesis_id=ledger.thesis_id,
             decision_id=intent.decision_id,
+            target_id=uuid.uuid4().hex,
             index=next_index,
             side=intent.side,
             decision_window=next_window,
@@ -797,15 +1436,55 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             return
         tranches = list(ledger.tranches)
         tranche_index = None
+        target_id = self._target_by_decision_id.get(update.decision_id)
         for idx, tranche in enumerate(tranches):
-            if tranche.decision_id != update.decision_id:
+            if target_id is not None and tranche.target_id != target_id:
                 continue
+            if target_id is None and tranche.decision_id != update.decision_id:
+                continue
+            counted_fill_decision_id = tranche.last_counted_decision_id
+            next_filled_contracts = tranche.filled_contracts
+            if (
+                update.filled_contracts > 0
+                and counted_fill_decision_id != update.decision_id
+                and update.status in {"partially_filled", "filled", "cancelled", "settled"}
+            ):
+                next_filled_contracts = min(
+                    tranche.requested_contracts,
+                    tranche.filled_contracts + update.filled_contracts,
+                )
+                counted_fill_decision_id = update.decision_id
+            remaining_contracts = max(0, tranche.requested_contracts - next_filled_contracts)
+            next_status = tranche.status
+            active_decision_id = tranche.active_decision_id
+            active_order_id = tranche.active_order_id
+            if update.status in {"claimed", "accepted", "reconciling"}:
+                next_status = "working"
+                active_decision_id = update.decision_id
+                active_order_id = update.order_id or active_order_id
+            elif update.status == "partially_filled":
+                next_status = "working"
+                active_decision_id = update.decision_id
+                active_order_id = update.order_id or active_order_id
+            elif update.status in {"filled", "settled"}:
+                next_status = "settled" if update.status == "settled" else "filled"
+                active_decision_id = None
+                active_order_id = None
+            elif update.status in {"cancelled", "rejected", "error"}:
+                next_status = "filled" if remaining_contracts == 0 else "pending"
+                active_decision_id = None
+                active_order_id = None
             tranches[idx] = replace(
                 tranche,
-                filled_contracts=update.filled_contracts if update.filled_contracts > 0 else tranche.filled_contracts,
+                decision_id=update.decision_id,
+                filled_contracts=next_filled_contracts,
                 fill_price_cents=update.fill_price_cents or tranche.fill_price_cents,
                 last_update_time=update.event_time,
-                status=update.status,
+                status=next_status,
+                active_decision_id=active_decision_id,
+                active_order_id=update.order_id or active_order_id,
+                last_attempt_status=update.status,
+                last_counted_decision_id=counted_fill_decision_id,
             )
             tranche_index = idx
             break
@@ -821,6 +1500,25 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         )
         updated_ledger = self._recompute_ledger_metrics(updated_ledger)
         self._store_ledger(updated_ledger)
+        updated_tranche = updated_ledger.tranches[tranche_index]
+        if update.status in {"cancelled", "rejected", "error", "filled", "settled"}:
+            await self._publish_target_lifecycle(
+                action="target_attempt_terminal",
+                ledger=updated_ledger,
+                tranche=updated_tranche,
+                event_time=update.event_time,
+                message=update.status,
+                decision_id=update.decision_id,
+            )
+            if updated_tranche.status == "filled" and self._target_remaining_contracts(updated_tranche) <= 0:
+                await self._publish_target_lifecycle(
+                    action="target_completed",
+                    ledger=updated_ledger,
+                    tranche=updated_tranche,
+                    event_time=update.event_time,
+                    message="target fully filled",
+                    decision_id=update.decision_id,
+                )
         await self._publish_decision(
             KalshiLayeringDecision(
                 event_time=update.event_time,
@@ -839,9 +1537,22 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
                 worst_case_loss_dollars=updated_ledger.worst_case_loss_dollars,
                 total_thesis_budget_dollars=updated_ledger.total_thesis_budget_dollars,
                 lifecycle_state=updated_ledger.lifecycle_state,
+                decision_id=update.decision_id,
+                target_id=updated_tranche.target_id,
+                desired_contracts=updated_tranche.requested_contracts,
+                remaining_contracts=self._target_remaining_contracts(updated_tranche),
+                hard_max_price_cents=updated_tranche.hard_max_price_cents,
+                attempt_index=updated_tranche.attempt_count,
             ),
             ledger=updated_ledger,
         )
+        if self._is_live_target_mode():
+            next_ledger = await self._maybe_work_live_targets(
+                ledger=updated_ledger,
+                update=self._current_signal_update(updated_ledger.ticker),
+                trigger=f"execution_{update.status}",
+            )
+            self._store_ledger(next_ledger)
 
     def _window_state(self, update: KalshiSignalDecisionUpdate) -> KalshiLayeringWindowState:
         collector_state = self._collector.get_state(update.ticker)
@@ -873,10 +1584,8 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
         payout_if_no = 0.0
         active_cash_required = 0.0
         for tranche in ledger.tranches:
-            contracts = tranche.requested_contracts
-            if tranche.status in {"rejected", "cancelled"} and tranche.filled_contracts <= 0:
-                contracts = 0
-            elif tranche.status in {"partially_filled", "filled", "settled"} and tranche.filled_contracts > 0:
+            contracts = 0
+            if tranche.filled_contracts > 0:
                 contracts = tranche.filled_contracts
             if contracts <= 0:
                 continue
@@ -907,6 +1616,12 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
 
     def _store_ledger(self, ledger: KalshiBinaryThesisLedger) -> None:
         self._ledgers[ledger.thesis_id] = ledger
+        for tranche in ledger.tranches:
+            if tranche.decision_id is not None:
+                self._thesis_by_decision_id[tranche.decision_id] = ledger.thesis_id
+            if tranche.active_decision_id is not None:
+                self._thesis_by_decision_id[tranche.active_decision_id] = ledger.thesis_id
+                self._target_by_decision_id[tranche.active_decision_id] = tranche.target_id
         if ledger.lifecycle_state in {"held_to_settlement", "closed_with_warning"}:
             self._active_thesis_by_ticker.pop(ledger.ticker, None)
             return
@@ -937,7 +1652,11 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             if self._ledger_is_recoverable(ledger):
                 self._store_ledger(self._recompute_ledger_metrics(ledger))
                 for tranche in ledger.tranches:
-                    self._thesis_by_decision_id[tranche.decision_id] = ledger.thesis_id
+                    if tranche.decision_id is not None:
+                        self._thesis_by_decision_id[tranche.decision_id] = ledger.thesis_id
+                    if tranche.active_decision_id is not None:
+                        self._thesis_by_decision_id[tranche.active_decision_id] = ledger.thesis_id
+                        self._target_by_decision_id[tranche.active_decision_id] = tranche.target_id
                 continue
             warning_ledger = replace(
                 ledger,
@@ -1058,6 +1777,7 @@ def _serialize_ledger(ledger: KalshiBinaryThesisLedger) -> dict[str, Any]:
     for tranche in payload["tranches"]:
         tranche["requested_at"] = tranche["requested_at"].isoformat()
         tranche["last_update_time"] = tranche["last_update_time"].isoformat()
+        tranche["window_end_time"] = None if tranche["window_end_time"] is None else tranche["window_end_time"].isoformat()
     return payload
 
 
@@ -1065,7 +1785,8 @@ def _deserialize_ledger(payload: dict[str, Any]) -> KalshiBinaryThesisLedger:
     tranches = tuple(
         KalshiBinaryTranche(
             thesis_id=str(tranche["thesis_id"]),
-            decision_id=str(tranche["decision_id"]),
+            decision_id=None if tranche.get("decision_id") is None else str(tranche["decision_id"]),
+            target_id=str(tranche.get("target_id") or tranche.get("decision_id") or uuid.uuid4().hex),
             index=int(tranche["index"]),
             side=str(tranche["side"]),
             decision_window=str(tranche["decision_window"]),
@@ -1080,6 +1801,19 @@ def _deserialize_ledger(payload: dict[str, Any]) -> KalshiBinaryThesisLedger:
             requested_at=datetime.fromisoformat(tranche["requested_at"]),
             last_update_time=datetime.fromisoformat(tranche["last_update_time"]),
             status=str(tranche["status"]),
+            active_decision_id=None if tranche.get("active_decision_id") is None else str(tranche["active_decision_id"]),
+            active_order_id=None if tranche.get("active_order_id") is None else str(tranche["active_order_id"]),
+            hard_max_price_cents=(
+                None if tranche.get("hard_max_price_cents") is None else int(tranche["hard_max_price_cents"])
+            ),
+            window_end_time=(
+                None if tranche.get("window_end_time") is None else datetime.fromisoformat(tranche["window_end_time"])
+            ),
+            attempt_count=int(tranche.get("attempt_count", 0)),
+            last_attempt_status=None if tranche.get("last_attempt_status") is None else str(tranche["last_attempt_status"]),
+            last_counted_decision_id=(
+                None if tranche.get("last_counted_decision_id") is None else str(tranche["last_counted_decision_id"])
+            ),
         )
         for tranche in payload.get("tranches", [])
     )

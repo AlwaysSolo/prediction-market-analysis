@@ -931,6 +931,59 @@ def test_signal_risk_blocks_inconsistent_quote(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_signal_risk_allows_valid_no_when_yes_side_is_locked_but_no_quote_is_usable(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scorer = _FakeScorer(
+        collector,
+        {
+            "KXBTC15M-TEST": KalshiLightGBMScoreState(
+                ticker="KXBTC15M-TEST",
+                event_time=event_time,
+                market_prob=0.60,
+                tau_minutes=8.0,
+                predicted_yes_probability=0.20,
+                model_edge=0.40,
+                model_file=Path("fake-model.txt"),
+                last_yes_price_cents=60,
+                last_price_cents=60,
+                yes_bid_cents=60,
+                yes_ask_cents=60,
+                no_bid_cents=39,
+                no_ask_cents=40,
+                ticker_update_time=event_time,
+                trade_yes_prob=0.60,
+                quote_mid_prob=0.60,
+                quote_spread_cents=0,
+                buy_yes_price_cents=60,
+                buy_no_price_cents=40,
+                quote_age_seconds=0.0,
+                last_to_mid_gap=0.0,
+            )
+        },
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            enable_bucket_ban_policy=False,
+            price_band_min_cents=0,
+            price_band_max_cents=100,
+        ),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        await signal_engine.stop()
+
+        assert update.approved is True
+        assert update.side == "NO"
+        assert update.block_reason is None
+
+    asyncio.run(run())
+
+
 def test_signal_risk_rejects_ltp_trap_when_spread_destroys_no_edge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     collector = KalshiMarketDataCollector(_collector_config(tmp_path))
     monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.58))

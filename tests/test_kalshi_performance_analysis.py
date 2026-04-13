@@ -156,6 +156,13 @@ def _make_live_execution_run(base: Path) -> Path:
                     "limit_price_cents": 50,
                     "reference_price_cents": 32,
                     "subaccount": 0,
+                    "target_id": "target-3",
+                    "attempt_index": 1,
+                    "desired_contracts": 1,
+                    "remaining_contracts_before_submit": 1,
+                    "hard_max_price_cents": 52,
+                    "retry_reason": "target_created",
+                    "was_first_attempt": True,
                 },
             },
             {
@@ -196,6 +203,13 @@ def _make_live_execution_run(base: Path) -> Path:
                     "limit_price_cents": 50,
                     "reference_price_cents": 41,
                     "subaccount": 0,
+                    "target_id": "target-4",
+                    "attempt_index": 1,
+                    "desired_contracts": 1,
+                    "remaining_contracts_before_submit": 1,
+                    "hard_max_price_cents": 50,
+                    "retry_reason": "target_created",
+                    "was_first_attempt": True,
                 },
             },
             {
@@ -205,6 +219,53 @@ def _make_live_execution_run(base: Path) -> Path:
                     "decision_id": "dec-4",
                     "status_code": 400,
                     "response": "{\"error\":{\"code\":\"invalid_subaccount_number\",\"message\":\"invalid subaccount number\",\"service\":\"exchange\"}}",
+                },
+            },
+            {
+                "logged_at": "2026-04-01T12:02:06+00:00",
+                "event_type": "submit_requested",
+                "payload": {
+                    "decision_id": "dec-3-retry",
+                    "ticker": "KXBTC15M-TEST3",
+                    "side": "NO",
+                    "contracts": 1,
+                    "limit_price_cents": 52,
+                    "reference_price_cents": 32,
+                    "subaccount": 0,
+                    "target_id": "target-3",
+                    "attempt_index": 2,
+                    "desired_contracts": 1,
+                    "remaining_contracts_before_submit": 1,
+                    "hard_max_price_cents": 52,
+                    "retry_reason": "execution_cancelled",
+                    "was_first_attempt": False,
+                },
+            },
+            {
+                "logged_at": "2026-04-01T12:02:06.100000+00:00",
+                "event_type": "submit_response",
+                "payload": {
+                    "decision_id": "dec-3-retry",
+                    "response": {
+                        "order": {
+                            "order_id": "order-3b",
+                            "client_order_id": "dec-3-retry",
+                            "ticker": "KXBTC15M-TEST3",
+                            "side": "no",
+                            "status": "executed",
+                            "no_price_dollars": "0.5200",
+                            "yes_price_dollars": "0.4800",
+                            "fill_count_fp": "1.00",
+                            "remaining_count_fp": "0.00",
+                            "initial_count_fp": "1.00",
+                            "taker_fees_dollars": "0.010000",
+                            "maker_fees_dollars": "0.000000",
+                            "taker_fill_cost_dollars": "0.520000",
+                            "maker_fill_cost_dollars": "0.000000",
+                            "created_time": "2026-04-01T12:02:06.090000Z",
+                            "last_update_time": "2026-04-01T12:02:06.090000Z",
+                        }
+                    },
                 },
             },
         ],
@@ -423,7 +484,7 @@ def test_generate_kalshi_performance_reports_for_live_execution(tmp_path: Path) 
     assert blocked_row["bucket_policy_dimension"] == "price"
     assert blocked_row["bucket_policy_bucket"] == "30-40"
     execution_df = pd.read_csv(artifacts["execution_rows.csv"])
-    assert set(execution_df["decision_id"]) == {"dec-3", "dec-4"}
+    assert set(execution_df["decision_id"]) == {"dec-3", "dec-3-retry", "dec-4"}
     assert "cancelled_zero_fill" in set(execution_df["execution_outcome"])
     assert "submit_rejected" in set(execution_df["execution_outcome"])
     execution_quality_df = pd.read_csv(artifacts["execution_quality_summary.csv"])
@@ -432,14 +493,28 @@ def test_generate_kalshi_performance_reports_for_live_execution(tmp_path: Path) 
         & (execution_quality_df["dimension"] == "side")
         & (execution_quality_df["bucket"] == "NO")
     ].iloc[0]
-    assert int(side_row["attempted_count"]) == 2
+    assert int(side_row["attempted_count"]) == 3
     assert int(side_row["zero_fill_cancel_count"]) == 1
+    assert int(side_row["attempted_contract_volume"]) == 3
+
+    target_df = pd.read_csv(artifacts["target_execution_summary.csv"])
+    target_row = target_df.loc[target_df["target_id"] == "target-3"].iloc[0]
+    assert int(target_row["attempt_count"]) == 2
+    assert bool(target_row["retry_rescued"]) is True
+    assert int(target_row["filled_contracts"]) == 1
+
+    model_totals_df = pd.read_csv(artifacts["model_totals.csv"])
+    assert int(model_totals_df.iloc[0]["open_count"]) == 0
+    assert int(model_totals_df.iloc[0]["closed_no_fill_count"]) == 2
 
     report_text = Path(artifacts["report.md"]).read_text(encoding="utf-8")
     assert "Model Totals" in report_text
     assert "Skip Reasons" in report_text
     assert "Quote Quality Effects" in report_text
     assert "Execution Quality" in report_text
+    assert "Target Execution" in report_text
+    assert "Open positions" in report_text
+    assert "Closed no-fill rows" in report_text
 
 
 def test_generate_kalshi_performance_reports_for_live_execution_low_cpu_mode(tmp_path: Path) -> None:
@@ -653,6 +728,7 @@ def test_generate_kalshi_performance_reports_for_live_execution_archive_fallback
     )
     artifacts = outputs["runs"][0]["artifacts"]
     execution_df = pd.read_csv(artifacts["execution_rows.csv"])
+    assert len(execution_df) == 1
     row = execution_df.loc[execution_df["decision_id"] == "dec-archive-1"].iloc[0]
     assert row["price_bucket"] == "30-40"
     assert row["tranche_window"] == "10m"
