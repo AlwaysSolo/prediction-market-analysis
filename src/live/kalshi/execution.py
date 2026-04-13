@@ -117,6 +117,7 @@ class KalshiExecutionConfig:
     enable_pre_submit_orderbook_check: bool = True
     skip_rest_orderbook_check_for_immediate_orders: bool = False
     enable_direct_trade_intent_handoff_in_live_mode: bool = False
+    no_probe_immediate_limit_cushion_cents: int = 0
     pre_submit_orderbook_depth: int = 1
     probe_order_time_in_force: str = "good_till_canceled"
     probe_order_ttl_seconds: float = 2.0
@@ -133,6 +134,8 @@ class KalshiExecutionConfig:
             raise ValueError("shadow_fill_latency_seconds must be non-negative")
         if self.pre_submit_orderbook_depth <= 0:
             raise ValueError("pre_submit_orderbook_depth must be positive")
+        if self.no_probe_immediate_limit_cushion_cents < 0:
+            raise ValueError("no_probe_immediate_limit_cushion_cents must be non-negative")
         if self.probe_order_ttl_seconds < 0:
             raise ValueError("probe_order_ttl_seconds must be non-negative")
         if self.reconcile_interval_seconds <= 0:
@@ -169,6 +172,9 @@ class KalshiExecutionConfig:
             ),
             enable_direct_trade_intent_handoff_in_live_mode=_parse_bool(
                 _resolve_env_value(environment, "ENABLE_DIRECT_TRADE_INTENT_HANDOFF_IN_LIVE_MODE") or "false"
+            ),
+            no_probe_immediate_limit_cushion_cents=int(
+                _resolve_env_value(environment, "NO_PROBE_IMMEDIATE_LIMIT_CUSHION_CENTS") or 0
             ),
             pre_submit_orderbook_depth=int(_resolve_env_value(environment, "PRE_SUBMIT_ORDERBOOK_DEPTH") or 1),
             probe_order_time_in_force=_normalize_time_in_force(
@@ -926,19 +932,49 @@ class KalshiExecutionEngine:
             requires_immediate_match=(time_in_force != "good_till_canceled"),
         )
 
+    def _apply_live_limit_adjustments(
+        self,
+        intent: KalshiTradeIntent,
+        *,
+        submission_policy: _LiveSubmissionPolicy,
+    ) -> tuple[KalshiTradeIntent, int]:
+        if (
+            submission_policy.requires_immediate_match
+            and submission_policy.is_probe_order
+            and intent.side.upper() == "NO"
+            and self.config.no_probe_immediate_limit_cushion_cents > 0
+        ):
+            adjusted_limit_cents = min(
+                99,
+                intent.max_acceptable_entry_price_cents + self.config.no_probe_immediate_limit_cushion_cents,
+            )
+            limit_adjustment_cents = max(0, adjusted_limit_cents - intent.max_acceptable_entry_price_cents)
+            if limit_adjustment_cents > 0:
+                return replace(
+                    intent,
+                    max_acceptable_entry_price_cents=adjusted_limit_cents,
+                ), limit_adjustment_cents
+        return intent, 0
+
     def _orderbook_check_log_payload(
         self,
         intent: KalshiTradeIntent,
         result: _LiveOrderbookCheckResult,
         *,
         policy: _LiveSubmissionPolicy | None = None,
+        model_limit_price_cents: int | None = None,
+        execution_limit_adjustment_cents: int = 0,
     ) -> dict[str, Any]:
+        if model_limit_price_cents is None:
+            model_limit_price_cents = intent.max_acceptable_entry_price_cents
         return {
             "decision_id": intent.decision_id,
             "ticker": intent.ticker,
             "side": intent.side,
             "contracts": intent.contracts,
             "limit_price_cents": intent.max_acceptable_entry_price_cents,
+            "model_limit_price_cents": model_limit_price_cents,
+            "execution_limit_adjustment_cents": execution_limit_adjustment_cents,
             "reference_price_cents": intent.reference_price_cents,
             "time_in_force": None if policy is None else policy.time_in_force,
             "expiration_ts": None if policy is None else policy.expiration_ts,
@@ -1202,46 +1238,66 @@ class KalshiExecutionEngine:
             return
         self.signal_engine.claim_trade_intent_reservation(intent)
 
+        execution_intent = intent
+        limit_adjustment_cents = 0
+        if self.config.mode is KalshiExecutionMode.LIVE and not self._simulation_enabled():
+            preview_submission_policy = self._build_live_submission_policy(
+                intent,
+                submitted_at=utc_now(),
+            )
+            execution_intent, limit_adjustment_cents = self._apply_live_limit_adjustments(
+                intent,
+                submission_policy=preview_submission_policy,
+            )
+
         claimed_state = KalshiExecutionIntentState(
-            decision_id=intent.decision_id,
-            ticker=intent.ticker,
-            side=intent.side,
-            contracts=intent.contracts,
+            decision_id=execution_intent.decision_id,
+            ticker=execution_intent.ticker,
+            side=execution_intent.side,
+            contracts=execution_intent.contracts,
             mode=self.config.mode,
             status="claimed",
             event_time=utc_now(),
-            reference_price_cents=intent.reference_price_cents,
-            limit_price_cents=intent.max_acceptable_entry_price_cents,
-            client_order_id=intent.decision_id,
+            reference_price_cents=execution_intent.reference_price_cents,
+            limit_price_cents=execution_intent.max_acceptable_entry_price_cents,
+            client_order_id=execution_intent.decision_id,
             order_id=None,
             filled_contracts=0,
-            remaining_contracts=intent.contracts,
+            remaining_contracts=execution_intent.contracts,
             fill_price_cents=None,
-            entry_cost_dollars=intent.estimated_entry_cost_dollars,
-            fees_dollars=intent.estimated_fees_dollars,
-            cash_required_dollars=intent.estimated_cash_required_dollars,
+            entry_cost_dollars=execution_intent.estimated_entry_cost_dollars,
+            fees_dollars=execution_intent.estimated_fees_dollars,
+            cash_required_dollars=execution_intent.estimated_cash_required_dollars,
             available_cash_dollars=self._current_available_cash_dollars(),
             realized_pnl_dollars=None,
             cumulative_realized_pnl_dollars=None,
             settlement_result=None,
             message=source,
             live_order=None,
-            thesis_id=intent.thesis_id,
-            tranche_index=intent.tranche_index,
-            tranche_window=intent.tranche_window,
-            tranche_reason=intent.tranche_reason,
-            lifecycle_state=intent.lifecycle_state,
-            total_thesis_budget_dollars=intent.total_thesis_budget_dollars,
-            payout_if_yes_dollars=intent.payout_if_yes_dollars,
-            payout_if_no_dollars=intent.payout_if_no_dollars,
-            expected_value_dollars=intent.expected_value_dollars,
-            worst_case_loss_dollars=intent.worst_case_loss_dollars,
+            thesis_id=execution_intent.thesis_id,
+            tranche_index=execution_intent.tranche_index,
+            tranche_window=execution_intent.tranche_window,
+            tranche_reason=execution_intent.tranche_reason,
+            lifecycle_state=execution_intent.lifecycle_state,
+            total_thesis_budget_dollars=execution_intent.total_thesis_budget_dollars,
+            payout_if_yes_dollars=execution_intent.payout_if_yes_dollars,
+            payout_if_no_dollars=execution_intent.payout_if_no_dollars,
+            expected_value_dollars=execution_intent.expected_value_dollars,
+            worst_case_loss_dollars=execution_intent.worst_case_loss_dollars,
         )
-        self._states[intent.decision_id] = claimed_state
-        self._client_order_to_decision[intent.decision_id] = intent.decision_id
+        self._states[execution_intent.decision_id] = claimed_state
+        self._client_order_to_decision[execution_intent.decision_id] = execution_intent.decision_id
         await self._logger.write(
             "intent_claimed",
-            {"decision_id": intent.decision_id, "ticker": intent.ticker, "side": intent.side, "source": source},
+            {
+                "decision_id": execution_intent.decision_id,
+                "ticker": execution_intent.ticker,
+                "side": execution_intent.side,
+                "source": source,
+                "limit_price_cents": execution_intent.max_acceptable_entry_price_cents,
+                "model_limit_price_cents": intent.max_acceptable_entry_price_cents,
+                "execution_limit_adjustment_cents": limit_adjustment_cents,
+            },
         )
         if self.config.mode in {KalshiExecutionMode.PAPER, KalshiExecutionMode.SHADOW} or self._simulation_enabled():
             await self._sync_signal_portfolio_snapshot(
@@ -1251,10 +1307,10 @@ class KalshiExecutionEngine:
         await self._publish_state(claimed_state)
 
         if self.config.mode in {KalshiExecutionMode.PAPER, KalshiExecutionMode.SHADOW} or self._simulation_enabled():
-            await self._execute_simulated_intent(intent)
+            await self._execute_simulated_intent(execution_intent)
             return
 
-        await self._submit_live_intent(intent)
+        await self._submit_live_intent(execution_intent, model_intent=intent)
 
     async def _execute_simulated_intent(self, intent: KalshiTradeIntent) -> None:
         simulation_label = self._simulation_label()
@@ -1372,7 +1428,17 @@ class KalshiExecutionEngine:
     async def _execute_shadow_intent(self, intent: KalshiTradeIntent) -> None:
         await self._execute_simulated_intent(intent)
 
-    async def _submit_live_intent(self, intent: KalshiTradeIntent) -> None:
+    async def _submit_live_intent(
+        self,
+        intent: KalshiTradeIntent,
+        *,
+        model_intent: KalshiTradeIntent | None = None,
+    ) -> None:
+        model_intent = model_intent or intent
+        limit_adjustment_cents = max(
+            0,
+            intent.max_acceptable_entry_price_cents - model_intent.max_acceptable_entry_price_cents,
+        )
         submit_requested_at = utc_now()
         submission_policy = self._build_live_submission_policy(
             intent,
@@ -1387,7 +1453,13 @@ class KalshiExecutionEngine:
             orderbook_check = await self._check_live_orderbook_before_submit(intent)
         await self._logger.write(
             "pre_submit_orderbook_check",
-            self._orderbook_check_log_payload(intent, orderbook_check, policy=submission_policy),
+            self._orderbook_check_log_payload(
+                intent,
+                orderbook_check,
+                policy=submission_policy,
+                model_limit_price_cents=model_intent.max_acceptable_entry_price_cents,
+                execution_limit_adjustment_cents=limit_adjustment_cents,
+            ),
         )
         if submission_policy.requires_immediate_match and not orderbook_check.passed:
             await self._finalize_cancelled(intent.decision_id, orderbook_check.reason or "live_orderbook_blocked")
@@ -1407,6 +1479,8 @@ class KalshiExecutionEngine:
                 "side": intent.side,
                 "contracts": intent.contracts,
                 "limit_price_cents": intent.max_acceptable_entry_price_cents,
+                "model_limit_price_cents": model_intent.max_acceptable_entry_price_cents,
+                "execution_limit_adjustment_cents": limit_adjustment_cents,
                 "reference_price_cents": intent.reference_price_cents,
                 "subaccount": self.config.subaccount,
                 "is_probe_order": submission_policy.is_probe_order,

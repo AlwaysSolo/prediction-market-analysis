@@ -9,6 +9,7 @@ This document explains the live-execution latency reductions that were implement
 1. remove the extra REST `GET orderbook` round trip from the hot path for immediate live orders
 2. remove synchronous JSONL file appends from the event loop by moving them to a background writer
 3. collapse the last queue hop before execution by handing trade intents directly into the execution engine in live mode
+4. add an asymmetric `NO`-probe IOC limit cushion so `NO` opening probes can bid a few cents more aggressively than the model limit
 
 This is a detailed implementation note, not a strategy note. It focuses on what changed in code, why it changed, what behavior now differs in live mode, and what is still intentionally unchanged.
 
@@ -30,6 +31,7 @@ The audit conclusion was that the highest-ROI changes were:
 1. bypass the extra REST orderbook check for immediate live orders
 2. move logging off the event loop
 3. collapse the trade-intent-source -> execution queue handoff in live mode
+4. tune the remaining `NO`-side live miss-rate without loosening all orders globally
 
 The broader multi-stage queue architecture was intentionally left mostly intact because a full redesign would be broader and riskier.
 
@@ -299,6 +301,80 @@ That means the specialized runner now opts into all three fast-path cuts:
 2. background JSONL logging
 3. direct live trade-intent handoff into execution
 
+## Change 4: `NO` IOC Probe Orders Get an Extra Execution Cushion
+
+### Why this was added
+
+After the first three fast-path cuts, the IOC diagnostic run improved a lot overall, but the remaining miss-rate was highly asymmetric:
+
+- `YES` was filling reasonably well
+- `NO` was still missing too often
+
+That pattern suggested the remaining problem was no longer “the whole fire path is too slow.” Instead, it looked more like `NO` probe orders were still too tight relative to live conditions.
+
+Rather than loosening every live order, I added a narrow execution-layer rule:
+
+- `YES` keeps its current behavior
+- `NO` opening probes in immediate-match mode can bid a few cents above the model’s maximum acceptable entry price
+
+This is an execution tuning rule, not a model change. The signal engine still generates the same trade intent. The extra cushion is applied only at execution time.
+
+### What changed
+
+The execution config now has:
+
+- `no_probe_immediate_limit_cushion_cents`
+
+This was added in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:120), validated in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:137), and loaded from environment in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:176).
+
+The actual limit-adjustment logic lives in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:935).
+
+It only applies when all of the following are true:
+
+1. the order is an opening probe
+2. the order requires immediate matching
+3. the side is `NO`
+4. the configured cushion is greater than `0`
+
+If those conditions are met, execution increases the submitted limit price by the configured number of cents, capped at `99`.
+
+### What does not change
+
+This rule does not affect:
+
+- `YES` orders
+- non-probe tranches
+- passive `good_till_canceled` probe orders
+- signal generation
+- model edge calculations
+
+It is intentionally narrow so we can learn whether `NO` fill problems are mostly about aggressiveness without blurring the rest of the strategy.
+
+### Logging and observability
+
+Because this change intentionally allows execution to submit a limit that differs from the model limit, I added explicit diagnostics:
+
+- `model_limit_price_cents`
+- `execution_limit_adjustment_cents`
+
+Those fields are now written into the pre-submit and submit logs in [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:965), [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:1460), and [execution.py](/c:/prediction-market-analysis/src/live/kalshi/execution.py:1482).
+
+That makes the next live run much easier to interpret. We will be able to tell:
+
+- what the model originally allowed
+- how much extra execution cushion was used
+- whether the extra aggressiveness translated into better `NO` fill rate
+
+### Dedicated live runner behavior
+
+The dedicated bagged-lasso live runner now sets:
+
+- `no_probe_immediate_limit_cushion_cents=3`
+
+in [run_kalshi_bagged_lasso_live.py](/c:/prediction-market-analysis/scripts/run_kalshi_bagged_lasso_live.py:137).
+
+I chose `3` cents because the observed live IOC gap was large enough that `+1` would likely be too small to be conclusive, while `+3` is still modest enough to remain an execution test rather than a wholesale strategy rewrite.
+
 ## Logging and Telemetry Improvements
 
 Because the immediate-order fast path can now come from different data sources, I also extended the logged payloads so later analysis can distinguish:
@@ -340,6 +416,12 @@ I also added a direct-handoff execution test in [test_kalshi_execution.py](/c:/p
 2. the source callback path is registered instead
 3. a published trade intent still reaches a filled execution state end to end
 
+I also added asymmetric execution tests for the new `NO`-probe cushion in [test_kalshi_execution.py](/c:/prediction-market-analysis/tests/test_kalshi_execution.py:1285) and [test_kalshi_execution.py](/c:/prediction-market-analysis/tests/test_kalshi_execution.py:1395). Those tests verify:
+
+1. `NO` IOC probe orders get the configured extra submitted limit
+2. the logs expose both the model limit and the execution adjustment
+3. `YES` IOC probe orders remain unchanged even when the cushion config is enabled
+
 ## Validation Performed
 
 I ran:
@@ -351,7 +433,7 @@ pytest tests/test_kalshi_execution.py tests/test_kalshi_signal_risk.py tests/tes
 Result:
 
 ```text
-87 passed
+89 passed
 ```
 
 That gives good coverage around:
@@ -370,6 +452,7 @@ For immediate live orders on the dedicated runner:
 - one REST call has been removed from the critical path
 - file appends no longer block the event loop directly
 - the last source-queue wakeup before execution fire has been removed
+- `NO` opening probes can now submit with a small extra IOC cushion when configured
 
 So the trigger-to-submit path should now spend less time in:
 
@@ -386,6 +469,7 @@ The following behaviors are still intentionally preserved:
 - execution still logs every important step to JSONL
 - execution handling is still serialized for correctness
 - the upstream collector -> feature -> scorer -> signal -> layering stages still remain separate
+- `YES` orders are not loosened by the new `NO`-specific cushion rule
 
 ## Important Limits of These Changes
 
@@ -396,8 +480,9 @@ They do not address:
 1. most of the upstream serialized queue hops across the multi-stage pipeline
 2. REST order entry itself
 3. exchange-side disappearing liquidity
-4. broad live strategy selection quality
+4. the possibility that `NO` still needs a different order style such as short-TTL `GTC`
 5. potential value from a separate FIX-based order-entry stack
+6. broad live strategy selection quality
 
 So if live performance is still unsatisfactory after this, the next likely bottleneck is not “logging is too slow” or “the extra REST book check is too slow.” The next likely bottleneck is the architecture between trigger and submit, or the fact that REST order entry itself is still the transport.
 
@@ -410,6 +495,7 @@ These were the best first moves because they have a strong ratio of benefit to r
 - remove one network round trip from immediate live submit
 - reduce event-loop blocking everywhere that matters
 - remove the last source-queue wakeup before execution fire
+- make the remaining `NO`-side IOC miss-rate testable without loosening all sides and all tranches
 
 ### Low to moderate risk
 
@@ -423,11 +509,12 @@ By contrast, collapsing more of the upstream queue chain or redesigning transpor
 
 ## Summary
 
-I made three concrete latency-oriented changes:
+I made four concrete execution-path changes:
 
 1. immediate live orders can now use feed-based pre-submit checks instead of paying for a fresh REST orderbook call
 2. JSONL event logging now happens through a shared background writer instead of synchronous file appends on the event loop
 3. live execution can now receive trade intents through a direct callback handoff instead of waiting on a trade-intent queue
+4. `NO` opening IOC probes can now add a small execution-only limit cushion
 
 I made these changes because the previous design was correct and debuggable, but too expensive on the hot path for fast live markets.
 
