@@ -20,6 +20,7 @@ from src.live.kalshi import (  # noqa: E402
     KalshiExecutionConfig,
     KalshiExecutionEngine,
     KalshiExecutionMode,
+    KalshiFeatureEngineConfig,
     KalshiFeatureStateEngine,
     KalshiMarketDataCollector,
     KalshiPathDependentBinaryLayeringEngine,
@@ -43,6 +44,8 @@ from scripts.run_kalshi_regularized_execution_engine import (  # noqa: E402
 DEDICATED_LIVE_SIGNAL_PROFILE = "dedicated-v1"
 RESEARCH_PARITY_SIGNAL_PROFILE = "research-parity"
 SIGNAL_PROFILE_CHOICES = (DEDICATED_LIVE_SIGNAL_PROFILE, RESEARCH_PARITY_SIGNAL_PROFILE)
+DEDICATED_LIVE_TARGET_SERIES = "KXBTC15M"
+DEDICATED_LIVE_HOURLY_CONTEXT_SERIES = "KXBTCD"
 
 DEDICATED_LIVE_MAX_TAU_MINUTES = 10.0
 DEDICATED_LIVE_BLOCKED_REGIME_LABELS = frozenset({"neutral"})
@@ -84,6 +87,13 @@ def _build_live_signal_config(
     common_overrides = dict(
         apply_regime_hard_gate=not disable_regime_control,
         enable_bucket_ban_policy=True,
+        enable_low_liquidity_chop_gate=True,
+        low_liquidity_min_trade_count_300s=3.0,
+        low_liquidity_min_contracts_sum_300s=10.0,
+        low_liquidity_min_abs_signed_contracts_sum_300s=3.0,
+        low_liquidity_price_volatility_300s_threshold=0.01,
+        structural_regime_refresh_seconds=30.0,
+        structural_regime_flip_confirmations=2,
         contracts_per_order=1,
         capital_pct_per_order=None,
         kelly_fraction_multiplier=None,
@@ -335,7 +345,7 @@ async def _run(args: argparse.Namespace) -> None:
         environment=environment,
         credentials=credentials,
         log_dir=Path(args.log_root) / "raw",
-        series_tickers=("KXBTC15M",),
+        series_tickers=(DEDICATED_LIVE_TARGET_SERIES, DEDICATED_LIVE_HOURLY_CONTEXT_SERIES),
         market_tickers=tuple(args.ticker),
         metadata_refresh_interval_seconds=args.metadata_refresh_interval_seconds,
     )
@@ -386,7 +396,14 @@ async def _run(args: argparse.Namespace) -> None:
 
     collector = KalshiMarketDataCollector(collector_config)
     preflight_raw_queue = collector.subscribe_raw_stream_queue()
-    feature_engine = KalshiFeatureStateEngine(collector)
+    feature_engine = KalshiFeatureStateEngine(
+        collector,
+        config=KalshiFeatureEngineConfig(
+            publish_series_tickers=(DEDICATED_LIVE_TARGET_SERIES,),
+            hourly_context_target_series_ticker=DEDICATED_LIVE_TARGET_SERIES,
+            hourly_context_series_ticker=DEDICATED_LIVE_HOURLY_CONTEXT_SERIES,
+        ),
+    )
     scorer = KalshiRegularizedLogisticScorer(
         feature_engine,
         KalshiRegularizedLogisticScorerConfig(model_file=model_file),

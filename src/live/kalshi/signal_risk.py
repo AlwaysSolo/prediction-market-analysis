@@ -28,7 +28,11 @@ from src.live.kalshi.bucket_policy import (
 )
 from src.live.kalshi.config import KalshiEnvironment
 from src.live.kalshi.jsonl_logger import JsonlEventLogger
-from src.live.kalshi.regime import KalshiRegimeEvaluation, evaluate_kxbtc15m_regime_for_state
+from src.live.kalshi.regime import (
+    KalshiRegimeEvaluation,
+    evaluate_kxbtc15m_regime_for_state,
+    evaluate_kxbtc15m_structural_regime_for_state,
+)
 from src.live.kalshi.scorer import (
     KalshiLightGBMScorer,
     KalshiLightGBMScoreState,
@@ -66,6 +70,15 @@ def _parse_bool(value: str) -> bool:
     raise ValueError(f"Unsupported boolean value: {value}")
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class KalshiSignalRiskConfig:
     edge_threshold_cents: float = 4.0
@@ -86,6 +99,13 @@ class KalshiSignalRiskConfig:
     price_band_max_cents: int = 80
     quote_max_age_seconds: float = 3.0
     quote_consistency_tolerance_cents: int = 1
+    enable_low_liquidity_chop_gate: bool = False
+    low_liquidity_min_trade_count_300s: float = 3.0
+    low_liquidity_min_contracts_sum_300s: float = 10.0
+    low_liquidity_min_abs_signed_contracts_sum_300s: float = 3.0
+    low_liquidity_price_volatility_300s_threshold: float = 0.01
+    structural_regime_refresh_seconds: float = 30.0
+    structural_regime_flip_confirmations: int = 2
     reservation_ttl_seconds: float = 5.0
     trade_cooldown_seconds: float = 0.0
     enable_bucket_ban_policy: bool = True
@@ -133,6 +153,18 @@ class KalshiSignalRiskConfig:
             raise ValueError("quote_max_age_seconds must be positive")
         if self.quote_consistency_tolerance_cents < 0:
             raise ValueError("quote_consistency_tolerance_cents must be non-negative")
+        if self.low_liquidity_min_trade_count_300s < 0:
+            raise ValueError("low_liquidity_min_trade_count_300s must be non-negative")
+        if self.low_liquidity_min_contracts_sum_300s < 0:
+            raise ValueError("low_liquidity_min_contracts_sum_300s must be non-negative")
+        if self.low_liquidity_min_abs_signed_contracts_sum_300s < 0:
+            raise ValueError("low_liquidity_min_abs_signed_contracts_sum_300s must be non-negative")
+        if self.low_liquidity_price_volatility_300s_threshold < 0:
+            raise ValueError("low_liquidity_price_volatility_300s_threshold must be non-negative")
+        if self.structural_regime_refresh_seconds <= 0:
+            raise ValueError("structural_regime_refresh_seconds must be positive")
+        if self.structural_regime_flip_confirmations <= 0:
+            raise ValueError("structural_regime_flip_confirmations must be positive")
         if self.reservation_ttl_seconds <= 0:
             raise ValueError("reservation_ttl_seconds must be positive")
         if self.trade_cooldown_seconds < 0:
@@ -190,6 +222,27 @@ class KalshiSignalRiskConfig:
             quote_max_age_seconds=float(_resolve_env_value(environment, "QUOTE_MAX_AGE_SECONDS") or 3.0),
             quote_consistency_tolerance_cents=int(
                 _resolve_env_value(environment, "QUOTE_CONSISTENCY_TOLERANCE_CENTS") or 1
+            ),
+            enable_low_liquidity_chop_gate=_parse_bool(
+                _resolve_env_value(environment, "ENABLE_LOW_LIQUIDITY_CHOP_GATE") or "false"
+            ),
+            low_liquidity_min_trade_count_300s=float(
+                _resolve_env_value(environment, "LOW_LIQUIDITY_MIN_TRADE_COUNT_300S") or 3.0
+            ),
+            low_liquidity_min_contracts_sum_300s=float(
+                _resolve_env_value(environment, "LOW_LIQUIDITY_MIN_CONTRACTS_SUM_300S") or 10.0
+            ),
+            low_liquidity_min_abs_signed_contracts_sum_300s=float(
+                _resolve_env_value(environment, "LOW_LIQUIDITY_MIN_ABS_SIGNED_CONTRACTS_SUM_300S") or 3.0
+            ),
+            low_liquidity_price_volatility_300s_threshold=float(
+                _resolve_env_value(environment, "LOW_LIQUIDITY_PRICE_VOLATILITY_300S_THRESHOLD") or 0.01
+            ),
+            structural_regime_refresh_seconds=float(
+                _resolve_env_value(environment, "STRUCTURAL_REGIME_REFRESH_SECONDS") or 30.0
+            ),
+            structural_regime_flip_confirmations=int(
+                _resolve_env_value(environment, "STRUCTURAL_REGIME_FLIP_CONFIRMATIONS") or 2
             ),
             reservation_ttl_seconds=float(_resolve_env_value(environment, "RESERVATION_TTL_SECONDS") or 5.0),
             trade_cooldown_seconds=float(_resolve_env_value(environment, "TRADE_COOLDOWN_SECONDS") or 0.0),
@@ -443,6 +496,15 @@ class _PendingReservation:
 class _ExpiredReservation:
     reservation: _PendingReservation
     expired_at: datetime
+
+
+@dataclass
+class _StructuralRegimeMemory:
+    current_label: str | None = None
+    pending_label: str | None = None
+    pending_count: int = 0
+    last_refreshed_at: datetime | None = None
+    last_evaluation: KalshiRegimeEvaluation | None = None
 
 
 @dataclass(frozen=True)
@@ -700,6 +762,7 @@ class KalshiSignalRiskEngine:
         self._local_open_positions: dict[str, KalshiPortfolioPosition] = {}
         self._active_stacking_signatures: dict[str, dict[StackingSignature, int]] = defaultdict(dict)
         self._completed_stacking_signatures: dict[str, set[StackingSignature]] = defaultdict(set)
+        self._structural_regime_memory: dict[str, _StructuralRegimeMemory] = {}
         self._last_trade_opened_at: datetime | None = None
 
     async def start(self) -> None:
@@ -728,6 +791,13 @@ class KalshiSignalRiskEngine:
                 "price_band_min_cents": self.config.price_band_min_cents,
                 "price_band_max_cents": self.config.price_band_max_cents,
                 "quote_max_age_seconds": self.config.quote_max_age_seconds,
+                "enable_low_liquidity_chop_gate": self.config.enable_low_liquidity_chop_gate,
+                "low_liquidity_min_trade_count_300s": self.config.low_liquidity_min_trade_count_300s,
+                "low_liquidity_min_contracts_sum_300s": self.config.low_liquidity_min_contracts_sum_300s,
+                "low_liquidity_min_abs_signed_contracts_sum_300s": self.config.low_liquidity_min_abs_signed_contracts_sum_300s,
+                "low_liquidity_price_volatility_300s_threshold": self.config.low_liquidity_price_volatility_300s_threshold,
+                "structural_regime_refresh_seconds": self.config.structural_regime_refresh_seconds,
+                "structural_regime_flip_confirmations": self.config.structural_regime_flip_confirmations,
                 "trade_cooldown_seconds": self.config.trade_cooldown_seconds,
                 "enable_bucket_ban_policy": self.config.enable_bucket_ban_policy,
                 "auto_reserve_trade_intents": self.config.auto_reserve_trade_intents,
@@ -1317,11 +1387,121 @@ class KalshiSignalRiskEngine:
         self._states[next_state.ticker] = next_state
         await self._publish_update(decision_update_from_state(next_state))
 
+    def _feature_state_for_score(self, score_state: KalshiLightGBMScoreState) -> Any | None:
+        feature_engine = getattr(self.scorer, "feature_engine", None)
+        get_state = getattr(feature_engine, "get_state", None)
+        if not callable(get_state):
+            return None
+        try:
+            return get_state(score_state.ticker)
+        except Exception:
+            return None
+
+    def _resolve_regime(
+        self,
+        score_state: KalshiLightGBMScoreState,
+        *,
+        feature_state: Any | None = None,
+    ) -> KalshiRegimeEvaluation:
+        resolved_feature_state = feature_state if feature_state is not None else self._feature_state_for_score(score_state)
+        if resolved_feature_state is None:
+            return evaluate_kxbtc15m_regime_for_state(score_state)
+        raw_structural = evaluate_kxbtc15m_structural_regime_for_state(resolved_feature_state)
+        if raw_structural.regime_label == "unknown":
+            return evaluate_kxbtc15m_regime_for_state(score_state)
+        return self._stable_structural_regime(
+            ticker=score_state.ticker,
+            event_time=score_state.event_time,
+            raw_regime=raw_structural,
+        )
+
+    def _stable_structural_regime(
+        self,
+        *,
+        ticker: str,
+        event_time: datetime,
+        raw_regime: KalshiRegimeEvaluation,
+    ) -> KalshiRegimeEvaluation:
+        memory = self._structural_regime_memory.setdefault(ticker, _StructuralRegimeMemory())
+        if (
+            memory.last_refreshed_at is not None
+            and memory.last_evaluation is not None
+            and (event_time - memory.last_refreshed_at).total_seconds() < self.config.structural_regime_refresh_seconds
+        ):
+            return memory.last_evaluation
+
+        raw_label = raw_regime.regime_label
+        resolved_label = raw_label
+        if memory.current_label is None or memory.current_label == raw_label:
+            memory.current_label = raw_label
+            memory.pending_label = None
+            memory.pending_count = 0
+            resolved_label = raw_label
+        else:
+            if memory.pending_label == raw_label:
+                memory.pending_count += 1
+            else:
+                memory.pending_label = raw_label
+                memory.pending_count = 1
+            if memory.pending_count >= self.config.structural_regime_flip_confirmations:
+                memory.current_label = raw_label
+                memory.pending_label = None
+                memory.pending_count = 0
+            resolved_label = memory.current_label
+
+        resolved = replace(raw_regime, regime_label=resolved_label)
+        memory.last_refreshed_at = event_time
+        memory.last_evaluation = resolved
+        return resolved
+
+    def _low_liquidity_chop_reason(
+        self,
+        *,
+        feature_state: Any | None,
+    ) -> str | None:
+        if not self.config.enable_low_liquidity_chop_gate or feature_state is None:
+            return None
+        trade_count_300s = _optional_float(getattr(feature_state, "trade_count_300s", None))
+        contracts_sum_300s = _optional_float(getattr(feature_state, "contracts_sum_300s", None))
+        signed_contracts_sum_300s = _optional_float(getattr(feature_state, "signed_contracts_sum_300s", None))
+        price_volatility_300s = _optional_float(getattr(feature_state, "price_volatility_300s", None))
+
+        if (
+            trade_count_300s is None
+            and contracts_sum_300s is None
+            and signed_contracts_sum_300s is None
+            and price_volatility_300s is None
+        ):
+            return None
+
+        low_activity = (
+            trade_count_300s is not None
+            and contracts_sum_300s is not None
+            and trade_count_300s < self.config.low_liquidity_min_trade_count_300s
+            and contracts_sum_300s < self.config.low_liquidity_min_contracts_sum_300s
+        )
+        choppy_low_liquidity = (
+            contracts_sum_300s is not None
+            and price_volatility_300s is not None
+            and contracts_sum_300s < self.config.low_liquidity_min_contracts_sum_300s
+            and price_volatility_300s > self.config.low_liquidity_price_volatility_300s_threshold
+        )
+        weak_directional_flow = (
+            signed_contracts_sum_300s is not None
+            and price_volatility_300s is not None
+            and abs(signed_contracts_sum_300s) < self.config.low_liquidity_min_abs_signed_contracts_sum_300s
+            and price_volatility_300s > self.config.low_liquidity_price_volatility_300s_threshold
+        )
+        if low_activity or choppy_low_liquidity or weak_directional_flow:
+            return "low_liquidity_chop"
+        return None
+
     def _build_candidate(self, score_state: KalshiLightGBMScoreState) -> _DecisionCandidate:
         predicted_yes_probability = score_state.predicted_yes_probability
         predicted_no_probability = 1.0 - predicted_yes_probability
         raw_model_edge = predicted_yes_probability - score_state.market_prob
-        regime = evaluate_kxbtc15m_regime_for_state(score_state)
+        feature_state = self._feature_state_for_score(score_state)
+        regime = self._resolve_regime(score_state, feature_state=feature_state)
         buy_yes_price_cents = score_state.buy_yes_price_cents
         buy_no_price_cents = score_state.buy_no_price_cents
 
@@ -1363,6 +1543,18 @@ class KalshiSignalRiskEngine:
                 yes_post_cost_edge=yes_post_cost_edge,
                 no_post_cost_edge=no_post_cost_edge,
                 block_reason=quote_rejection_reason,
+            )
+
+        low_liquidity_chop_reason = self._low_liquidity_chop_reason(feature_state=feature_state)
+        if low_liquidity_chop_reason is not None:
+            return self._blocked_candidate(
+                score_state,
+                predicted_no_probability=predicted_no_probability,
+                raw_model_edge=raw_model_edge,
+                yes_post_cost_edge=yes_post_cost_edge,
+                no_post_cost_edge=no_post_cost_edge,
+                block_reason=low_liquidity_chop_reason,
+                regime=regime,
             )
 
         yes_evaluation = self._evaluate_side_candidate(

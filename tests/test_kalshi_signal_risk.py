@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -121,6 +122,10 @@ def test_signal_risk_config_from_env_uses_demo_override_and_shared_fallback(monk
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_BANNED_YES_TAU_BUCKETS", "2-4,4-6")
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_ENABLE_BUCKET_BAN_POLICY", "true")
     monkeypatch.setenv("KALSHI_SIGNAL_BANNED_NO_PRICE_BUCKETS", "20-30,30-40")
+    monkeypatch.setenv("KALSHI_DEMO_SIGNAL_ENABLE_LOW_LIQUIDITY_CHOP_GATE", "true")
+    monkeypatch.setenv("KALSHI_DEMO_SIGNAL_LOW_LIQUIDITY_MIN_TRADE_COUNT_300S", "4")
+    monkeypatch.setenv("KALSHI_DEMO_SIGNAL_STRUCTURAL_REGIME_REFRESH_SECONDS", "45")
+    monkeypatch.setenv("KALSHI_DEMO_SIGNAL_STRUCTURAL_REGIME_FLIP_CONFIRMATIONS", "3")
 
     demo_config = KalshiSignalRiskConfig.from_env(KalshiEnvironment.DEMO)
     prod_config = KalshiSignalRiskConfig.from_env(KalshiEnvironment.PRODUCTION)
@@ -134,6 +139,10 @@ def test_signal_risk_config_from_env_uses_demo_override_and_shared_fallback(monk
     assert demo_config.quote_max_age_seconds == pytest.approx(4.5)
     assert demo_config.quote_consistency_tolerance_cents == 1
     assert demo_config.enable_bucket_ban_policy is True
+    assert demo_config.enable_low_liquidity_chop_gate is True
+    assert demo_config.low_liquidity_min_trade_count_300s == pytest.approx(4.0)
+    assert demo_config.structural_regime_refresh_seconds == pytest.approx(45.0)
+    assert demo_config.structural_regime_flip_confirmations == 3
     assert demo_config.banned_yes_tau_buckets == frozenset({"2-4", "4-6"})
     assert prod_config.starting_cash_dollars == 10.0
     assert prod_config.allow_stacking is True
@@ -161,6 +170,13 @@ def test_signal_risk_config_defaults():
     assert config.price_band_max_cents == 80
     assert config.quote_max_age_seconds == 3.0
     assert config.quote_consistency_tolerance_cents == 1
+    assert config.enable_low_liquidity_chop_gate is False
+    assert config.low_liquidity_min_trade_count_300s == pytest.approx(3.0)
+    assert config.low_liquidity_min_contracts_sum_300s == pytest.approx(10.0)
+    assert config.low_liquidity_min_abs_signed_contracts_sum_300s == pytest.approx(3.0)
+    assert config.low_liquidity_price_volatility_300s_threshold == pytest.approx(0.01)
+    assert config.structural_regime_refresh_seconds == pytest.approx(30.0)
+    assert config.structural_regime_flip_confirmations == 2
     assert config.trade_cooldown_seconds == 0.0
     assert config.enable_bucket_ban_policy is True
     assert config.banned_yes_tau_buckets == frozenset({"2-4"})
@@ -457,6 +473,120 @@ def test_signal_risk_blocks_yes_in_downtrend_regime(tmp_path: Path) -> None:
         assert update.block_reason == "blocked_by_regime_downtrend"
         assert update.regime_label == "downtrend"
         assert update.trade_intent is None
+
+    asyncio.run(run())
+
+
+def test_signal_risk_structural_regime_uses_hourly_context_hysteresis(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    score_state = KalshiLightGBMScoreState(
+        ticker="KXBTC15M-TEST",
+        event_time=event_time,
+        market_prob=0.55,
+        tau_minutes=7.0,
+        predicted_yes_probability=0.78,
+        model_edge=0.23,
+        model_file=Path("fake-model.txt"),
+        last_yes_price_cents=55,
+        last_price_cents=55,
+        yes_bid_cents=54,
+        yes_ask_cents=56,
+        no_bid_cents=44,
+        no_ask_cents=46,
+        ticker_update_time=event_time,
+        trade_yes_prob=0.55,
+        quote_mid_prob=0.55,
+        quote_spread_cents=2,
+        buy_yes_price_cents=56,
+        buy_no_price_cents=46,
+        quote_age_seconds=0.0,
+        last_to_mid_gap=0.0,
+    )
+    scorer = _FakeScorer(collector, {score_state.ticker: score_state})
+
+    structural_feature_state = SimpleNamespace(
+        price_return_300s=0.02,
+        kxbtcd_atm_price_return_300s=0.03,
+        kxbtcd_atm_signed_contracts_sum_300s=10.0,
+        k15_k1h_atm_direction_agreement=1.0,
+    )
+    scorer.feature_engine.get_state = lambda _ticker: structural_feature_state
+
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            structural_regime_refresh_seconds=30.0,
+            structural_regime_flip_confirmations=2,
+        ),
+    )
+
+    first = signal_engine._resolve_regime(score_state)
+    assert first.regime_label == "uptrend"
+
+    structural_feature_state.price_return_300s = -0.02
+    structural_feature_state.kxbtcd_atm_price_return_300s = -0.03
+    structural_feature_state.kxbtcd_atm_signed_contracts_sum_300s = -10.0
+    second = signal_engine._resolve_regime(
+        replace(score_state, event_time=event_time + timedelta(seconds=31))
+    )
+    assert second.regime_label == "uptrend"
+
+    third = signal_engine._resolve_regime(
+        replace(score_state, event_time=event_time + timedelta(seconds=62))
+    )
+    assert third.regime_label == "downtrend"
+
+
+def test_signal_risk_blocks_low_liquidity_chop_when_enabled(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    score_state = KalshiLightGBMScoreState(
+        ticker="KXBTC15M-TEST",
+        event_time=event_time,
+        market_prob=0.55,
+        tau_minutes=8.0,
+        predicted_yes_probability=0.78,
+        model_edge=0.23,
+        model_file=Path("fake-model.txt"),
+        last_yes_price_cents=55,
+        last_price_cents=55,
+        yes_bid_cents=54,
+        yes_ask_cents=56,
+        no_bid_cents=44,
+        no_ask_cents=46,
+        ticker_update_time=event_time,
+        trade_yes_prob=0.55,
+        quote_mid_prob=0.55,
+        quote_spread_cents=2,
+        buy_yes_price_cents=56,
+        buy_no_price_cents=46,
+        quote_age_seconds=0.0,
+        last_to_mid_gap=0.0,
+    )
+    scorer = _FakeScorer(collector, {score_state.ticker: score_state})
+    scorer.feature_engine.get_state = lambda _ticker: SimpleNamespace(
+        trade_count_300s=1.0,
+        contracts_sum_300s=2.0,
+        signed_contracts_sum_300s=0.5,
+        price_volatility_300s=0.03,
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            enable_low_liquidity_chop_gate=True,
+            enable_bucket_ban_policy=False,
+        ),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        await signal_engine.stop()
+
+        assert update.approved is False
+        assert update.block_reason == "low_liquidity_chop"
 
     asyncio.run(run())
 
