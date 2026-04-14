@@ -23,6 +23,7 @@ from src.live.kalshi import (
     KalshiSignalRiskEngine,
     KalshiTickerState,
 )
+from src.live.kalshi.signal_risk import find_max_acceptable_entry_price_cents
 
 
 def _collector_config(tmp_path: Path) -> KalshiCollectorConfig:
@@ -613,7 +614,11 @@ def test_live_layering_retries_zero_fill_target_until_filled(tmp_path: Path) -> 
             price_band_max_cents=100,
         ),
     )
-    layering_engine = KalshiPathDependentBinaryLayeringEngine(signal_engine, log_dir=tmp_path / "layering-live-retry")
+    layering_engine = KalshiPathDependentBinaryLayeringEngine(
+        signal_engine,
+        KalshiPathDependentBinaryLayeringConfig(live_retry_cooldown_seconds=0.0),
+        log_dir=tmp_path / "layering-live-retry",
+    )
     execution_engine = _DummyLiveExecutionEngine()
     layering_engine.bind_execution_engine(execution_engine)
     layering_queue = layering_engine.subscribe_queue()
@@ -747,6 +752,306 @@ def test_live_layering_retries_zero_fill_target_until_filled(tmp_path: Path) -> 
         assert tranche.attempt_count == 2
         assert tranche.filled_contracts == 1
         assert tranche.status in {"filled", "settled"}
+
+        await layering_engine.stop()
+        await signal_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_live_layering_same_price_retry_waits_for_cooldown(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    close_time = datetime(2026, 1, 1, 12, 15, tzinfo=UTC)
+    collector._states[ticker] = KalshiTickerState(
+        ticker=ticker,
+        last_yes_price_cents=55,
+        last_trade_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        previous_yes_price_cents=54,
+        close_time=close_time,
+        is_open=True,
+        yes_bid_cents=54,
+        yes_ask_cents=56,
+        ticker_update_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        received_at=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+    )
+    scorer = _LayeringFakeScorer(collector)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            starting_cash_dollars=100.0,
+            contracts_per_order=1,
+            allow_stacking=True,
+            min_tau_minutes=0.0,
+            enable_bucket_ban_policy=False,
+            price_band_min_cents=0,
+            price_band_max_cents=100,
+        ),
+    )
+    layering_engine = KalshiPathDependentBinaryLayeringEngine(
+        signal_engine,
+        KalshiPathDependentBinaryLayeringConfig(live_retry_cooldown_seconds=1.0),
+        log_dir=tmp_path / "layering-live-retry-cooldown",
+    )
+    execution_engine = _DummyLiveExecutionEngine()
+    layering_engine.bind_execution_engine(execution_engine)
+    trade_intent_queue = layering_engine.subscribe_trade_intent_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        await layering_engine.start()
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 30, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=0.80,
+                last_yes_price_cents=55,
+                yes_bid_cents=54,
+                yes_ask_cents=56,
+            )
+        )
+        first_intent = await asyncio.wait_for(trade_intent_queue.get(), timeout=1.0)
+
+        cancelled_update = KalshiExecutionUpdate(
+            decision_id=first_intent.decision_id,
+            ticker=ticker,
+            side=first_intent.side,
+            contracts=first_intent.contracts,
+            mode=KalshiExecutionMode.LIVE,
+            status="cancelled",
+            event_time=datetime(2026, 1, 1, 12, 5, 30, 100000, tzinfo=UTC),
+            reference_price_cents=first_intent.reference_price_cents,
+            limit_price_cents=first_intent.max_acceptable_entry_price_cents,
+            client_order_id=first_intent.decision_id,
+            order_id="order-1",
+            filled_contracts=0,
+            remaining_contracts=0,
+            fill_price_cents=None,
+            entry_cost_dollars=0.0,
+            fees_dollars=0.0,
+            cash_required_dollars=first_intent.estimated_cash_required_dollars,
+            available_cash_dollars=signal_engine.get_portfolio_state().available_cash_dollars,
+            realized_pnl_dollars=None,
+            cumulative_realized_pnl_dollars=None,
+            settlement_result=None,
+            message="cancelled_zero_fill",
+            live_order=None,
+            thesis_id=first_intent.thesis_id,
+            tranche_index=first_intent.tranche_index,
+            tranche_window=first_intent.tranche_window,
+            tranche_reason=first_intent.tranche_reason,
+            lifecycle_state=first_intent.lifecycle_state,
+            total_thesis_budget_dollars=first_intent.total_thesis_budget_dollars,
+            payout_if_yes_dollars=first_intent.payout_if_yes_dollars,
+            payout_if_no_dollars=first_intent.payout_if_no_dollars,
+            expected_value_dollars=first_intent.expected_value_dollars,
+            worst_case_loss_dollars=first_intent.worst_case_loss_dollars,
+            target_id=first_intent.target_id,
+            attempt_index=first_intent.attempt_index,
+            desired_contracts=first_intent.desired_contracts,
+            remaining_contracts_before_submit=first_intent.remaining_contracts_before_submit,
+            hard_max_price_cents=first_intent.hard_max_price_cents,
+            retry_reason=first_intent.retry_reason,
+            was_first_attempt=first_intent.was_first_attempt,
+        )
+        await layering_engine._handle_execution_update(cancelled_update)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(trade_intent_queue.get(), timeout=0.05)
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 30, 500000, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=0.80,
+                last_yes_price_cents=55,
+                yes_bid_cents=54,
+                yes_ask_cents=56,
+            )
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(trade_intent_queue.get(), timeout=0.05)
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 31, 500000, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=0.80,
+                last_yes_price_cents=55,
+                yes_bid_cents=54,
+                yes_ask_cents=56,
+            )
+        )
+        second_intent = await asyncio.wait_for(trade_intent_queue.get(), timeout=1.0)
+
+        assert second_intent.target_id == first_intent.target_id
+        assert second_intent.attempt_index == 2
+
+        await layering_engine.stop()
+        await signal_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_live_layering_refreshes_target_cap_on_signal_cadence(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    close_time = datetime(2026, 1, 1, 12, 15, tzinfo=UTC)
+    signal_config = KalshiSignalRiskConfig(
+        auto_reserve_trade_intents=False,
+        starting_cash_dollars=100.0,
+        contracts_per_order=1,
+        allow_stacking=True,
+        min_tau_minutes=0.0,
+        enable_bucket_ban_policy=False,
+        price_band_min_cents=0,
+        price_band_max_cents=100,
+        edge_threshold_cents=4.0,
+        maintain_edge_cents=1.0,
+    )
+    predicted_yes_probability = None
+    enter_cap = None
+    maintain_cap = None
+    for candidate_probability in (0.58, 0.60, 0.62, 0.64, 0.66, 0.68, 0.70, 0.72, 0.74, 0.76):
+        candidate_enter = find_max_acceptable_entry_price_cents(
+            side="YES",
+            predicted_yes_probability=candidate_probability,
+            config=signal_config,
+            contracts=1,
+            edge_threshold_cents=signal_config.edge_threshold_cents,
+        )
+        candidate_maintain = find_max_acceptable_entry_price_cents(
+            side="YES",
+            predicted_yes_probability=candidate_probability,
+            config=signal_config,
+            contracts=1,
+            edge_threshold_cents=signal_config.maintain_edge_cents,
+        )
+        if (
+            candidate_enter is not None
+            and candidate_maintain is not None
+            and candidate_maintain > candidate_enter
+            and candidate_enter >= 2
+        ):
+            predicted_yes_probability = candidate_probability
+            enter_cap = candidate_enter
+            maintain_cap = candidate_maintain
+            break
+    assert predicted_yes_probability is not None
+    assert enter_cap is not None
+    assert maintain_cap is not None
+
+    collector._states[ticker] = KalshiTickerState(
+        ticker=ticker,
+        last_yes_price_cents=enter_cap,
+        last_trade_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        previous_yes_price_cents=max(1, enter_cap - 1),
+        close_time=close_time,
+        is_open=True,
+        yes_bid_cents=max(1, enter_cap - 1),
+        yes_ask_cents=enter_cap,
+        ticker_update_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        received_at=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+    )
+    scorer = _LayeringFakeScorer(collector)
+    signal_engine = KalshiSignalRiskEngine(scorer, signal_config)  # type: ignore[arg-type]
+    layering_engine = KalshiPathDependentBinaryLayeringEngine(
+        signal_engine,
+        KalshiPathDependentBinaryLayeringConfig(
+            live_retry_cooldown_seconds=1.0,
+            live_signal_refresh_min_seconds=1.0,
+        ),
+        log_dir=tmp_path / "layering-live-cap-refresh",
+    )
+    execution_engine = _DummyLiveExecutionEngine()
+    layering_engine.bind_execution_engine(execution_engine)
+    trade_intent_queue = layering_engine.subscribe_trade_intent_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        await layering_engine.start()
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 30, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=predicted_yes_probability,
+                last_yes_price_cents=enter_cap,
+                yes_bid_cents=max(1, enter_cap - 1),
+                yes_ask_cents=enter_cap,
+            )
+        )
+        first_intent = await asyncio.wait_for(trade_intent_queue.get(), timeout=1.0)
+        assert first_intent.hard_max_price_cents == enter_cap
+
+        cancelled_update = KalshiExecutionUpdate(
+            decision_id=first_intent.decision_id,
+            ticker=ticker,
+            side=first_intent.side,
+            contracts=first_intent.contracts,
+            mode=KalshiExecutionMode.LIVE,
+            status="cancelled",
+            event_time=datetime(2026, 1, 1, 12, 5, 30, 100000, tzinfo=UTC),
+            reference_price_cents=first_intent.reference_price_cents,
+            limit_price_cents=first_intent.max_acceptable_entry_price_cents,
+            client_order_id=first_intent.decision_id,
+            order_id="order-1",
+            filled_contracts=0,
+            remaining_contracts=0,
+            fill_price_cents=None,
+            entry_cost_dollars=0.0,
+            fees_dollars=0.0,
+            cash_required_dollars=first_intent.estimated_cash_required_dollars,
+            available_cash_dollars=signal_engine.get_portfolio_state().available_cash_dollars,
+            realized_pnl_dollars=None,
+            cumulative_realized_pnl_dollars=None,
+            settlement_result=None,
+            message="cancelled_zero_fill",
+            live_order=None,
+            thesis_id=first_intent.thesis_id,
+            tranche_index=first_intent.tranche_index,
+            tranche_window=first_intent.tranche_window,
+            tranche_reason=first_intent.tranche_reason,
+            lifecycle_state=first_intent.lifecycle_state,
+            total_thesis_budget_dollars=first_intent.total_thesis_budget_dollars,
+            payout_if_yes_dollars=first_intent.payout_if_yes_dollars,
+            payout_if_no_dollars=first_intent.payout_if_no_dollars,
+            expected_value_dollars=first_intent.expected_value_dollars,
+            worst_case_loss_dollars=first_intent.worst_case_loss_dollars,
+            target_id=first_intent.target_id,
+            attempt_index=first_intent.attempt_index,
+            desired_contracts=first_intent.desired_contracts,
+            remaining_contracts_before_submit=first_intent.remaining_contracts_before_submit,
+            hard_max_price_cents=first_intent.hard_max_price_cents,
+            retry_reason=first_intent.retry_reason,
+            was_first_attempt=first_intent.was_first_attempt,
+        )
+        await layering_engine._handle_execution_update(cancelled_update)
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 31, 500000, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=predicted_yes_probability,
+                last_yes_price_cents=enter_cap,
+                yes_bid_cents=max(1, enter_cap - 1),
+                yes_ask_cents=enter_cap,
+            )
+        )
+        second_intent = await asyncio.wait_for(trade_intent_queue.get(), timeout=1.0)
+        ledger = layering_engine.get_active_ledger(ticker)
+        assert ledger is not None
+
+        assert ledger.tranches[0].hard_max_price_cents == maintain_cap
+        assert second_intent.hard_max_price_cents == maintain_cap
+        assert second_intent.attempt_index == 2
 
         await layering_engine.stop()
         await signal_engine.stop()

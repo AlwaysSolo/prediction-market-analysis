@@ -79,6 +79,8 @@ def _build_live_signal_config(
     edge_threshold_cents: float | None = None,
 ) -> KalshiSignalRiskConfig:
     base_config, _loaded_policy = signal_config_from_env_and_policy(environment, policy_file)
+    resolved_edge_threshold_cents = base_config.edge_threshold_cents if edge_threshold_cents is None else edge_threshold_cents
+    resolved_maintain_edge_cents = min(base_config.maintain_edge_cents, resolved_edge_threshold_cents)
     common_overrides = dict(
         apply_regime_hard_gate=not disable_regime_control,
         enable_bucket_ban_policy=True,
@@ -87,12 +89,13 @@ def _build_live_signal_config(
         kelly_fraction_multiplier=None,
         kelly_fraction_cap_pct=None,
         allow_stacking=allow_stacking,
+        maintain_edge_cents=resolved_maintain_edge_cents,
     )
     if signal_profile == RESEARCH_PARITY_SIGNAL_PROFILE:
         config = replace(
             base_config,
             **common_overrides,
-            edge_threshold_cents=2.0,
+            edge_threshold_cents=resolved_edge_threshold_cents if edge_threshold_cents is not None else 2.0,
             min_tau_minutes=0.0,
             max_tau_minutes=15.0,
             price_band_min_cents=0,
@@ -101,17 +104,13 @@ def _build_live_signal_config(
             banned_combo_buckets=frozenset(),
             blocked_regime_labels=frozenset(),
         )
-        if edge_threshold_cents is not None:
-            config = replace(config, edge_threshold_cents=edge_threshold_cents)
         return config
     if signal_profile != DEDICATED_LIVE_SIGNAL_PROFILE:
         raise ValueError(f"Unsupported signal profile: {signal_profile}")
     config = replace(
         base_config,
         **common_overrides,
-        edge_threshold_cents=(
-            base_config.edge_threshold_cents if edge_threshold_cents is None else edge_threshold_cents
-        ),
+        edge_threshold_cents=resolved_edge_threshold_cents,
         enable_combo_ban_policy=True,
         banned_combo_buckets=DEDICATED_LIVE_BANNED_COMBO_BUCKETS,
         blocked_regime_labels=(frozenset() if disable_regime_control else DEDICATED_LIVE_BLOCKED_REGIME_LABELS),

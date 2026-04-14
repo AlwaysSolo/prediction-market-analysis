@@ -1,0 +1,176 @@
+# This plan has been impelemented
+
+# Persistent Layered Target-Fill Engine for Live Kalshi Execution
+
+## Summary
+Convert live layering from a one-shot-per-window order emitter into a persistent target-position engine.
+
+The new live behavior is:
+
+- Each window (`10m`, `5m`, `4m`, `3m`) creates or updates a **tranche target**, not just a single order attempt.
+- A missed IOC does **not** consume the tranche. The engine keeps retrying until the target is filled, the window expires, the signal flips and retargets, or price moves above the tranche’s hard cap.
+- Later windows work against **cumulative desired inventory**, so missed early size can still be caught up by later windows.
+- Retries use **repeated IOC only** for v1.
+- Price control dominates retry behavior: edge is used to originate a target, then ignored for retries; retries obey frozen per-target hard price caps.
+- Quote gating becomes **side-specific**, so a bad `YES` quote no longer blocks a valid `NO` trade unless the full book is globally inconsistent.
+
+## Key Changes
+### 1. Add stable tranche targets above order attempts
+Introduce a stable per-tranche target identity in the layering ledger.
+
+Behavior:
+- A tranche target is created once per window hit.
+- Each retry order attempt gets a fresh `decision_id` / `client_order_id`.
+- The target tracks:
+  - `target_id`
+  - `desired_contracts`
+  - `filled_contracts`
+  - `remaining_contracts`
+  - `hard_max_price_cents`
+  - `current_side`
+  - `window_label`
+  - `window_end_ts`
+  - `attempt_count`
+  - `active_decision_id`
+  - `status` such as `working`, `paused_price`, `filled`, `expired`, `retargeted`
+- `KalshiBinaryTranche` becomes target-oriented instead of assuming one `decision_id` == one tranche.
+
+Default target policy:
+- `10m / 5m / 4m / 3m` windows stay unchanged.
+- Each later window adds its tranche target as today.
+- Any earlier shortfall remains part of the thesis and is still worked.
+
+### 2. Add a live-only working-order engine
+Add a live-only retry coordinator that sits between layering and execution.
+
+Behavior:
+- Only **one active live order per thesis** at a time.
+- Scheduler always works the oldest active target with remaining deficit.
+- Retries are event-driven:
+  - on target creation
+  - on quote updates for that ticker
+  - on terminal order updates (`cancelled`, `rejected`, `filled`, `partially_filled`)
+- No same-window “one and done” behavior remains for live mode.
+
+Retry policy:
+- First attempt for a target: IOC at `min(executable_ask + 1c, hard_max_price_cents)`.
+- Subsequent retries for that target: IOC at `hard_max_price_cents`.
+- If live executable ask is above hard cap:
+  - do not chase
+  - mark target `paused_price`
+  - immediately resume when quote re-enters range before window expiry
+- Partial fills reduce the remaining deficit and continue retries for the remainder.
+- When a window expires with remaining deficit, the target closes as `expired_unfilled`; later windows still build cumulative inventory normally.
+
+### 3. Freeze price caps at target origination, not per retry
+When a tranche target is created, freeze:
+- `side`
+- `desired_contracts`
+- `hard_max_price_cents`
+
+`hard_max_price_cents` source:
+- use the originating signal’s `max_acceptable_entry_price_cents`
+
+Retry behavior:
+- live edge drift no longer stops retries for an already-created target
+- retries care only about:
+  - target still active
+  - price still within cap
+  - side not retargeted
+  - window not expired
+
+Signal flip behavior:
+- if a live approved signal flips to the opposite side while the target is still unfilled:
+  - cancel any active working order for that target
+  - retarget the remaining size to the new side
+  - recompute and freeze a new hard cap from the new signal
+- if the signal merely becomes unapproved without an approved opposite side:
+  - keep the existing target alive until window expiry
+  - do not drop it just because edge or approval drifted temporarily
+
+### 4. Make quote rejection side-aware
+Refactor the current pre-side global quote block in `signal_risk`.
+
+New behavior:
+- Keep global blocking only for truly unusable full-book states:
+  - missing both usable sides
+  - stale quote
+  - inconsistent full-book state
+- Move executable-quote validity into side evaluation:
+  - `YES` side can be rejected without killing `NO`
+  - `NO` side can be rejected without killing `YES`
+- `crossed_quote` should no longer be a whole-candidate block when only the `YES` side is bad and a valid `NO` executable quote exists.
+
+### 5. Extend execution + reporting observability around targets
+Add target-level lifecycle events in live logs:
+- `target_created`
+- `target_attempt_submitted`
+- `target_attempt_terminal`
+- `target_paused_price`
+- `target_resumed_price`
+- `target_retargeted`
+- `target_expired`
+- `target_completed`
+
+Include these fields on order-attempt logs:
+- `target_id`
+- `attempt_index`
+- `desired_contracts`
+- `remaining_contracts_before_submit`
+- `hard_max_price_cents`
+- `retry_reason`
+- `was_first_attempt`
+
+Reporting additions:
+- target-level fill rate
+- average attempts per target
+- first-attempt fill rate vs retry fill rate
+- filled target count vs expired target count
+- carry-forward success rate from earlier missed windows
+
+## Implementation Changes
+### Layering subsystem
+- Replace the current “emit once and mark window hit” assumption with “create target once and keep it working.”
+- Keep `decision_windows_hit` as “target created for this window,” not “successfully filled.”
+- Add target recovery to existing ledger recovery so restart can resume active targets.
+
+### Execution subsystem
+- Keep the existing REST submit path and order parsing.
+- Add live cancel support into the active path using existing `cancel_order`.
+- Add a working-order coordinator that:
+  - cancels on retarget
+  - submits fresh IOC attempts with fresh `decision_id`s
+  - maps many order attempts back to one stable `target_id`
+- Execution states remain attempt-level; target state lives above them.
+
+### Signal-risk subsystem
+- Add an explicit manual reservation path for retry attempts that can reuse the original target’s sizing and frozen cap without re-enforcing live edge threshold.
+- Preserve current portfolio reservation safety, but tie it to target remainder rather than a single failed attempt.
+
+## Test Plan
+### Core execution behavior
+- `10m` target with first IOC zero-fill retries on later quote update within same window.
+- Partial fill retries only the remainder.
+- Price above cap pauses retries; price returning inside cap resumes immediately.
+- Window expiry stops retries and marks target expired.
+- Later `5m`/`4m`/`3m` windows still add size even when earlier target was not fully filled.
+- Only one active live order exists per thesis at a time.
+
+### Retargeting and signal handling
+- Opposite-side approved signal cancels active order and retargets remaining size.
+- Temporary loss of approval does not kill an already-created target.
+- Side-specific quote gate allows valid `NO` when `YES` is crossed/locked.
+
+### Recovery and reporting
+- Restart with active targets reconstructs them from ledger + execution state.
+- Reports distinguish targets from raw order attempts.
+- Repeated retries do not double-count “open positions.”
+
+## Assumptions and Defaults
+- v1 remains **live-only**; shadow/research modes keep current one-shot behavior.
+- Retry mechanism is **repeated IOC only** for this phase.
+- Window schedule remains `10m / 5m / 4m / 3m`.
+- Edge is used to originate tranche targets, then ignored for retries.
+- Hard caps are frozen from the signal that created or retargeted the tranche.
+- First attempt uses `+1c` soft IOC buffer; subsequent retries go straight to the target hard cap.
+- One thesis may contain multiple active tranche targets, but only one live order is worked at a time.

@@ -69,6 +69,7 @@ def _parse_bool(value: str) -> bool:
 @dataclass(frozen=True)
 class KalshiSignalRiskConfig:
     edge_threshold_cents: float = 4.0
+    maintain_edge_cents: float = 1.0
     min_tau_minutes: float = 2.0
     max_tau_minutes: float = 14.0
     apply_regime_hard_gate: bool = False
@@ -100,6 +101,10 @@ class KalshiSignalRiskConfig:
     def __post_init__(self) -> None:
         if self.edge_threshold_cents < 0:
             raise ValueError("edge_threshold_cents must be non-negative")
+        if self.maintain_edge_cents < 0:
+            raise ValueError("maintain_edge_cents must be non-negative")
+        if self.maintain_edge_cents > self.edge_threshold_cents:
+            raise ValueError("maintain_edge_cents must be <= edge_threshold_cents")
         if self.min_tau_minutes < 0:
             raise ValueError("min_tau_minutes must be non-negative")
         if self.max_tau_minutes < self.min_tau_minutes:
@@ -138,13 +143,24 @@ class KalshiSignalRiskConfig:
         return self.edge_threshold_cents / 100.0
 
     @property
+    def maintain_edge_threshold(self) -> float:
+        return self.maintain_edge_cents / 100.0
+
+    @property
     def slippage(self) -> float:
         return self.slippage_pct / 100.0
 
     @classmethod
     def from_env(cls, environment: KalshiEnvironment) -> KalshiSignalRiskConfig:
+        edge_threshold_cents = float(_resolve_env_value(environment, "EDGE_THRESHOLD_CENTS") or 4.0)
+        maintain_edge_value = _resolve_env_value(environment, "MAINTAIN_EDGE_CENTS")
         return cls(
-            edge_threshold_cents=float(_resolve_env_value(environment, "EDGE_THRESHOLD_CENTS") or 4.0),
+            edge_threshold_cents=edge_threshold_cents,
+            maintain_edge_cents=(
+                float(maintain_edge_value)
+                if maintain_edge_value is not None
+                else min(1.0, edge_threshold_cents)
+            ),
             min_tau_minutes=float(_resolve_env_value(environment, "MIN_TAU_MINUTES") or 2.0),
             max_tau_minutes=float(_resolve_env_value(environment, "MAX_TAU_MINUTES") or 14.0),
             apply_regime_hard_gate=_parse_bool(_resolve_env_value(environment, "APPLY_REGIME_HARD_GATE") or "true"),
@@ -618,8 +634,10 @@ def find_max_acceptable_entry_price_cents(
     predicted_yes_probability: float,
     config: KalshiSignalRiskConfig,
     contracts: int | None = None,
+    edge_threshold_cents: float | None = None,
 ) -> int | None:
     contracts_to_use = contracts if contracts is not None else config.contracts_per_order
+    required_edge = config.edge_threshold if edge_threshold_cents is None else (edge_threshold_cents / 100.0)
     for price_cents in range(config.price_band_max_cents, config.price_band_min_cents - 1, -1):
         post_cost_edge, _entry_cost, _fees, _cash_required = calculate_cost_metrics(
             side=side,
@@ -628,7 +646,7 @@ def find_max_acceptable_entry_price_cents(
             contracts=contracts_to_use,
             slippage=config.slippage,
         )
-        if post_cost_edge + 1e-12 >= config.edge_threshold:
+        if post_cost_edge + 1e-12 >= required_edge:
             return price_cents
     return None
 
@@ -697,6 +715,7 @@ class KalshiSignalRiskEngine:
             "signal_started",
             {
                 "edge_threshold_cents": self.config.edge_threshold_cents,
+                "maintain_edge_cents": self.config.maintain_edge_cents,
                 "min_tau_minutes": self.config.min_tau_minutes,
                 "max_tau_minutes": self.config.max_tau_minutes,
                 "invert_model_signal": self.config.invert_model_signal,

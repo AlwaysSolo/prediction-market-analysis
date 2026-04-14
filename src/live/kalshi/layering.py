@@ -37,6 +37,11 @@ class KalshiPathDependentBinaryLayeringConfig:
     supported_series_prefixes: tuple[str, ...] = ("KXBTC15M",)
     tranche_schedule: tuple[float, float, float, float] = (0.20, 0.20, 0.30, 0.30)
     minimum_contracts_per_thesis: int = 5
+    live_retry_cooldown_seconds: float = 0.35
+    live_signal_refresh_min_seconds: float = 1.0
+    live_retry_quote_change_min_cents: int = 1
+    live_requote_soft_buffer_cents: int = 1
+    live_target_endgame_seconds: float = 20.0
     allow_full_flip_relayer: bool = True
     hold_to_settlement: bool = True
     enable_early_exit: bool = False
@@ -53,6 +58,16 @@ class KalshiPathDependentBinaryLayeringConfig:
             raise ValueError("tranche_schedule must sum to 1.0")
         if self.minimum_contracts_per_thesis <= 0:
             raise ValueError("minimum_contracts_per_thesis must be positive")
+        if self.live_retry_cooldown_seconds < 0:
+            raise ValueError("live_retry_cooldown_seconds must be non-negative")
+        if self.live_signal_refresh_min_seconds < 0:
+            raise ValueError("live_signal_refresh_min_seconds must be non-negative")
+        if self.live_retry_quote_change_min_cents < 0:
+            raise ValueError("live_retry_quote_change_min_cents must be non-negative")
+        if self.live_requote_soft_buffer_cents < 0:
+            raise ValueError("live_requote_soft_buffer_cents must be non-negative")
+        if self.live_target_endgame_seconds < 0:
+            raise ValueError("live_target_endgame_seconds must be non-negative")
         if self.recovery_lookback_hours <= 0:
             raise ValueError("recovery_lookback_hours must be positive")
 
@@ -83,6 +98,10 @@ class KalshiBinaryTranche:
     attempt_count: int = 0
     last_attempt_status: str | None = None
     last_counted_decision_id: str | None = None
+    last_reservation_refresh_time: datetime | None = None
+    last_submitted_at: datetime | None = None
+    last_submitted_entry_price_cents: int | None = None
+    last_submitted_limit_price_cents: int | None = None
 
 
 @dataclass(frozen=True)
@@ -323,6 +342,52 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
     def _target_is_terminal(tranche: KalshiBinaryTranche) -> bool:
         return tranche.status in {"filled", "expired_unfilled", "settled", "closed_with_warning"}
 
+    def _target_signal_refresh_due(
+        self,
+        tranche: KalshiBinaryTranche,
+        *,
+        event_time: datetime,
+    ) -> bool:
+        if tranche.last_reservation_refresh_time is None:
+            return True
+        elapsed = (event_time - tranche.last_reservation_refresh_time).total_seconds()
+        return elapsed >= self.config.live_signal_refresh_min_seconds
+
+    def _target_retry_cooldown_elapsed(
+        self,
+        tranche: KalshiBinaryTranche,
+        *,
+        event_time: datetime,
+    ) -> bool:
+        if tranche.last_submitted_at is None:
+            return True
+        elapsed = (event_time - tranche.last_submitted_at).total_seconds()
+        return elapsed >= self.config.live_retry_cooldown_seconds
+
+    def _target_retry_quote_changed(
+        self,
+        tranche: KalshiBinaryTranche,
+        *,
+        entry_price_cents: int,
+    ) -> bool:
+        if tranche.last_submitted_entry_price_cents is None:
+            return True
+        return abs(entry_price_cents - tranche.last_submitted_entry_price_cents) >= self.config.live_retry_quote_change_min_cents
+
+    def _target_is_in_endgame(
+        self,
+        tranche: KalshiBinaryTranche,
+        *,
+        event_time: datetime,
+    ) -> bool:
+        if tranche.window_end_time is None:
+            return False
+        remaining_seconds = (tranche.window_end_time - event_time).total_seconds()
+        return remaining_seconds <= self.config.live_target_endgame_seconds
+
+    def _maintain_edge_threshold_cents(self) -> float:
+        return min(self.signal_engine.config.edge_threshold_cents, self.signal_engine.config.maintain_edge_cents)
+
     def _has_active_attempt(self, ledger: KalshiBinaryThesisLedger) -> bool:
         return any(tranche.active_decision_id is not None for tranche in ledger.tranches)
 
@@ -386,6 +451,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             predicted_yes_probability=update.predicted_yes_probability,
             config=self.signal_engine.config,
             contracts=requested_contracts,
+            edge_threshold_cents=self.signal_engine.config.edge_threshold_cents,
         )
         if hard_max_price_cents is None or entry_price_cents > hard_max_price_cents:
             return None
@@ -446,6 +512,10 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             attempt_count=0,
             last_attempt_status=None,
             last_counted_decision_id=None,
+            last_reservation_refresh_time=update.event_time,
+            last_submitted_at=None,
+            last_submitted_entry_price_cents=None,
+            last_submitted_limit_price_cents=None,
         )
 
     async def _publish_target_lifecycle(
@@ -519,6 +589,75 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             )
         return updated_ledger
 
+    async def _refresh_live_target_reservations(
+        self,
+        ledger: KalshiBinaryThesisLedger,
+        update: KalshiSignalDecisionUpdate,
+    ) -> KalshiBinaryThesisLedger:
+        if not self._is_live_target_mode():
+            return ledger
+        if not update.approved or update.side is None:
+            return ledger
+
+        refreshed_ledger = ledger
+        for tranche in list(refreshed_ledger.tranches):
+            if self._target_is_terminal(tranche):
+                continue
+            if tranche.active_decision_id is not None:
+                continue
+            if tranche.side != update.side:
+                continue
+            if not self._target_signal_refresh_due(tranche, event_time=update.event_time):
+                continue
+            remaining_contracts = self._target_remaining_contracts(tranche)
+            if remaining_contracts <= 0:
+                continue
+            refreshed_cap_cents = find_max_acceptable_entry_price_cents(
+                side=tranche.side,
+                predicted_yes_probability=update.predicted_yes_probability,
+                config=self.signal_engine.config,
+                contracts=remaining_contracts,
+                edge_threshold_cents=self._maintain_edge_threshold_cents(),
+            )
+            if refreshed_cap_cents is None:
+                refreshed_tranche = replace(
+                    tranche,
+                    last_reservation_refresh_time=update.event_time,
+                    last_update_time=update.event_time,
+                )
+                refreshed_ledger = self._replace_tranche(
+                    refreshed_ledger,
+                    tranche,
+                    refreshed_tranche,
+                    event_time=update.event_time,
+                )
+                continue
+
+            refreshed_tranche = replace(
+                tranche,
+                hard_max_price_cents=refreshed_cap_cents,
+                last_reservation_refresh_time=update.event_time,
+                last_update_time=update.event_time,
+            )
+            refreshed_ledger = self._replace_tranche(
+                refreshed_ledger,
+                tranche,
+                refreshed_tranche,
+                event_time=update.event_time,
+            )
+            if refreshed_cap_cents != tranche.hard_max_price_cents:
+                await self._publish_target_lifecycle(
+                    action="target_cap_refreshed",
+                    ledger=refreshed_ledger,
+                    tranche=refreshed_tranche,
+                    event_time=update.event_time,
+                    message=(
+                        f"hard max price refreshed from {tranche.hard_max_price_cents}c "
+                        f"to {refreshed_cap_cents}c on signal cadence"
+                    ),
+                )
+        return refreshed_ledger
+
     async def _emit_live_target_attempt(
         self,
         ledger: KalshiBinaryThesisLedger,
@@ -550,12 +689,21 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             )
             return updated_ledger
 
+        if (
+            tranche.attempt_count > 0
+            and not self._target_retry_quote_changed(tranche, entry_price_cents=entry_price_cents)
+            and not self._target_retry_cooldown_elapsed(tranche, event_time=update.event_time)
+        ):
+            return ledger
+
         attempt_index = tranche.attempt_count + 1
-        limit_price_cents = (
-            min(entry_price_cents + 1, tranche.hard_max_price_cents)
-            if tranche.attempt_count == 0
-            else tranche.hard_max_price_cents
-        )
+        if self._target_is_in_endgame(tranche, event_time=update.event_time):
+            limit_price_cents = tranche.hard_max_price_cents
+        else:
+            limit_price_cents = min(
+                entry_price_cents + self.config.live_requote_soft_buffer_cents,
+                tranche.hard_max_price_cents,
+            )
         intent = self.signal_engine.reserve_manual_trade_intent(
             decision_state=update,
             side=tranche.side,
@@ -600,6 +748,9 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             attempt_count=attempt_index,
             last_update_time=update.event_time,
             last_attempt_status="submitted",
+            last_submitted_at=update.event_time,
+            last_submitted_entry_price_cents=entry_price_cents,
+            last_submitted_limit_price_cents=limit_price_cents,
         )
         updated_ledger = self._replace_tranche(ledger, tranche, updated_tranche, event_time=update.event_time)
         self._thesis_by_decision_id[intent.decision_id] = ledger.thesis_id
@@ -657,6 +808,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
                 predicted_yes_probability=working_update.predicted_yes_probability,
                 config=self.signal_engine.config,
                 contracts=max(1, self._target_remaining_contracts(target)),
+                edge_threshold_cents=self.signal_engine.config.edge_threshold_cents,
             )
             if retarget_entry_price_cents is not None and retarget_cap_cents is not None:
                 retargeted_target = replace(
@@ -725,6 +877,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
                 updated_at=update.event_time,
             )
             ledger = self._recompute_ledger_metrics(ledger)
+            ledger = await self._refresh_live_target_reservations(ledger, update)
             self._store_ledger(ledger)
 
         if window.window_label is None:
@@ -1778,6 +1931,14 @@ def _serialize_ledger(ledger: KalshiBinaryThesisLedger) -> dict[str, Any]:
         tranche["requested_at"] = tranche["requested_at"].isoformat()
         tranche["last_update_time"] = tranche["last_update_time"].isoformat()
         tranche["window_end_time"] = None if tranche["window_end_time"] is None else tranche["window_end_time"].isoformat()
+        tranche["last_reservation_refresh_time"] = (
+            None
+            if tranche["last_reservation_refresh_time"] is None
+            else tranche["last_reservation_refresh_time"].isoformat()
+        )
+        tranche["last_submitted_at"] = (
+            None if tranche["last_submitted_at"] is None else tranche["last_submitted_at"].isoformat()
+        )
     return payload
 
 
@@ -1813,6 +1974,24 @@ def _deserialize_ledger(payload: dict[str, Any]) -> KalshiBinaryThesisLedger:
             last_attempt_status=None if tranche.get("last_attempt_status") is None else str(tranche["last_attempt_status"]),
             last_counted_decision_id=(
                 None if tranche.get("last_counted_decision_id") is None else str(tranche["last_counted_decision_id"])
+            ),
+            last_reservation_refresh_time=(
+                None
+                if tranche.get("last_reservation_refresh_time") is None
+                else datetime.fromisoformat(tranche["last_reservation_refresh_time"])
+            ),
+            last_submitted_at=(
+                None if tranche.get("last_submitted_at") is None else datetime.fromisoformat(tranche["last_submitted_at"])
+            ),
+            last_submitted_entry_price_cents=(
+                None
+                if tranche.get("last_submitted_entry_price_cents") is None
+                else int(tranche["last_submitted_entry_price_cents"])
+            ),
+            last_submitted_limit_price_cents=(
+                None
+                if tranche.get("last_submitted_limit_price_cents") is None
+                else int(tranche["last_submitted_limit_price_cents"])
             ),
         )
         for tranche in payload.get("tranches", [])
