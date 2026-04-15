@@ -117,6 +117,7 @@ class KalshiExecutionConfig:
     enable_pre_submit_orderbook_check: bool = True
     skip_rest_orderbook_check_for_immediate_orders: bool = False
     enable_direct_trade_intent_handoff_in_live_mode: bool = False
+    yes_probe_immediate_limit_cushion_cents: int = 0
     no_probe_immediate_limit_cushion_cents: int = 0
     pre_submit_orderbook_depth: int = 1
     probe_order_time_in_force: str = "good_till_canceled"
@@ -134,6 +135,8 @@ class KalshiExecutionConfig:
             raise ValueError("shadow_fill_latency_seconds must be non-negative")
         if self.pre_submit_orderbook_depth <= 0:
             raise ValueError("pre_submit_orderbook_depth must be positive")
+        if self.yes_probe_immediate_limit_cushion_cents < 0:
+            raise ValueError("yes_probe_immediate_limit_cushion_cents must be non-negative")
         if self.no_probe_immediate_limit_cushion_cents < 0:
             raise ValueError("no_probe_immediate_limit_cushion_cents must be non-negative")
         if self.probe_order_ttl_seconds < 0:
@@ -172,6 +175,9 @@ class KalshiExecutionConfig:
             ),
             enable_direct_trade_intent_handoff_in_live_mode=_parse_bool(
                 _resolve_env_value(environment, "ENABLE_DIRECT_TRADE_INTENT_HANDOFF_IN_LIVE_MODE") or "false"
+            ),
+            yes_probe_immediate_limit_cushion_cents=int(
+                _resolve_env_value(environment, "YES_PROBE_IMMEDIATE_LIMIT_CUSHION_CENTS") or 0
             ),
             no_probe_immediate_limit_cushion_cents=int(
                 _resolve_env_value(environment, "NO_PROBE_IMMEDIATE_LIMIT_CUSHION_CENTS") or 0
@@ -966,15 +972,16 @@ class KalshiExecutionEngine:
         *,
         submission_policy: _LiveSubmissionPolicy,
     ) -> tuple[KalshiTradeIntent, int]:
-        if (
-            submission_policy.requires_immediate_match
-            and submission_policy.is_probe_order
-            and intent.side.upper() == "NO"
-            and self.config.no_probe_immediate_limit_cushion_cents > 0
-        ):
+        limit_cushion_cents = 0
+        if submission_policy.requires_immediate_match and submission_policy.is_probe_order:
+            if intent.side.upper() == "YES":
+                limit_cushion_cents = self.config.yes_probe_immediate_limit_cushion_cents
+            elif intent.side.upper() == "NO":
+                limit_cushion_cents = self.config.no_probe_immediate_limit_cushion_cents
+        if limit_cushion_cents > 0:
             adjusted_limit_cents = min(
                 99,
-                intent.max_acceptable_entry_price_cents + self.config.no_probe_immediate_limit_cushion_cents,
+                intent.max_acceptable_entry_price_cents + limit_cushion_cents,
             )
             limit_adjustment_cents = max(0, adjusted_limit_cents - intent.max_acceptable_entry_price_cents)
             if limit_adjustment_cents > 0:

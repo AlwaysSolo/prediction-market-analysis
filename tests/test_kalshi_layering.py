@@ -124,6 +124,17 @@ async def _wait_for_condition(predicate, *, timeout: float = 2.0) -> None:
         await asyncio.sleep(min(0.01, remaining))
 
 
+async def _wait_for_trade_intent(queue: asyncio.Queue, predicate, *, timeout: float = 2.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for matching trade intent")
+        intent = await asyncio.wait_for(queue.get(), timeout=remaining)
+        if predicate(intent):
+            return intent
+
+
 async def _noop_private_ws(self) -> None:
     await self._stop_event.wait()
 
@@ -224,6 +235,61 @@ class _DummyLiveExecutionEngine:
     def subscribe_queue(self, maxsize: int = 0) -> asyncio.Queue:
         del maxsize
         return self.queue
+
+
+def _execution_update_from_intent(
+    intent,
+    *,
+    status: str,
+    event_time: datetime,
+    order_id: str,
+    filled_contracts: int = 0,
+    fill_price_cents: int | None = None,
+    message: str | None = None,
+) -> KalshiExecutionUpdate:
+    remaining_contracts = max(0, intent.contracts - filled_contracts)
+    return KalshiExecutionUpdate(
+        decision_id=intent.decision_id,
+        ticker=intent.ticker,
+        side=intent.side,
+        contracts=intent.contracts,
+        mode=KalshiExecutionMode.LIVE,
+        status=status,
+        event_time=event_time,
+        reference_price_cents=intent.reference_price_cents,
+        limit_price_cents=intent.max_acceptable_entry_price_cents,
+        client_order_id=intent.decision_id,
+        order_id=order_id,
+        filled_contracts=filled_contracts,
+        remaining_contracts=remaining_contracts,
+        fill_price_cents=fill_price_cents,
+        entry_cost_dollars=0.0 if fill_price_cents is None else intent.estimated_entry_cost_dollars,
+        fees_dollars=0.0 if fill_price_cents is None else intent.estimated_fees_dollars,
+        cash_required_dollars=intent.estimated_cash_required_dollars,
+        available_cash_dollars=0.0,
+        realized_pnl_dollars=None,
+        cumulative_realized_pnl_dollars=None,
+        settlement_result=None,
+        message=message,
+        live_order=None,
+        thesis_id=intent.thesis_id,
+        tranche_index=intent.tranche_index,
+        tranche_window=intent.tranche_window,
+        tranche_reason=intent.tranche_reason,
+        lifecycle_state=intent.lifecycle_state,
+        total_thesis_budget_dollars=intent.total_thesis_budget_dollars,
+        payout_if_yes_dollars=intent.payout_if_yes_dollars,
+        payout_if_no_dollars=intent.payout_if_no_dollars,
+        expected_value_dollars=intent.expected_value_dollars,
+        worst_case_loss_dollars=intent.worst_case_loss_dollars,
+        target_id=intent.target_id,
+        attempt_index=intent.attempt_index,
+        desired_contracts=intent.desired_contracts,
+        remaining_contracts_before_submit=intent.remaining_contracts_before_submit,
+        hard_max_price_cents=intent.hard_max_price_cents,
+        retry_reason=intent.retry_reason,
+        was_first_attempt=intent.was_first_attempt,
+    )
 
 
 def test_layering_engine_requires_10m_window_for_thesis_open(tmp_path: Path) -> None:
@@ -1052,6 +1118,242 @@ def test_live_layering_refreshes_target_cap_on_signal_cadence(tmp_path: Path) ->
         assert ledger.tranches[0].hard_max_price_cents == maintain_cap
         assert second_intent.hard_max_price_cents == maintain_cap
         assert second_intent.attempt_index == 2
+
+        await layering_engine.stop()
+        await signal_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_live_layering_reduces_5m_to_recovery_probe_without_prior_fill(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    close_time = datetime(2026, 1, 1, 12, 15, tzinfo=UTC)
+    collector._states[ticker] = KalshiTickerState(
+        ticker=ticker,
+        last_yes_price_cents=30,
+        last_trade_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        previous_yes_price_cents=29,
+        close_time=close_time,
+        is_open=True,
+        yes_bid_cents=29,
+        yes_ask_cents=31,
+        ticker_update_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        received_at=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+    )
+    scorer = _LayeringFakeScorer(collector)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            starting_cash_dollars=100.0,
+            contracts_per_order=10,
+            allow_stacking=True,
+            min_tau_minutes=0.0,
+            enable_bucket_ban_policy=False,
+            price_band_min_cents=0,
+            price_band_max_cents=100,
+        ),
+    )
+    layering_engine = KalshiPathDependentBinaryLayeringEngine(signal_engine, log_dir=tmp_path / "layering-live-recovery")
+    execution_engine = _DummyLiveExecutionEngine()
+    layering_engine.bind_execution_engine(execution_engine)
+    trade_intent_queue = layering_engine.subscribe_trade_intent_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        await layering_engine.start()
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 30, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=0.76,
+                last_yes_price_cents=30,
+                yes_bid_cents=29,
+                yes_ask_cents=31,
+            )
+        )
+        first_intent = await _wait_for_trade_intent(
+            trade_intent_queue,
+            lambda intent: intent.tranche_window == "10m",
+            timeout=1.0,
+        )
+
+        cancelled_update = _execution_update_from_intent(
+            first_intent,
+            status="cancelled",
+            event_time=datetime(2026, 1, 1, 12, 5, 30, 100000, tzinfo=UTC),
+            order_id="order-10m",
+            message="cancelled_zero_fill",
+        )
+        await layering_engine._handle_execution_update(cancelled_update)
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 10, 30, tzinfo=UTC),
+                tau_minutes=4.5,
+                predicted_yes_probability=0.76,
+                last_yes_price_cents=30,
+                yes_bid_cents=29,
+                yes_ask_cents=31,
+            )
+        )
+        recovery_intent = await _wait_for_trade_intent(
+            trade_intent_queue,
+            lambda intent: intent.tranche_window == "5m",
+            timeout=1.0,
+        )
+        ledger = layering_engine.get_active_ledger(ticker)
+        assert ledger is not None
+
+        assert recovery_intent.contracts == 1
+        assert ledger.tranches[1].requested_contracts == 1
+
+        await layering_engine.stop()
+        await signal_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_live_layering_blocks_4m_until_recovery_probe_fills(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    close_time = datetime(2026, 1, 1, 12, 15, tzinfo=UTC)
+    collector._states[ticker] = KalshiTickerState(
+        ticker=ticker,
+        last_yes_price_cents=30,
+        last_trade_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        previous_yes_price_cents=29,
+        close_time=close_time,
+        is_open=True,
+        yes_bid_cents=29,
+        yes_ask_cents=31,
+        ticker_update_time=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        received_at=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+    )
+    scorer = _LayeringFakeScorer(collector)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            starting_cash_dollars=100.0,
+            contracts_per_order=10,
+            allow_stacking=True,
+            min_tau_minutes=0.0,
+            enable_bucket_ban_policy=False,
+            price_band_min_cents=0,
+            price_band_max_cents=100,
+        ),
+    )
+    layering_engine = KalshiPathDependentBinaryLayeringEngine(signal_engine, log_dir=tmp_path / "layering-live-initial-fill")
+    execution_engine = _DummyLiveExecutionEngine()
+    layering_engine.bind_execution_engine(execution_engine)
+    layering_queue = layering_engine.subscribe_queue()
+    trade_intent_queue = layering_engine.subscribe_trade_intent_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        await layering_engine.start()
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 5, 30, tzinfo=UTC),
+                tau_minutes=9.5,
+                predicted_yes_probability=0.76,
+                last_yes_price_cents=30,
+                yes_bid_cents=29,
+                yes_ask_cents=31,
+            )
+        )
+        first_intent = await _wait_for_trade_intent(
+            trade_intent_queue,
+            lambda intent: intent.tranche_window == "10m",
+            timeout=1.0,
+        )
+
+        await layering_engine._handle_execution_update(
+            _execution_update_from_intent(
+                first_intent,
+                status="cancelled",
+                event_time=datetime(2026, 1, 1, 12, 5, 30, 100000, tzinfo=UTC),
+                order_id="order-10m",
+                message="cancelled_zero_fill",
+            )
+        )
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 10, 30, tzinfo=UTC),
+                tau_minutes=4.5,
+                predicted_yes_probability=0.76,
+                last_yes_price_cents=30,
+                yes_bid_cents=29,
+                yes_ask_cents=31,
+            )
+        )
+        recovery_intent = await _wait_for_trade_intent(
+            trade_intent_queue,
+            lambda intent: intent.tranche_window == "5m",
+            timeout=1.0,
+        )
+        assert recovery_intent.contracts == 1
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 11, 10, tzinfo=UTC),
+                tau_minutes=3.8,
+                predicted_yes_probability=0.76,
+                last_yes_price_cents=30,
+                yes_bid_cents=29,
+                yes_ask_cents=31,
+            )
+        )
+        awaiting_fill = await _wait_for_layering_action(layering_queue, "awaiting_initial_fill", timeout=1.0)
+        assert awaiting_fill.decision_window == "4m"
+
+        with pytest.raises(TimeoutError):
+            await _wait_for_trade_intent(
+                trade_intent_queue,
+                lambda intent: intent.tranche_window == "4m",
+                timeout=0.05,
+            )
+
+        await layering_engine._handle_execution_update(
+            _execution_update_from_intent(
+                recovery_intent,
+                status="filled",
+                event_time=datetime(2026, 1, 1, 12, 11, 15, tzinfo=UTC),
+                order_id="order-5m",
+                filled_contracts=1,
+                fill_price_cents=recovery_intent.max_acceptable_entry_price_cents,
+                message="order_terminal_fill",
+            )
+        )
+
+        await scorer.publish(
+            _score_state(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 11, 20, tzinfo=UTC),
+                tau_minutes=3.67,
+                predicted_yes_probability=0.76,
+                last_yes_price_cents=30,
+                yes_bid_cents=29,
+                yes_ask_cents=31,
+            )
+        )
+        fourth_minute_intent = await _wait_for_trade_intent(
+            trade_intent_queue,
+            lambda intent: intent.tranche_window == "4m",
+            timeout=1.0,
+        )
+
+        assert fourth_minute_intent.contracts > recovery_intent.contracts
 
         await layering_engine.stop()
         await signal_engine.stop()

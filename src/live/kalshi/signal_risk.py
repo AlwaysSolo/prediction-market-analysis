@@ -94,6 +94,7 @@ class KalshiSignalRiskConfig:
     kelly_fraction_multiplier: float | None = None
     kelly_fraction_cap_pct: float | None = None
     reserve_cash_pct: float = 30.0
+    max_ticker_side_exposure_dollars: float | None = None
     slippage_pct: float = 1.0
     price_band_min_cents: int = 20
     price_band_max_cents: int = 80
@@ -141,6 +142,8 @@ class KalshiSignalRiskConfig:
             raise ValueError("kelly_fraction_cap_pct must be positive when provided")
         if not (0 <= self.reserve_cash_pct < 100):
             raise ValueError("reserve_cash_pct must be between 0 and 100")
+        if self.max_ticker_side_exposure_dollars is not None and self.max_ticker_side_exposure_dollars <= 0:
+            raise ValueError("max_ticker_side_exposure_dollars must be positive when provided")
         if self.slippage_pct < 0:
             raise ValueError("slippage_pct must be non-negative")
         if not (0 <= self.price_band_min_cents <= 99):
@@ -216,6 +219,9 @@ class KalshiSignalRiskConfig:
                 else None
             ),
             reserve_cash_pct=float(_resolve_env_value(environment, "RESERVE_CASH_PCT") or 30.0),
+            max_ticker_side_exposure_dollars=(
+                _optional_float(_resolve_env_value(environment, "MAX_TICKER_SIDE_EXPOSURE_DOLLARS"))
+            ),
             slippage_pct=float(_resolve_env_value(environment, "SLIPPAGE_PCT") or 1.0),
             price_band_min_cents=int(_resolve_env_value(environment, "PRICE_BAND_MIN_CENTS") or 20),
             price_band_max_cents=int(_resolve_env_value(environment, "PRICE_BAND_MAX_CENTS") or 80),
@@ -788,6 +794,7 @@ class KalshiSignalRiskEngine:
                 "capital_pct_per_order": self.config.capital_pct_per_order,
                 "kelly_fraction_multiplier": self.config.kelly_fraction_multiplier,
                 "kelly_fraction_cap_pct": self.config.kelly_fraction_cap_pct,
+                "max_ticker_side_exposure_dollars": self.config.max_ticker_side_exposure_dollars,
                 "price_band_min_cents": self.config.price_band_min_cents,
                 "price_band_max_cents": self.config.price_band_max_cents,
                 "quote_max_age_seconds": self.config.quote_max_age_seconds,
@@ -953,16 +960,21 @@ class KalshiSignalRiskEngine:
     ) -> int:
         if entry_price_cents <= 0:
             return 0
+        exposure_headroom_dollars = self._ticker_side_exposure_headroom_dollars(decision_state.ticker, side)
         if cash_budget_dollars is not None:
-            if cash_budget_dollars <= 0:
+            effective_cash_budget = cash_budget_dollars
+            if exposure_headroom_dollars is not None:
+                effective_cash_budget = min(effective_cash_budget, exposure_headroom_dollars)
+            if effective_cash_budget <= 0:
                 return 0
             return self._max_contracts_for_cash_budget(
                 side=side,
                 predicted_yes_probability=decision_state.predicted_yes_probability,
                 entry_price_cents=entry_price_cents,
-                cash_budget=cash_budget_dollars,
+                cash_budget=effective_cash_budget,
             )
         return self._resolve_contracts(
+            ticker=decision_state.ticker,
             side=side,
             predicted_yes_probability=decision_state.predicted_yes_probability,
             entry_price_cents=entry_price_cents,
@@ -1050,6 +1062,12 @@ class KalshiSignalRiskEngine:
         ):
             return None
         if cash_budget_dollars is not None and cash_required_dollars > cash_budget_dollars + 1e-12:
+            return None
+        if self._would_breach_ticker_side_exposure_cap(
+            ticker=decision_state.ticker,
+            side=normalized_side,
+            additional_cash_required_dollars=cash_required_dollars,
+        ):
             return None
 
         available_cash, _deployed_capital, equity, _reserved_cash = self._portfolio_metrics()
@@ -1743,6 +1761,30 @@ class KalshiSignalRiskEngine:
                 chosen_buckets=chosen_buckets,
             )
 
+        if self._would_breach_ticker_side_exposure_cap(
+            ticker=score_state.ticker,
+            side=side,
+            additional_cash_required_dollars=cash_required_dollars,
+        ):
+            return self._blocked_candidate(
+                score_state,
+                side=side,
+                predicted_no_probability=predicted_no_probability,
+                raw_model_edge=raw_model_edge,
+                post_cost_edge=post_cost_edge,
+                yes_post_cost_edge=yes_post_cost_edge,
+                no_post_cost_edge=no_post_cost_edge,
+                reference_price_cents=reference_price_cents,
+                max_acceptable_entry_price_cents=max_acceptable_entry_price_cents,
+                block_reason="ticker_side_exposure_cap",
+                contracts=contracts,
+                entry_cost_dollars=entry_cost_dollars,
+                fees_dollars=fees_dollars,
+                cash_required_dollars=cash_required_dollars,
+                regime=regime,
+                chosen_buckets=chosen_buckets,
+            )
+
         if self._cooldown_is_active():
             return self._blocked_candidate(
                 score_state,
@@ -2019,6 +2061,7 @@ class KalshiSignalRiskEngine:
         if entry_price_cents < self.config.price_band_min_cents or entry_price_cents > self.config.price_band_max_cents:
             return None
         contracts = self._resolve_contracts(
+            ticker=score_state.ticker,
             side=side,
             predicted_yes_probability=score_state.predicted_yes_probability,
             entry_price_cents=entry_price_cents,
@@ -2110,6 +2153,33 @@ class KalshiSignalRiskEngine:
                 slippage=self.config.slippage,
             )
             candidate_cash_requirements.append(cash_required_1)
+        if (
+            candidate_cash_requirements
+            and all(
+                self._would_breach_ticker_side_exposure_cap(
+                    ticker=score_state.ticker,
+                    side=side,
+                    additional_cash_required_dollars=cash_required_1,
+                )
+                for side, entry_price_cents, cash_required_1 in (
+                    (
+                        side,
+                        entry_price_cents,
+                        calculate_cost_metrics(
+                            side=side,
+                            predicted_yes_probability=score_state.predicted_yes_probability,
+                            displayed_entry_price_cents=entry_price_cents,
+                            contracts=1,
+                            slippage=self.config.slippage,
+                        )[3],
+                    )
+                    for side, entry_price_cents in (("YES", buy_yes_price_cents), ("NO", buy_no_price_cents))
+                    if entry_price_cents is not None
+                    and self.config.price_band_min_cents <= entry_price_cents <= self.config.price_band_max_cents
+                )
+            )
+        ):
+            return "ticker_side_exposure_cap"
         if available_cash <= 0:
             return "insufficient_cash"
         if candidate_cash_requirements and available_cash + 1e-12 < min(candidate_cash_requirements):
@@ -2131,6 +2201,7 @@ class KalshiSignalRiskEngine:
     def _resolve_contracts(
         self,
         *,
+        ticker: str | None = None,
         side: str,
         predicted_yes_probability: float,
         entry_price_cents: int,
@@ -2138,6 +2209,7 @@ class KalshiSignalRiskEngine:
         available_cash, deployed_capital, equity, _reserved_cash = self._portfolio_metrics()
         reserve_cash = (self.config.reserve_cash_pct / 100.0) * equity
         deployable_cash = max(0.0, available_cash - reserve_cash)
+        exposure_headroom_dollars = None if ticker is None else self._ticker_side_exposure_headroom_dollars(ticker, side)
 
         if self.config.kelly_fraction_multiplier is not None:
             kelly = calculate_kelly_sizing_metrics(
@@ -2154,6 +2226,8 @@ class KalshiSignalRiskEngine:
             )
             target_fraction = kelly.capped_fraction_of_equity
             cash_budget = min(target_fraction * equity, deployable_cash)
+            if exposure_headroom_dollars is not None:
+                cash_budget = min(cash_budget, exposure_headroom_dollars)
             if cash_budget <= 0 or kelly.per_contract_cash_required_dollars > cash_budget + 1e-12:
                 return 0
             return self._max_contracts_for_cash_budget(
@@ -2165,6 +2239,8 @@ class KalshiSignalRiskEngine:
 
         if self.config.capital_pct_per_order is not None:
             cash_budget = min(equity * (self.config.capital_pct_per_order / 100.0), deployable_cash)
+            if exposure_headroom_dollars is not None:
+                cash_budget = min(cash_budget, exposure_headroom_dollars)
             if cash_budget <= 0:
                 return 0
             _edge_1, _entry_1, _fees_1, cash_required_1 = calculate_cost_metrics(
@@ -2183,7 +2259,27 @@ class KalshiSignalRiskEngine:
                 cash_budget=cash_budget,
             )
 
-        return self.config.contracts_per_order
+        if exposure_headroom_dollars is None:
+            return self.config.contracts_per_order
+
+        if exposure_headroom_dollars <= 0:
+            return 0
+        _edge_1, _entry_1, _fees_1, cash_required_1 = calculate_cost_metrics(
+            side=side,
+            predicted_yes_probability=predicted_yes_probability,
+            displayed_entry_price_cents=entry_price_cents,
+            contracts=1,
+            slippage=self.config.slippage,
+        )
+        if cash_required_1 > exposure_headroom_dollars + 1e-12:
+            return 0
+        max_contracts_for_cap = self._max_contracts_for_cash_budget(
+            side=side,
+            predicted_yes_probability=predicted_yes_probability,
+            entry_price_cents=entry_price_cents,
+            cash_budget=exposure_headroom_dollars,
+        )
+        return min(self.config.contracts_per_order, max_contracts_for_cap)
 
     def _max_contracts_for_cash_budget(
         self,
@@ -2231,6 +2327,35 @@ class KalshiSignalRiskEngine:
         )
         equity = available_cash + deployed_capital
         return available_cash, deployed_capital, equity, pending_cash_required
+
+    def _ticker_side_exposure_dollars(self, ticker: str, side: str) -> float:
+        normalized_side = side.upper()
+        exposure = 0.0
+        for position in self._baseline_snapshot.open_positions:
+            if position.ticker == ticker and position.side.upper() == normalized_side:
+                exposure += position.cash_required_dollars
+        for position in self._local_open_positions.values():
+            if position.ticker == ticker and position.side.upper() == normalized_side:
+                exposure += position.cash_required_dollars
+        for reservation in self._pending_reservations.values():
+            if reservation.ticker == ticker and reservation.side.upper() == normalized_side:
+                exposure += reservation.cash_required_dollars
+        return exposure
+
+    def _ticker_side_exposure_headroom_dollars(self, ticker: str, side: str) -> float | None:
+        if self.config.max_ticker_side_exposure_dollars is None:
+            return None
+        return max(0.0, self.config.max_ticker_side_exposure_dollars - self._ticker_side_exposure_dollars(ticker, side))
+
+    def _would_breach_ticker_side_exposure_cap(
+        self,
+        *,
+        ticker: str,
+        side: str,
+        additional_cash_required_dollars: float,
+    ) -> bool:
+        headroom = self._ticker_side_exposure_headroom_dollars(ticker, side)
+        return headroom is not None and additional_cash_required_dollars > headroom + 1e-12
 
     def _combined_open_positions(self) -> list[KalshiPortfolioPosition]:
         combined = list(self._baseline_snapshot.open_positions)

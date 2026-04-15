@@ -79,6 +79,7 @@ def _build_live_signal_config(
     signal_profile: str = DEDICATED_LIVE_SIGNAL_PROFILE,
     allow_stacking: bool = False,
     disable_regime_control: bool = False,
+    disable_bucket_controls: bool = False,
     edge_threshold_cents: float | None = None,
 ) -> KalshiSignalRiskConfig:
     base_config, _loaded_policy = signal_config_from_env_and_policy(environment, policy_file)
@@ -98,6 +99,7 @@ def _build_live_signal_config(
         capital_pct_per_order=None,
         kelly_fraction_multiplier=None,
         kelly_fraction_cap_pct=None,
+        max_ticker_side_exposure_dollars=1.0,
         allow_stacking=allow_stacking,
         maintain_edge_cents=resolved_maintain_edge_cents,
     )
@@ -126,6 +128,15 @@ def _build_live_signal_config(
         blocked_regime_labels=(frozenset() if disable_regime_control else DEDICATED_LIVE_BLOCKED_REGIME_LABELS),
         max_tau_minutes=min(base_config.max_tau_minutes, DEDICATED_LIVE_MAX_TAU_MINUTES),
     )
+    if disable_bucket_controls:
+        config = replace(
+            config,
+            price_band_min_cents=0,
+            price_band_max_cents=100,
+            enable_bucket_ban_policy=False,
+            enable_combo_ban_policy=False,
+            banned_combo_buckets=frozenset(),
+        )
     return config
 
 
@@ -143,6 +154,7 @@ def _build_execution_config(
         log_dir=log_dir,
         skip_rest_orderbook_check_for_immediate_orders=True,
         enable_direct_trade_intent_handoff_in_live_mode=True,
+        yes_probe_immediate_limit_cushion_cents=2,
         no_probe_immediate_limit_cushion_cents=2,
     )
 
@@ -323,6 +335,7 @@ async def _run(args: argparse.Namespace) -> None:
         signal_profile=args.signal_profile,
         allow_stacking=args.allow_stacking,
         disable_regime_control=args.disable_regime_control,
+        disable_bucket_controls=args.disable_bucket_controls,
         edge_threshold_cents=args.edge_threshold_cents,
     )
     layering_engine = None
@@ -377,6 +390,7 @@ async def _run(args: argparse.Namespace) -> None:
         f"bucket_ban={signal_config.enable_bucket_ban_policy}",
         f"combo_ban={signal_config.enable_combo_ban_policy}",
         f"contracts={signal_config.contracts_per_order}",
+        f"max_ticker_side_exposure=${signal_config.max_ticker_side_exposure_dollars}",
         f"stacking={signal_config.allow_stacking}",
     )
     print(
@@ -538,6 +552,14 @@ def main() -> None:
         "--disable-regime-control",
         action="store_true",
         help="Disable blocked-regime labels and the YES/downtrend regime gate for testing.",
+    )
+    parser.add_argument(
+        "--disable-bucket-controls",
+        action="store_true",
+        help=(
+            "Disable bucket bans, combo bans, and price-band restrictions for this live run. "
+            "This opens YES/NO entries to the full 0-100 price range."
+        ),
     )
     parser.add_argument(
         "--edge-threshold-cents",

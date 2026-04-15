@@ -126,6 +126,7 @@ def test_signal_risk_config_from_env_uses_demo_override_and_shared_fallback(monk
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_LOW_LIQUIDITY_MIN_TRADE_COUNT_300S", "4")
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_STRUCTURAL_REGIME_REFRESH_SECONDS", "45")
     monkeypatch.setenv("KALSHI_DEMO_SIGNAL_STRUCTURAL_REGIME_FLIP_CONFIRMATIONS", "3")
+    monkeypatch.setenv("KALSHI_DEMO_SIGNAL_MAX_TICKER_SIDE_EXPOSURE_DOLLARS", "1.25")
 
     demo_config = KalshiSignalRiskConfig.from_env(KalshiEnvironment.DEMO)
     prod_config = KalshiSignalRiskConfig.from_env(KalshiEnvironment.PRODUCTION)
@@ -143,6 +144,7 @@ def test_signal_risk_config_from_env_uses_demo_override_and_shared_fallback(monk
     assert demo_config.low_liquidity_min_trade_count_300s == pytest.approx(4.0)
     assert demo_config.structural_regime_refresh_seconds == pytest.approx(45.0)
     assert demo_config.structural_regime_flip_confirmations == 3
+    assert demo_config.max_ticker_side_exposure_dollars == pytest.approx(1.25)
     assert demo_config.banned_yes_tau_buckets == frozenset({"2-4", "4-6"})
     assert prod_config.starting_cash_dollars == 10.0
     assert prod_config.allow_stacking is True
@@ -166,6 +168,7 @@ def test_signal_risk_config_defaults():
     assert config.capital_pct_per_order is None
     assert config.kelly_fraction_multiplier is None
     assert config.kelly_fraction_cap_pct is None
+    assert config.max_ticker_side_exposure_dollars is None
     assert config.price_band_min_cents == 20
     assert config.price_band_max_cents == 80
     assert config.quote_max_age_seconds == 3.0
@@ -1644,6 +1647,183 @@ def test_signal_risk_manual_trade_reservation_builds_layering_metadata(tmp_path:
         assert manual.expected_value_dollars == pytest.approx(0.19)
         assert manual.worst_case_loss_dollars == pytest.approx(0.57)
 
+        await signal_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_signal_risk_manual_trade_reservation_respects_ticker_side_exposure_cap(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scorer = _FakeScorer(
+        collector,
+        {
+            "KXBTC15M-TEST": KalshiLightGBMScoreState(
+                ticker="KXBTC15M-TEST",
+                event_time=event_time,
+                market_prob=0.20,
+                tau_minutes=9.0,
+                predicted_yes_probability=0.20,
+                model_edge=-0.60,
+                model_file=Path("fake-model.txt"),
+                last_yes_price_cents=20,
+                last_price_cents=20,
+                yes_bid_cents=72,
+                yes_ask_cents=74,
+                no_bid_cents=26,
+                no_ask_cents=28,
+                ticker_update_time=event_time,
+                trade_yes_prob=0.20,
+                quote_mid_prob=0.73,
+                quote_spread_cents=2,
+                buy_yes_price_cents=74,
+                buy_no_price_cents=28,
+                quote_age_seconds=0.0,
+                last_to_mid_gap=-0.53,
+            )
+        },
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            allow_stacking=True,
+            max_ticker_side_exposure_dollars=1.0,
+            enable_bucket_ban_policy=False,
+        ),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert update.approved is True
+        assert update.side == "NO"
+        assert update.trade_intent is None
+
+        await signal_engine.apply_portfolio_snapshot(
+            KalshiPortfolioSnapshot(
+                event_time=event_time,
+                available_cash_dollars=9.44,
+                deployed_capital_dollars=0.55,
+                open_positions=(
+                    KalshiPortfolioPosition(
+                        ticker="KXBTC15M-TEST",
+                        side="NO",
+                        contracts=3,
+                        entry_cost_dollars=0.84,
+                        fees_dollars=0.01,
+                        cash_required_dollars=0.85,
+                    ),
+                ),
+            )
+        )
+
+        resolved_contracts = signal_engine.resolve_manual_trade_contracts(
+            decision_state=update,
+            side="NO",
+            entry_price_cents=28,
+        )
+        assert resolved_contracts == 0
+
+        manual = signal_engine.reserve_manual_trade_intent(
+            decision_state=update,
+            side="NO",
+            entry_price_cents=28,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+        )
+        await signal_engine.stop()
+
+        assert manual is None
+
+    asyncio.run(run())
+
+
+def test_signal_risk_manual_trade_contracts_are_clamped_by_ticker_side_exposure_cap(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scorer = _FakeScorer(
+        collector,
+        {
+            "KXBTC15M-TEST": KalshiLightGBMScoreState(
+                ticker="KXBTC15M-TEST",
+                event_time=event_time,
+                market_prob=0.55,
+                tau_minutes=9.0,
+                predicted_yes_probability=0.78,
+                model_edge=0.23,
+                model_file=Path("fake-model.txt"),
+                last_yes_price_cents=55,
+                last_price_cents=55,
+                yes_bid_cents=54,
+                yes_ask_cents=56,
+                no_bid_cents=44,
+                no_ask_cents=46,
+                ticker_update_time=event_time,
+                trade_yes_prob=0.55,
+                quote_mid_prob=0.55,
+                quote_spread_cents=2,
+                buy_yes_price_cents=56,
+                buy_no_price_cents=46,
+                quote_age_seconds=0.0,
+                last_to_mid_gap=0.0,
+            )
+        },
+    )
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,  # type: ignore[arg-type]
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            allow_stacking=True,
+            contracts_per_order=5,
+            starting_cash_dollars=100.0,
+            max_ticker_side_exposure_dollars=1.0,
+            enable_bucket_ban_policy=False,
+        ),
+    )
+    queue = signal_engine.subscribe_queue()
+
+    async def run() -> None:
+        await signal_engine.start()
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert update.approved is True
+        assert update.trade_intent is None
+
+        await signal_engine.apply_portfolio_snapshot(
+            KalshiPortfolioSnapshot(
+                event_time=event_time,
+                available_cash_dollars=99.44,
+                deployed_capital_dollars=0.55,
+                open_positions=(
+                    KalshiPortfolioPosition(
+                        ticker="KXBTC15M-TEST",
+                        side="YES",
+                        contracts=1,
+                        entry_cost_dollars=0.55,
+                        fees_dollars=0.01,
+                        cash_required_dollars=0.56,
+                    ),
+                ),
+            )
+        )
+
+        resolved_contracts = signal_engine.resolve_manual_trade_contracts(
+            decision_state=update,
+            side="YES",
+            entry_price_cents=30,
+        )
+        assert resolved_contracts == 1
+
+        manual = signal_engine.reserve_manual_trade_intent(
+            decision_state=update,
+            side="YES",
+            entry_price_cents=30,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+        )
+        assert manual is not None
+        assert manual.contracts == 1
         await signal_engine.stop()
 
     asyncio.run(run())

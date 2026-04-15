@@ -42,6 +42,9 @@ class KalshiPathDependentBinaryLayeringConfig:
     live_retry_quote_change_min_cents: int = 1
     live_requote_soft_buffer_cents: int = 1
     live_target_endgame_seconds: float = 20.0
+    live_require_initial_fill_before_full_scale: bool = True
+    live_initial_fill_recovery_window: str = "5m"
+    live_initial_fill_recovery_contracts: int = 1
     allow_full_flip_relayer: bool = True
     hold_to_settlement: bool = True
     enable_early_exit: bool = False
@@ -68,6 +71,10 @@ class KalshiPathDependentBinaryLayeringConfig:
             raise ValueError("live_requote_soft_buffer_cents must be non-negative")
         if self.live_target_endgame_seconds < 0:
             raise ValueError("live_target_endgame_seconds must be non-negative")
+        if self.live_initial_fill_recovery_window not in WINDOW_ORDER[1:]:
+            raise ValueError("live_initial_fill_recovery_window must be one of the later layering windows")
+        if self.live_initial_fill_recovery_contracts <= 0:
+            raise ValueError("live_initial_fill_recovery_contracts must be positive")
         if self.recovery_lookback_hours <= 0:
             raise ValueError("recovery_lookback_hours must be positive")
 
@@ -337,6 +344,10 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
     @staticmethod
     def _target_remaining_contracts(tranche: KalshiBinaryTranche) -> int:
         return max(0, tranche.requested_contracts - tranche.filled_contracts)
+
+    @staticmethod
+    def _ledger_cumulative_filled_contracts(ledger: KalshiBinaryThesisLedger) -> int:
+        return sum(max(0, tranche.filled_contracts) for tranche in ledger.tranches)
 
     @staticmethod
     def _target_is_terminal(tranche: KalshiBinaryTranche) -> bool:
@@ -1325,6 +1336,45 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
             entry_price_cents=entry_price_cents,
             cash_budget_dollars=tranche_budget,
         )
+        tranche_adjustment_message: str | None = None
+        if self._is_live_target_mode() and self.config.live_require_initial_fill_before_full_scale:
+            cumulative_filled_contracts = self._ledger_cumulative_filled_contracts(ledger)
+            if cumulative_filled_contracts <= 0:
+                if next_window == self.config.live_initial_fill_recovery_window:
+                    adjusted_contracts = min(projected_contracts, self.config.live_initial_fill_recovery_contracts)
+                    if adjusted_contracts < projected_contracts:
+                        tranche_adjustment_message = (
+                            "no prior filled contracts; reduced tranche to "
+                            f"{adjusted_contracts}-contract recovery probe"
+                        )
+                    projected_contracts = adjusted_contracts
+                elif next_window in WINDOW_ORDER[2:]:
+                    await self._publish_decision(
+                        KalshiLayeringDecision(
+                            event_time=update.event_time,
+                            ticker=update.ticker,
+                            thesis_id=ledger.thesis_id,
+                            action="awaiting_initial_fill",
+                            status="blocked",
+                            decision_window=next_window,
+                            side=update.side,
+                            tranche_index=next_index,
+                            contracts=projected_contracts,
+                            entry_price_cents=entry_price_cents,
+                            payout_if_yes_dollars=ledger.payout_if_yes_dollars,
+                            payout_if_no_dollars=ledger.payout_if_no_dollars,
+                            expected_value_dollars=ledger.current_expected_value_dollars,
+                            worst_case_loss_dollars=ledger.worst_case_loss_dollars,
+                            total_thesis_budget_dollars=ledger.total_thesis_budget_dollars,
+                            lifecycle_state=ledger.lifecycle_state,
+                            message=(
+                                "late scaling requires at least one earlier filled contract; "
+                                "waiting for recovery probe to fill"
+                            ),
+                        ),
+                        ledger=replace(ledger, updated_at=update.event_time),
+                    )
+                    return
         if projected_contracts <= 0:
             await self._publish_decision(
                 KalshiLayeringDecision(
@@ -1471,6 +1521,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
                     desired_contracts=tranche.requested_contracts,
                     remaining_contracts=self._target_remaining_contracts(tranche),
                     hard_max_price_cents=tranche.hard_max_price_cents,
+                    message=tranche_adjustment_message,
                 ),
                 ledger=updated_ledger,
             )
@@ -1576,6 +1627,7 @@ class KalshiPathDependentBinaryLayeringEngine(KalshiTradeIntentSource):
                 worst_case_loss_dollars=updated_ledger.worst_case_loss_dollars,
                 total_thesis_budget_dollars=updated_ledger.total_thesis_budget_dollars,
                 lifecycle_state=updated_ledger.lifecycle_state,
+                message=tranche_adjustment_message,
             ),
             ledger=updated_ledger,
         )

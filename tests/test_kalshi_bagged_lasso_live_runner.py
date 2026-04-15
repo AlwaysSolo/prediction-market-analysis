@@ -59,6 +59,7 @@ def test_build_live_signal_config_forces_live_profile_overrides(tmp_path: Path) 
     assert config.capital_pct_per_order is None
     assert config.kelly_fraction_multiplier is None
     assert config.kelly_fraction_cap_pct is None
+    assert config.max_ticker_side_exposure_dollars == 1.0
     assert config.max_tau_minutes == 10.0
     assert config.blocked_regime_labels == frozenset({"neutral"})
     assert config.banned_combo_buckets == frozenset(
@@ -134,6 +135,7 @@ def test_build_live_signal_config_supports_research_parity_profile(tmp_path: Pat
     assert config.capital_pct_per_order is None
     assert config.kelly_fraction_multiplier is None
     assert config.kelly_fraction_cap_pct is None
+    assert config.max_ticker_side_exposure_dollars == 1.0
     assert config.allow_stacking is True
 
 
@@ -161,6 +163,36 @@ def test_build_live_signal_config_can_disable_regime_control(tmp_path: Path) -> 
     assert config.apply_regime_hard_gate is False
     assert config.blocked_regime_labels == frozenset()
     assert config.enable_combo_ban_policy is True
+
+
+def test_build_live_signal_config_can_disable_bucket_controls(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "edge_threshold_cents": 6.0,
+                    "price_band_min_cents": 20,
+                    "price_band_max_cents": 80,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = _build_live_signal_config(
+        KalshiEnvironment.PRODUCTION,
+        policy_path,
+        signal_profile=DEDICATED_LIVE_SIGNAL_PROFILE,
+        disable_bucket_controls=True,
+    )
+
+    assert config.price_band_min_cents == 0
+    assert config.price_band_max_cents == 100
+    assert config.enable_bucket_ban_policy is False
+    assert config.enable_combo_ban_policy is False
+    assert config.banned_combo_buckets == frozenset()
+    assert config.blocked_regime_labels == frozenset({"neutral"})
 
 
 def test_build_live_signal_config_supports_explicit_edge_threshold_override(tmp_path: Path) -> None:
