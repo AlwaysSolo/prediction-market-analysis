@@ -571,10 +571,10 @@ def test_simulated_live_fill_settles_to_market_outcome(tmp_path: Path, monkeypat
 
         settled = await _wait_for_status(queue, "settled", timeout=1.5)
         assert settled.settlement_result == "YES"
-        assert settled.realized_pnl_dollars == pytest.approx(0.4245)
-        assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.4245)
+        assert settled.realized_pnl_dollars == pytest.approx(0.43)
+        assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.43)
         assert execution_engine.get_portfolio_snapshot() is not None
-        assert execution_engine.get_portfolio_snapshot().available_cash_dollars == pytest.approx(10.4245)
+        assert execution_engine.get_portfolio_snapshot().available_cash_dollars == pytest.approx(10.43)
 
         await execution_engine.stop()
         await signal_engine.stop()
@@ -2047,7 +2047,7 @@ def test_execution_engine_shadow_mode_requotes_fill_price_before_simulated_fill(
             ignore_trade_cooldown=True,
         )
         assert manual_intent is not None
-        manual_intent = replace(manual_intent, max_acceptable_entry_price_cents=56)
+        manual_intent = replace(manual_intent, max_acceptable_entry_price_cents=55)
         await trade_intent_source.queue.put(manual_intent)
 
         accepted = await _wait_for_status(execution_queue, "accepted", timeout=1.0)
@@ -2074,7 +2074,7 @@ def test_execution_engine_shadow_mode_requotes_fill_price_before_simulated_fill(
 
         filled = await _wait_for_status(execution_queue, "filled", timeout=2.0)
         assert filled.fill_price_cents == 56
-        assert filled.message == "shadow_fill_requoted"
+        assert filled.message == "shadow_fill_requoted_edge_maintained"
         assert filled.cash_required_dollars == pytest.approx(0.58)
 
         await execution_engine.stop()
@@ -2144,17 +2144,17 @@ def test_execution_engine_shadow_mode_cancels_when_quote_moves_beyond_limit(
         await collector._publish_update(
             _ticker_update(
                 event_time=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
-                last_yes_price_cents=57,
+                last_yes_price_cents=90,
                 previous_yes_price_cents=55,
-                yes_bid_cents=56,
-                yes_ask_cents=57,
+                yes_bid_cents=89,
+                yes_ask_cents=90,
                 ticker_update_time=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
             )
         )
         await _wait_for_condition(
             lambda: (
                 scorer.get_state("KXBTC15M-TEST") is not None
-                and scorer.get_state("KXBTC15M-TEST").buy_yes_price_cents == 57
+                and scorer.get_state("KXBTC15M-TEST").buy_yes_price_cents == 90
             ),
             timeout=1.0,
         )
@@ -2162,6 +2162,173 @@ def test_execution_engine_shadow_mode_cancels_when_quote_moves_beyond_limit(
         cancelled = await _wait_for_status(execution_queue, "cancelled", timeout=2.0)
         assert cancelled.fill_price_cents is None
         assert cancelled.message == "shadow_cancelled_limit_moved_away"
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_paper_mode_requotes_fill_price_before_simulated_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            starting_cash_dollars=100.0,
+            contracts_per_order=1,
+        ),
+    )
+    trade_intent_source = _QueueTradeIntentSource()
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.PAPER,
+            reconcile_interval_seconds=0.05,
+        ),
+        trade_intent_source=trade_intent_source,
+    )
+    execution_engine._rest_client = _FakeRestClient()
+    signal_queue = signal_engine.subscribe_queue()
+    execution_queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update())
+
+        approved = await asyncio.wait_for(signal_queue.get(), timeout=0.5)
+        assert approved.approved is True
+
+        manual_intent = signal_engine.reserve_manual_trade_intent(
+            decision_state=approved,
+            side="YES",
+            entry_price_cents=55,
+            contracts=1,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+        )
+        assert manual_intent is not None
+        manual_intent = replace(manual_intent, max_acceptable_entry_price_cents=55)
+        await collector._publish_update(
+            _ticker_update(
+                event_time=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+                last_yes_price_cents=56,
+                previous_yes_price_cents=55,
+                yes_bid_cents=55,
+                yes_ask_cents=56,
+                ticker_update_time=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+            )
+        )
+        await _wait_for_condition(
+            lambda: (
+                scorer.get_state("KXBTC15M-TEST") is not None
+                and scorer.get_state("KXBTC15M-TEST").buy_yes_price_cents == 56
+            ),
+            timeout=1.0,
+        )
+        await trade_intent_source.queue.put(manual_intent)
+
+        accepted = await _wait_for_status(execution_queue, "accepted", timeout=1.0)
+        assert accepted.message == "paper_submit_accepted"
+
+        filled = await _wait_for_status(execution_queue, "filled", timeout=1.0)
+        assert filled.fill_price_cents == 56
+        assert filled.message == "paper_fill_requoted_edge_maintained"
+        assert filled.cash_required_dollars == pytest.approx(0.58)
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_paper_mode_cancels_when_quote_moves_beyond_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(
+        scorer,
+        KalshiSignalRiskConfig(
+            auto_reserve_trade_intents=False,
+            starting_cash_dollars=100.0,
+            contracts_per_order=1,
+        ),
+    )
+    trade_intent_source = _QueueTradeIntentSource()
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.PAPER,
+            reconcile_interval_seconds=0.05,
+        ),
+        trade_intent_source=trade_intent_source,
+    )
+    execution_engine._rest_client = _FakeRestClient()
+    signal_queue = signal_engine.subscribe_queue()
+    execution_queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(_ticker_update())
+
+        approved = await asyncio.wait_for(signal_queue.get(), timeout=0.5)
+        assert approved.approved is True
+
+        manual_intent = signal_engine.reserve_manual_trade_intent(
+            decision_state=approved,
+            side="YES",
+            entry_price_cents=55,
+            contracts=1,
+            allow_ticker_lock_bypass=True,
+            ignore_trade_cooldown=True,
+        )
+        assert manual_intent is not None
+        manual_intent = replace(manual_intent, max_acceptable_entry_price_cents=55)
+        await collector._publish_update(
+            _ticker_update(
+                event_time=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+                last_yes_price_cents=90,
+                previous_yes_price_cents=55,
+                yes_bid_cents=89,
+                yes_ask_cents=90,
+                ticker_update_time=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+            )
+        )
+        await _wait_for_condition(
+            lambda: (
+                scorer.get_state("KXBTC15M-TEST") is not None
+                and scorer.get_state("KXBTC15M-TEST").buy_yes_price_cents == 90
+            ),
+            timeout=1.0,
+        )
+        await trade_intent_source.queue.put(manual_intent)
+
+        accepted = await _wait_for_status(execution_queue, "accepted", timeout=1.0)
+        assert accepted.message == "paper_submit_accepted"
+
+        cancelled = await _wait_for_status(execution_queue, "cancelled", timeout=1.0)
+        assert cancelled.fill_price_cents is None
+        assert cancelled.message == "paper_cancelled_limit_moved_away"
 
         await execution_engine.stop()
         await signal_engine.stop()
@@ -2240,6 +2407,82 @@ def test_execution_engine_live_fill_emits_settled_state(tmp_path: Path, monkeypa
         assert settled.settlement_result == "YES"
         assert settled.realized_pnl_dollars == pytest.approx(0.44)
         assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.44)
+        assert fake_rest.get_market_calls >= 1
+
+        await execution_engine.stop()
+        await signal_engine.stop()
+        await scorer.stop()
+        await feature_engine.stop()
+
+    asyncio.run(run())
+
+
+def test_execution_engine_paper_fill_emits_settled_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    monkeypatch.setattr("src.live.kalshi.scorer.load_lightgbm_model_artifact", lambda _config: _fake_model(0.80))
+
+    feature_engine = KalshiFeatureStateEngine(collector)
+    scorer = KalshiLightGBMScorer(feature_engine)
+    signal_engine = KalshiSignalRiskEngine(scorer)
+    execution_engine = KalshiExecutionEngine(
+        signal_engine,
+        KalshiExecutionConfig(
+            mode=KalshiExecutionMode.PAPER,
+            reconcile_interval_seconds=0.05,
+        ),
+    )
+    fake_rest = _FakeRestClient()
+    ticker = "KXBTC15M-TEST"
+    fake_rest.market_results[ticker] = Market(
+        ticker=ticker,
+        event_ticker="KXBTC15M",
+        market_type="binary",
+        title="t",
+        yes_sub_title="y",
+        no_sub_title="n",
+        status="settled",
+        yes_bid=None,
+        yes_ask=None,
+        no_bid=None,
+        no_ask=None,
+        last_price=55,
+        volume=1,
+        volume_24h=1,
+        open_interest=1,
+        result="yes",
+        created_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        open_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+    )
+    execution_engine._rest_client = fake_rest
+    queue = execution_engine.subscribe_queue()
+
+    async def run() -> None:
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        await collector._publish_update(
+            _ticker_update(
+                ticker=ticker,
+                event_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+                close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            )
+        )
+
+        await _wait_for_status(queue, "filled", timeout=1.5)
+        collector._states[ticker] = KalshiTickerState(
+            ticker=ticker,
+            last_yes_price_cents=55,
+            last_trade_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            previous_yes_price_cents=54,
+            close_time=datetime(2026, 1, 1, 12, 7, tzinfo=UTC),
+            is_open=False,
+        )
+        settled = await _wait_for_status(queue, "settled", timeout=1.5)
+        assert settled.settlement_result == "YES"
+        assert settled.realized_pnl_dollars == pytest.approx(0.43)
+        assert settled.cumulative_realized_pnl_dollars == pytest.approx(0.43)
         assert fake_rest.get_market_calls >= 1
 
         await execution_engine.stop()

@@ -9,6 +9,8 @@ from src.live.kalshi import KalshiEnvironment, KalshiExecutionConfig, KalshiExec
 from scripts.run_kalshi_bagged_lasso_live import (
     DEDICATED_LIVE_SIGNAL_PROFILE,
     RESEARCH_PARITY_SIGNAL_PROFILE,
+    feature_schema_for_model_file,
+    requires_external_spot_feature_schema,
     _build_live_signal_config,
     validate_configured_subaccount_number,
     validate_live_runner_preflight,
@@ -295,3 +297,22 @@ def test_validate_configured_subaccount_number_rejects_empty_response() -> None:
             configured_subaccount=7,
             subaccount_balances=[],
         )
+
+
+def test_feature_schema_for_model_file_reads_run_manifest(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "bagged_lasso").mkdir(parents=True)
+    model_file = run_dir / "bagged_lasso" / "model.joblib"
+    model_file.write_text("placeholder", encoding="utf-8")
+    (run_dir / "feature_manifest.json").write_text(
+        json.dumps({"schema_name": "spot_v1"}),
+        encoding="utf-8",
+    )
+
+    assert feature_schema_for_model_file(model_file) == "spot_v1"
+
+
+def test_requires_external_spot_feature_schema_only_for_spot_v1() -> None:
+    assert requires_external_spot_feature_schema("spot_v1") is True
+    assert requires_external_spot_feature_schema("default") is False
+    assert requires_external_spot_feature_schema(None) is False

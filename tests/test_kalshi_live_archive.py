@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from src.indexers.kalshi.models import Market
 from src.live.kalshi import (
@@ -25,6 +26,7 @@ from src.live.kalshi import (
     KalshiSignalDecisionUpdate,
     KalshiTickerState,
     KalshiTradeIntent,
+    KalshiTickerUpdate,
     repair_live_archive,
 )
 from src.live.kalshi.features import feature_state_from_ticker_update, feature_update_from_state
@@ -323,3 +325,98 @@ def test_repair_live_archive_compacts_leftover_stage(tmp_path: Path) -> None:
     feature_files = list((tmp_path / "archive" / "feature_rows").rglob("*.parquet"))
     assert market_files
     assert feature_files
+
+
+def test_live_archive_feature_rows_write_v2_schema_when_spot_diagnostics_present(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    manager = _archive_manager(tmp_path, collector)
+    event_time = datetime(2026, 1, 1, 12, 3, tzinfo=UTC)
+    ticker_update = state_to_update(
+        KalshiTickerState(
+            ticker="KXBTC15M-TEST",
+            last_yes_price_cents=55,
+            last_trade_time=event_time,
+            previous_yes_price_cents=54,
+            close_time=datetime(2026, 1, 1, 12, 15, tzinfo=UTC),
+            is_open=True,
+            open_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            last_price_cents=55,
+            yes_bid_cents=54,
+            yes_ask_cents=56,
+            no_bid_cents=44,
+            no_ask_cents=46,
+            ticker_update_time=event_time,
+            received_at=event_time,
+            event_id="ticker:event-spot",
+            raw_event_id="session1:spot",
+        ),
+        event_time,
+        now=event_time,
+        source="ticker",
+    )
+    feature_update = feature_update_from_state(feature_state_from_ticker_update(ticker_update))
+    feature_update = feature_update.__class__(
+        **{
+            **feature_update.__dict__,
+            "btc_spot_price": 85000.0,
+            "btc_spot_twap_60s": 84999.5,
+            "btc_spot_age_ms": 120.0,
+            "btc_spot_is_fresh": True,
+            "btc_spot_venues_fresh": 2.0,
+            "btc_spot_venue_divergence_bps": 1.5,
+            "btc_vol_effective_sample_size": 120.0,
+            "btc_spot_source": "quote",
+        }
+    )
+
+    async def run() -> None:
+        await manager._write_feature_row(feature_update)
+        await manager.compact_all_staging()
+
+    asyncio.run(run())
+
+    feature_file = next((tmp_path / "archive" / "feature_rows").rglob("*.parquet"))
+    df = pd.read_parquet(feature_file)
+
+    assert df.iloc[0]["schema_version"] == "kalshi_feature_row_v2"
+    assert float(df.iloc[0]["btc_spot_price"]) == pytest.approx(85000.0)
+
+
+def test_live_archive_feature_rows_write_v2_schema_without_spot_fields(tmp_path: Path) -> None:
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    manager = _archive_manager(tmp_path, collector)
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    ticker_update = KalshiTickerUpdate(
+        ticker="KXBTC15M-TEST",
+        event_time=event_time,
+        last_yes_price_cents=55,
+        previous_yes_price_cents=54,
+        close_time=event_time + timedelta(minutes=5),
+        is_open=True,
+        market_prob=None,
+        previous_market_prob=None,
+        price_momentum=None,
+        tau_minutes=None,
+        open_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        last_price_cents=55,
+        yes_bid_cents=54,
+        yes_ask_cents=56,
+        no_bid_cents=44,
+        no_ask_cents=46,
+        ticker_update_time=event_time,
+        received_at=event_time,
+        event_id="ticker:event-nospot",
+        raw_event_id="session1:nospot",
+    )
+    feature_update = feature_update_from_state(feature_state_from_ticker_update(ticker_update))
+
+    async def run() -> None:
+        await manager._write_feature_row(feature_update)
+        await manager.compact_all_staging()
+
+    asyncio.run(run())
+
+    feature_file = next((tmp_path / "archive" / "feature_rows").rglob("*.parquet"))
+    df = pd.read_parquet(feature_file)
+
+    assert df.iloc[0]["schema_version"] == "kalshi_feature_row_v2"

@@ -41,6 +41,7 @@ from src.live.kalshi.scorer import (
 
 Callback = Callable[["KalshiSignalDecisionUpdate"], Awaitable[None] | None]
 TradeIntentCallback = Callable[["KalshiTradeIntent"], Awaitable[None] | None]
+ExternalBlocker = Callable[[str], str | None]
 StackingSignature = tuple[str | None, str | None, str | None, str | None, str | None]
 
 
@@ -770,6 +771,7 @@ class KalshiSignalRiskEngine:
         self._completed_stacking_signatures: dict[str, set[StackingSignature]] = defaultdict(set)
         self._structural_regime_memory: dict[str, _StructuralRegimeMemory] = {}
         self._last_trade_opened_at: datetime | None = None
+        self._external_blockers: list[ExternalBlocker] = []
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -896,6 +898,22 @@ class KalshiSignalRiskEngine:
         except ValueError:
             pass
 
+    def register_external_blocker(self, blocker: ExternalBlocker) -> None:
+        self._external_blockers.append(blocker)
+
+    def unregister_external_blocker(self, blocker: ExternalBlocker) -> None:
+        try:
+            self._external_blockers.remove(blocker)
+        except ValueError:
+            pass
+
+    def external_block_reason(self, ticker: str) -> str | None:
+        for blocker in self._external_blockers:
+            reason = blocker(ticker)
+            if reason:
+                return reason
+        return None
+
     def get_portfolio_state(self) -> KalshiSignalPortfolioState:
         available_cash, deployed_capital, equity, reserved_cash = self._portfolio_metrics()
         open_positions = tuple(self._combined_open_positions())
@@ -1017,6 +1035,8 @@ class KalshiSignalRiskEngine:
         normalized_side = side.upper()
         if normalized_side not in {"YES", "NO"}:
             raise ValueError(f"Unsupported manual trade side: {side}")
+        if self.external_block_reason(decision_state.ticker) is not None:
+            return None
         if entry_price_cents < self.config.price_band_min_cents or entry_price_cents > self.config.price_band_max_cents:
             return None
         if not allow_ticker_lock_bypass and not self.config.allow_stacking and self._ticker_is_locked(decision_state.ticker):
@@ -1156,6 +1176,9 @@ class KalshiSignalRiskEngine:
         self._local_open_positions.clear()
         affected_tickers = set(self._latest_scores) | set(expired_tickers)
         await self._reevaluate_tickers(affected_tickers)
+
+    async def reevaluate_all_tickers(self) -> None:
+        await self._reevaluate_tickers(self._latest_scores)
 
     async def apply_execution_feedback(self, feedback: KalshiExecutionFeedback) -> None:
         expired_tickers = self._expire_reservations()
@@ -1540,6 +1563,18 @@ class KalshiSignalRiskEngine:
                 displayed_entry_price_cents=buy_no_price_cents,
                 contracts=1,
                 slippage=self.config.slippage,
+            )
+
+        external_block_reason = self.external_block_reason(score_state.ticker)
+        if external_block_reason is not None:
+            return self._blocked_candidate(
+                score_state,
+                predicted_no_probability=predicted_no_probability,
+                raw_model_edge=raw_model_edge,
+                yes_post_cost_edge=yes_post_cost_edge,
+                no_post_cost_edge=no_post_cost_edge,
+                block_reason=external_block_reason,
+                regime=regime,
             )
 
         if score_state.tau_minutes < self.config.min_tau_minutes or score_state.tau_minutes > self.config.max_tau_minutes:

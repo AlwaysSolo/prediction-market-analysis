@@ -3,16 +3,23 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import hashlib
 
 import numpy as np
 from scipy.stats import norm
 
+from src.live.kalshi.spot_features import (
+    SPOT_DIAGNOSTIC_FIELDS,
+    SPOT_MODEL_FEATURE_SET,
+    SPOT_V1_FEATURE_ORDER,
+    SPOT_V1_FEATURE_SCHEMA,
+)
 from src.live.kalshi.types import KalshiTickerState, KalshiTickerUpdate
 
 ROLLING_WINDOW_SECONDS = (30, 120, 300)
 DEFAULT_FEATURE_SCHEMA = "default"
 LINEAR_V1_FEATURE_SCHEMA = "linear_v1"
-FEATURE_SCHEMA_CHOICES = (DEFAULT_FEATURE_SCHEMA, LINEAR_V1_FEATURE_SCHEMA)
+FEATURE_SCHEMA_CHOICES = (DEFAULT_FEATURE_SCHEMA, LINEAR_V1_FEATURE_SCHEMA, SPOT_V1_FEATURE_SCHEMA)
 FEATURE_ORDER = [
     "z_implied",
     "tau_minutes",
@@ -90,10 +97,19 @@ LINEAR_V1_FEATURE_ORDER = tuple(
     ]
     + list(LINEAR_V1_DERIVED_FEATURE_ORDER)
 )
-ALL_FEATURE_ORDER = tuple(dict.fromkeys([*FEATURE_ORDER, *HOURLY_CONTEXT_FEATURE_ORDER, *LINEAR_V1_DERIVED_FEATURE_ORDER]))
+ALL_FEATURE_ORDER = tuple(
+    dict.fromkeys([*FEATURE_ORDER, *HOURLY_CONTEXT_FEATURE_ORDER, *LINEAR_V1_DERIVED_FEATURE_ORDER, *SPOT_V1_FEATURE_ORDER])
+)
 HOURLY_CONTEXT_REQUIRED_FEATURE_NAMES = frozenset(
     [*HOURLY_CONTEXT_FEATURE_ORDER, "k15_k1h_z_product", "k15_k1h_return_product_300s"]
 )
+SPOT_V1_ALL_REQUIRED_FEATURE_NAMES = frozenset([*FEATURE_ORDER, *SPOT_V1_FEATURE_ORDER])
+
+
+def feature_order_hash(feature_order: tuple[str, ...] | list[str]) -> str:
+    digest = hashlib.sha256()
+    digest.update("\n".join(str(name) for name in feature_order).encode("utf-8"))
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -109,6 +125,12 @@ class KalshiFeatureEngineConfig:
     hourly_context_series_ticker: str | None = None
     hourly_context_max_staleness_seconds: float = 300.0
     hourly_context_min_recent_trade_count_300s: float = 1.0
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA
+    external_spot_max_age_ms: int = 500
+    external_spot_required_for_schema: bool = False
+    external_spot_divergence_sigma_threshold: float = 4.0
+    external_spot_divergence_lookback_seconds: float = 300.0
+    external_spot_divergence_detrend_halflife_seconds: float = 3600.0
 
     def normalized_publish_series_tickers(self) -> tuple[str, ...]:
         return tuple(sorted({ticker for ticker in self.publish_series_tickers if ticker}))
@@ -375,6 +397,47 @@ class KalshiFeatureState:
     k15_minus_k1h_atm_z: float | None = None
     k15_minus_k1h_atm_price_return_300s: float | None = None
     k15_k1h_atm_direction_agreement: float | None = None
+    btc_spot_price: float | None = None
+    btc_spot_twap_60s: float | None = None
+    btc_spot_age_ms: float | None = None
+    btc_spot_is_fresh: bool | None = None
+    btc_spot_venues_fresh: float | None = None
+    btc_spot_venue_divergence_bps: float | None = None
+    btc_vol_effective_sample_size: float | None = None
+    btc_spot_source: str | None = None
+    btc_log_moneyness: float | None = None
+    btc_log_moneyness_twap60: float | None = None
+    btc_log_moneyness_per_minute: float | None = None
+    btc_spot_return_30s: float | None = None
+    btc_spot_return_120s: float | None = None
+    btc_spot_return_300s: float | None = None
+    btc_spot_return_900s: float | None = None
+    btc_spot_vol_120s: float | None = None
+    btc_spot_vol_300s: float | None = None
+    btc_spot_vol_900s: float | None = None
+    btc_spot_vol_1800s: float | None = None
+    btc_spot_vol_ewma_hl300: float | None = None
+    btc_bs_yes_prob_120s: float | None = None
+    btc_bs_yes_prob_300s: float | None = None
+    btc_bs_yes_prob_900s: float | None = None
+    btc_bs_yes_prob_1800s: float | None = None
+    btc_bs_yes_prob_ewma: float | None = None
+    btc_kalshi_minus_bs_prob_120s: float | None = None
+    btc_kalshi_minus_bs_prob_300s: float | None = None
+    btc_kalshi_minus_bs_prob_900s: float | None = None
+    btc_kalshi_minus_bs_prob_1800s: float | None = None
+    btc_kalshi_minus_bs_prob_ewma: float | None = None
+    btc_kalshi_minus_bs_logodds_120s: float | None = None
+    btc_kalshi_minus_bs_logodds_300s: float | None = None
+    btc_kalshi_minus_bs_logodds_900s: float | None = None
+    btc_kalshi_minus_bs_logodds_1800s: float | None = None
+    btc_kalshi_minus_bs_logodds_ewma: float | None = None
+    btc_kalshi_minus_bs_prob_120s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_300s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_900s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_1800s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_ewma_detrended: float | None = None
+    btc_kalshi_implied_vol: float | None = None
     received_at: datetime | None = field(default=None, compare=False)
     event_id: str = field(default="", compare=False)
     raw_event_id: str | None = field(default=None, compare=False)
@@ -459,6 +522,46 @@ class KalshiFeatureState:
             "k15_minus_k1h_atm_z": self.k15_minus_k1h_atm_z,
             "k15_minus_k1h_atm_price_return_300s": self.k15_minus_k1h_atm_price_return_300s,
             "k15_k1h_atm_direction_agreement": self.k15_k1h_atm_direction_agreement,
+            "btc_spot_price": self.btc_spot_price,
+            "btc_spot_twap_60s": self.btc_spot_twap_60s,
+            "btc_spot_age_ms": self.btc_spot_age_ms,
+            "btc_spot_is_fresh": (None if self.btc_spot_is_fresh is None else float(self.btc_spot_is_fresh)),
+            "btc_spot_venues_fresh": self.btc_spot_venues_fresh,
+            "btc_spot_venue_divergence_bps": self.btc_spot_venue_divergence_bps,
+            "btc_vol_effective_sample_size": self.btc_vol_effective_sample_size,
+            "btc_log_moneyness": self.btc_log_moneyness,
+            "btc_log_moneyness_twap60": self.btc_log_moneyness_twap60,
+            "btc_log_moneyness_per_minute": self.btc_log_moneyness_per_minute,
+            "btc_spot_return_30s": self.btc_spot_return_30s,
+            "btc_spot_return_120s": self.btc_spot_return_120s,
+            "btc_spot_return_300s": self.btc_spot_return_300s,
+            "btc_spot_return_900s": self.btc_spot_return_900s,
+            "btc_spot_vol_120s": self.btc_spot_vol_120s,
+            "btc_spot_vol_300s": self.btc_spot_vol_300s,
+            "btc_spot_vol_900s": self.btc_spot_vol_900s,
+            "btc_spot_vol_1800s": self.btc_spot_vol_1800s,
+            "btc_spot_vol_ewma_hl300": self.btc_spot_vol_ewma_hl300,
+            "btc_bs_yes_prob_120s": self.btc_bs_yes_prob_120s,
+            "btc_bs_yes_prob_300s": self.btc_bs_yes_prob_300s,
+            "btc_bs_yes_prob_900s": self.btc_bs_yes_prob_900s,
+            "btc_bs_yes_prob_1800s": self.btc_bs_yes_prob_1800s,
+            "btc_bs_yes_prob_ewma": self.btc_bs_yes_prob_ewma,
+            "btc_kalshi_minus_bs_prob_120s": self.btc_kalshi_minus_bs_prob_120s,
+            "btc_kalshi_minus_bs_prob_300s": self.btc_kalshi_minus_bs_prob_300s,
+            "btc_kalshi_minus_bs_prob_900s": self.btc_kalshi_minus_bs_prob_900s,
+            "btc_kalshi_minus_bs_prob_1800s": self.btc_kalshi_minus_bs_prob_1800s,
+            "btc_kalshi_minus_bs_prob_ewma": self.btc_kalshi_minus_bs_prob_ewma,
+            "btc_kalshi_minus_bs_logodds_120s": self.btc_kalshi_minus_bs_logodds_120s,
+            "btc_kalshi_minus_bs_logodds_300s": self.btc_kalshi_minus_bs_logodds_300s,
+            "btc_kalshi_minus_bs_logodds_900s": self.btc_kalshi_minus_bs_logodds_900s,
+            "btc_kalshi_minus_bs_logodds_1800s": self.btc_kalshi_minus_bs_logodds_1800s,
+            "btc_kalshi_minus_bs_logodds_ewma": self.btc_kalshi_minus_bs_logodds_ewma,
+            "btc_kalshi_minus_bs_prob_120s_detrended": self.btc_kalshi_minus_bs_prob_120s_detrended,
+            "btc_kalshi_minus_bs_prob_300s_detrended": self.btc_kalshi_minus_bs_prob_300s_detrended,
+            "btc_kalshi_minus_bs_prob_900s_detrended": self.btc_kalshi_minus_bs_prob_900s_detrended,
+            "btc_kalshi_minus_bs_prob_1800s_detrended": self.btc_kalshi_minus_bs_prob_1800s_detrended,
+            "btc_kalshi_minus_bs_prob_ewma_detrended": self.btc_kalshi_minus_bs_prob_ewma_detrended,
+            "btc_kalshi_implied_vol": self.btc_kalshi_implied_vol,
         }
         lookup.update(build_linear_v1_derived_feature_lookup(lookup))
         return lookup
@@ -470,7 +573,7 @@ class KalshiFeatureState:
         for feature_name in selected_feature_names:
             value = lookup.get(feature_name)
             if value is None:
-                if feature_name in FEATURE_ORDER or feature_name in HOURLY_CONTEXT_FEATURE_ORDER:
+                if feature_name in FEATURE_ORDER or feature_name in HOURLY_CONTEXT_FEATURE_ORDER or feature_name in SPOT_MODEL_FEATURE_SET:
                     return None
                 value = 0.0
             values.append(float(value))
@@ -553,6 +656,47 @@ class KalshiFeatureUpdate:
     k15_minus_k1h_atm_z: float | None = None
     k15_minus_k1h_atm_price_return_300s: float | None = None
     k15_k1h_atm_direction_agreement: float | None = None
+    btc_spot_price: float | None = None
+    btc_spot_twap_60s: float | None = None
+    btc_spot_age_ms: float | None = None
+    btc_spot_is_fresh: bool | None = None
+    btc_spot_venues_fresh: float | None = None
+    btc_spot_venue_divergence_bps: float | None = None
+    btc_vol_effective_sample_size: float | None = None
+    btc_spot_source: str | None = None
+    btc_log_moneyness: float | None = None
+    btc_log_moneyness_twap60: float | None = None
+    btc_log_moneyness_per_minute: float | None = None
+    btc_spot_return_30s: float | None = None
+    btc_spot_return_120s: float | None = None
+    btc_spot_return_300s: float | None = None
+    btc_spot_return_900s: float | None = None
+    btc_spot_vol_120s: float | None = None
+    btc_spot_vol_300s: float | None = None
+    btc_spot_vol_900s: float | None = None
+    btc_spot_vol_1800s: float | None = None
+    btc_spot_vol_ewma_hl300: float | None = None
+    btc_bs_yes_prob_120s: float | None = None
+    btc_bs_yes_prob_300s: float | None = None
+    btc_bs_yes_prob_900s: float | None = None
+    btc_bs_yes_prob_1800s: float | None = None
+    btc_bs_yes_prob_ewma: float | None = None
+    btc_kalshi_minus_bs_prob_120s: float | None = None
+    btc_kalshi_minus_bs_prob_300s: float | None = None
+    btc_kalshi_minus_bs_prob_900s: float | None = None
+    btc_kalshi_minus_bs_prob_1800s: float | None = None
+    btc_kalshi_minus_bs_prob_ewma: float | None = None
+    btc_kalshi_minus_bs_logodds_120s: float | None = None
+    btc_kalshi_minus_bs_logodds_300s: float | None = None
+    btc_kalshi_minus_bs_logodds_900s: float | None = None
+    btc_kalshi_minus_bs_logodds_1800s: float | None = None
+    btc_kalshi_minus_bs_logodds_ewma: float | None = None
+    btc_kalshi_minus_bs_prob_120s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_300s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_900s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_1800s_detrended: float | None = None
+    btc_kalshi_minus_bs_prob_ewma_detrended: float | None = None
+    btc_kalshi_implied_vol: float | None = None
     received_at: datetime | None = None
     event_id: str = ""
     raw_event_id: str | None = None
@@ -637,6 +781,46 @@ class KalshiFeatureUpdate:
             "k15_minus_k1h_atm_z": self.k15_minus_k1h_atm_z,
             "k15_minus_k1h_atm_price_return_300s": self.k15_minus_k1h_atm_price_return_300s,
             "k15_k1h_atm_direction_agreement": self.k15_k1h_atm_direction_agreement,
+            "btc_spot_price": self.btc_spot_price,
+            "btc_spot_twap_60s": self.btc_spot_twap_60s,
+            "btc_spot_age_ms": self.btc_spot_age_ms,
+            "btc_spot_is_fresh": (None if self.btc_spot_is_fresh is None else float(self.btc_spot_is_fresh)),
+            "btc_spot_venues_fresh": self.btc_spot_venues_fresh,
+            "btc_spot_venue_divergence_bps": self.btc_spot_venue_divergence_bps,
+            "btc_vol_effective_sample_size": self.btc_vol_effective_sample_size,
+            "btc_log_moneyness": self.btc_log_moneyness,
+            "btc_log_moneyness_twap60": self.btc_log_moneyness_twap60,
+            "btc_log_moneyness_per_minute": self.btc_log_moneyness_per_minute,
+            "btc_spot_return_30s": self.btc_spot_return_30s,
+            "btc_spot_return_120s": self.btc_spot_return_120s,
+            "btc_spot_return_300s": self.btc_spot_return_300s,
+            "btc_spot_return_900s": self.btc_spot_return_900s,
+            "btc_spot_vol_120s": self.btc_spot_vol_120s,
+            "btc_spot_vol_300s": self.btc_spot_vol_300s,
+            "btc_spot_vol_900s": self.btc_spot_vol_900s,
+            "btc_spot_vol_1800s": self.btc_spot_vol_1800s,
+            "btc_spot_vol_ewma_hl300": self.btc_spot_vol_ewma_hl300,
+            "btc_bs_yes_prob_120s": self.btc_bs_yes_prob_120s,
+            "btc_bs_yes_prob_300s": self.btc_bs_yes_prob_300s,
+            "btc_bs_yes_prob_900s": self.btc_bs_yes_prob_900s,
+            "btc_bs_yes_prob_1800s": self.btc_bs_yes_prob_1800s,
+            "btc_bs_yes_prob_ewma": self.btc_bs_yes_prob_ewma,
+            "btc_kalshi_minus_bs_prob_120s": self.btc_kalshi_minus_bs_prob_120s,
+            "btc_kalshi_minus_bs_prob_300s": self.btc_kalshi_minus_bs_prob_300s,
+            "btc_kalshi_minus_bs_prob_900s": self.btc_kalshi_minus_bs_prob_900s,
+            "btc_kalshi_minus_bs_prob_1800s": self.btc_kalshi_minus_bs_prob_1800s,
+            "btc_kalshi_minus_bs_prob_ewma": self.btc_kalshi_minus_bs_prob_ewma,
+            "btc_kalshi_minus_bs_logodds_120s": self.btc_kalshi_minus_bs_logodds_120s,
+            "btc_kalshi_minus_bs_logodds_300s": self.btc_kalshi_minus_bs_logodds_300s,
+            "btc_kalshi_minus_bs_logodds_900s": self.btc_kalshi_minus_bs_logodds_900s,
+            "btc_kalshi_minus_bs_logodds_1800s": self.btc_kalshi_minus_bs_logodds_1800s,
+            "btc_kalshi_minus_bs_logodds_ewma": self.btc_kalshi_minus_bs_logodds_ewma,
+            "btc_kalshi_minus_bs_prob_120s_detrended": self.btc_kalshi_minus_bs_prob_120s_detrended,
+            "btc_kalshi_minus_bs_prob_300s_detrended": self.btc_kalshi_minus_bs_prob_300s_detrended,
+            "btc_kalshi_minus_bs_prob_900s_detrended": self.btc_kalshi_minus_bs_prob_900s_detrended,
+            "btc_kalshi_minus_bs_prob_1800s_detrended": self.btc_kalshi_minus_bs_prob_1800s_detrended,
+            "btc_kalshi_minus_bs_prob_ewma_detrended": self.btc_kalshi_minus_bs_prob_ewma_detrended,
+            "btc_kalshi_implied_vol": self.btc_kalshi_implied_vol,
         }
         lookup.update(build_linear_v1_derived_feature_lookup(lookup))
         return lookup
@@ -648,7 +832,7 @@ class KalshiFeatureUpdate:
         for feature_name in selected_feature_names:
             value = lookup.get(feature_name)
             if value is None:
-                if feature_name in FEATURE_ORDER or feature_name in HOURLY_CONTEXT_FEATURE_ORDER:
+                if feature_name in FEATURE_ORDER or feature_name in HOURLY_CONTEXT_FEATURE_ORDER or feature_name in SPOT_MODEL_FEATURE_SET:
                     return None
                 value = 0.0
             values.append(float(value))
@@ -1060,6 +1244,47 @@ def feature_update_from_state(state: KalshiFeatureState) -> KalshiFeatureUpdate:
         k15_minus_k1h_atm_z=state.k15_minus_k1h_atm_z,
         k15_minus_k1h_atm_price_return_300s=state.k15_minus_k1h_atm_price_return_300s,
         k15_k1h_atm_direction_agreement=state.k15_k1h_atm_direction_agreement,
+        btc_spot_price=state.btc_spot_price,
+        btc_spot_twap_60s=state.btc_spot_twap_60s,
+        btc_spot_age_ms=state.btc_spot_age_ms,
+        btc_spot_is_fresh=state.btc_spot_is_fresh,
+        btc_spot_venues_fresh=state.btc_spot_venues_fresh,
+        btc_spot_venue_divergence_bps=state.btc_spot_venue_divergence_bps,
+        btc_vol_effective_sample_size=state.btc_vol_effective_sample_size,
+        btc_spot_source=state.btc_spot_source,
+        btc_log_moneyness=state.btc_log_moneyness,
+        btc_log_moneyness_twap60=state.btc_log_moneyness_twap60,
+        btc_log_moneyness_per_minute=state.btc_log_moneyness_per_minute,
+        btc_spot_return_30s=state.btc_spot_return_30s,
+        btc_spot_return_120s=state.btc_spot_return_120s,
+        btc_spot_return_300s=state.btc_spot_return_300s,
+        btc_spot_return_900s=state.btc_spot_return_900s,
+        btc_spot_vol_120s=state.btc_spot_vol_120s,
+        btc_spot_vol_300s=state.btc_spot_vol_300s,
+        btc_spot_vol_900s=state.btc_spot_vol_900s,
+        btc_spot_vol_1800s=state.btc_spot_vol_1800s,
+        btc_spot_vol_ewma_hl300=state.btc_spot_vol_ewma_hl300,
+        btc_bs_yes_prob_120s=state.btc_bs_yes_prob_120s,
+        btc_bs_yes_prob_300s=state.btc_bs_yes_prob_300s,
+        btc_bs_yes_prob_900s=state.btc_bs_yes_prob_900s,
+        btc_bs_yes_prob_1800s=state.btc_bs_yes_prob_1800s,
+        btc_bs_yes_prob_ewma=state.btc_bs_yes_prob_ewma,
+        btc_kalshi_minus_bs_prob_120s=state.btc_kalshi_minus_bs_prob_120s,
+        btc_kalshi_minus_bs_prob_300s=state.btc_kalshi_minus_bs_prob_300s,
+        btc_kalshi_minus_bs_prob_900s=state.btc_kalshi_minus_bs_prob_900s,
+        btc_kalshi_minus_bs_prob_1800s=state.btc_kalshi_minus_bs_prob_1800s,
+        btc_kalshi_minus_bs_prob_ewma=state.btc_kalshi_minus_bs_prob_ewma,
+        btc_kalshi_minus_bs_logodds_120s=state.btc_kalshi_minus_bs_logodds_120s,
+        btc_kalshi_minus_bs_logodds_300s=state.btc_kalshi_minus_bs_logodds_300s,
+        btc_kalshi_minus_bs_logodds_900s=state.btc_kalshi_minus_bs_logodds_900s,
+        btc_kalshi_minus_bs_logodds_1800s=state.btc_kalshi_minus_bs_logodds_1800s,
+        btc_kalshi_minus_bs_logodds_ewma=state.btc_kalshi_minus_bs_logodds_ewma,
+        btc_kalshi_minus_bs_prob_120s_detrended=state.btc_kalshi_minus_bs_prob_120s_detrended,
+        btc_kalshi_minus_bs_prob_300s_detrended=state.btc_kalshi_minus_bs_prob_300s_detrended,
+        btc_kalshi_minus_bs_prob_900s_detrended=state.btc_kalshi_minus_bs_prob_900s_detrended,
+        btc_kalshi_minus_bs_prob_1800s_detrended=state.btc_kalshi_minus_bs_prob_1800s_detrended,
+        btc_kalshi_minus_bs_prob_ewma_detrended=state.btc_kalshi_minus_bs_prob_ewma_detrended,
+        btc_kalshi_implied_vol=state.btc_kalshi_implied_vol,
         received_at=state.received_at,
         event_id=state.event_id,
         raw_event_id=state.raw_event_id,

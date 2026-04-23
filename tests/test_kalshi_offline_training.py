@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import subprocess
 import sys
@@ -30,15 +31,22 @@ from src.live.kalshi.offline_training import (
     MINIMUM_POLICY_TRADES_PER_DAY,
     PolicyConfig,
     PolicyResult,
+    SplitManifest,
+    FeatureCacheStatus,
     bagged_lasso_raw_predictions,
     build_offline_feature_order,
     build_policy_diagnostics,
     build_prediction_export_frame,
     build_feature_cache,
     build_market_feature_frame,
+    build_walk_forward_folds,
+    compute_purge_embargo_gap_seconds,
     evaluate_policy,
+    evaluate_walk_forward,
     calibrate_validation_predictions,
     enrich_market_feature_frame_with_hourly_context,
+    enrich_market_feature_frame_with_external_spot,
+    inspect_feature_cache,
     elastic_net_raw_predictions,
     feature_schema_metadata,
     infer_feature_names,
@@ -50,6 +58,7 @@ from src.live.kalshi.offline_training import (
     load_feature_dataset,
     load_lasso_artifact,
     load_linear_svm_artifact,
+    load_or_require_external_spot_frame,
     minimum_policy_trades_for_frame,
     publish_latest_artifacts,
     project_feature_frame,
@@ -72,6 +81,7 @@ from src.live.kalshi.offline_training import (
     train_linear_svm_model,
     train_lightgbm_model,
     _bagged_lasso_positive_class_probabilities,
+    _prepare_external_spot_frame_for_cache_build,
     _lasso_feature_matrix,
     _prepare_standard_policy_inputs,
     _simulate_policy,
@@ -81,7 +91,10 @@ from src.live.kalshi.features import (
     LINEAR_V1_DERIVED_FEATURE_ORDER,
     LINEAR_V1_FEATURE_ORDER,
     LINEAR_V1_FEATURE_SCHEMA,
+    SPOT_V1_FEATURE_ORDER,
+    SPOT_V1_FEATURE_SCHEMA,
 )
+from src.live.kalshi.strike import strike_price_from_market
 from src.live.kalshi.types import KalshiTickerUpdate
 
 
@@ -135,6 +148,76 @@ def _trade_frame(ticker: str) -> pd.DataFrame:
                 "no_price": 42,
                 "taker_side": "yes",
                 "created_time": pd.Timestamp("2026-01-01T12:01:00Z"),
+            },
+        ]
+    )
+
+
+def _external_spot_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "event_time": pd.Timestamp("2026-01-01T11:59:59Z"),
+                "received_at": pd.Timestamp("2026-01-01T11:59:59.080Z"),
+                "btc_spot_price": 70000.0,
+                "btc_spot_twap_60s": 69998.0,
+                "btc_spot_age_ms": 80.0,
+                "btc_spot_is_fresh": True,
+                "btc_spot_venues_fresh": 2,
+                "btc_spot_venue_divergence_bps": 1.0,
+                "btc_vol_effective_sample_size": 120.0,
+                "btc_spot_source": "trade_proxy",
+                "btc_spot_return_30s": 0.001,
+                "btc_spot_return_120s": 0.002,
+                "btc_spot_return_300s": 0.003,
+                "btc_spot_return_900s": 0.004,
+                "btc_spot_vol_120s": 0.45,
+                "btc_spot_vol_300s": 0.5,
+                "btc_spot_vol_900s": 0.55,
+                "btc_spot_vol_1800s": 0.6,
+                "btc_spot_vol_ewma_hl300": 0.52,
+            },
+            {
+                "event_time": pd.Timestamp("2026-01-01T12:00:10Z"),
+                "received_at": pd.Timestamp("2026-01-01T12:00:10.080Z"),
+                "btc_spot_price": 70010.0,
+                "btc_spot_twap_60s": 70005.0,
+                "btc_spot_age_ms": 80.0,
+                "btc_spot_is_fresh": True,
+                "btc_spot_venues_fresh": 2,
+                "btc_spot_venue_divergence_bps": 1.0,
+                "btc_vol_effective_sample_size": 121.0,
+                "btc_spot_source": "trade_proxy",
+                "btc_spot_return_30s": 0.0015,
+                "btc_spot_return_120s": 0.0025,
+                "btc_spot_return_300s": 0.0035,
+                "btc_spot_return_900s": 0.0045,
+                "btc_spot_vol_120s": 0.46,
+                "btc_spot_vol_300s": 0.51,
+                "btc_spot_vol_900s": 0.56,
+                "btc_spot_vol_1800s": 0.61,
+                "btc_spot_vol_ewma_hl300": 0.53,
+            },
+            {
+                "event_time": pd.Timestamp("2026-01-01T12:01:00Z"),
+                "received_at": pd.Timestamp("2026-01-01T12:01:00.080Z"),
+                "btc_spot_price": 70020.0,
+                "btc_spot_twap_60s": 70010.0,
+                "btc_spot_age_ms": 80.0,
+                "btc_spot_is_fresh": True,
+                "btc_spot_venues_fresh": 2,
+                "btc_spot_venue_divergence_bps": 1.0,
+                "btc_vol_effective_sample_size": 122.0,
+                "btc_spot_source": "trade_proxy",
+                "btc_spot_return_30s": 0.002,
+                "btc_spot_return_120s": 0.003,
+                "btc_spot_return_300s": 0.004,
+                "btc_spot_return_900s": 0.005,
+                "btc_spot_vol_120s": 0.47,
+                "btc_spot_vol_300s": 0.52,
+                "btc_spot_vol_900s": 0.57,
+                "btc_spot_vol_1800s": 0.62,
+                "btc_spot_vol_ewma_hl300": 0.54,
             },
         ]
     )
@@ -195,6 +278,160 @@ def test_build_split_manifest_is_reproducible_and_disjoint():
     assert not set(first.train_tickers) & set(first.validation_tickers)
     assert not set(first.train_tickers) & set(first.test_tickers)
     assert not set(first.validation_tickers) & set(first.test_tickers)
+
+
+def test_compute_purge_embargo_gap_seconds_uses_feature_lookback_and_horizon():
+    markets = pd.DataFrame(
+        {
+            "ticker": [f"KXBTC15M-TEST-{i:02d}" for i in range(4)],
+            "result": ["yes"] * 4,
+            "close_time": pd.date_range("2026-01-01", periods=4, freq="15min", tz="UTC"),
+            "open_time": pd.date_range("2025-12-31 23:45:00", periods=4, freq="15min", tz="UTC"),
+        }
+    )
+
+    default_gap = compute_purge_embargo_gap_seconds(markets, feature_schema=DEFAULT_FEATURE_SCHEMA)
+    spot_gap = compute_purge_embargo_gap_seconds(markets, feature_schema=SPOT_V1_FEATURE_SCHEMA)
+
+    assert default_gap == 300 + 900 + 60
+    assert spot_gap == 1800 + 900 + 60
+
+
+def test_build_split_manifest_with_purge_embargo_skips_boundary_tickers():
+    markets = pd.DataFrame(
+        {
+            "ticker": [f"KXBTC15M-TEST-{i:02d}" for i in range(12)],
+            "result": ["yes"] * 12,
+            "close_time": pd.date_range("2026-01-01", periods=12, freq="15min", tz="UTC"),
+            "open_time": pd.date_range("2025-12-31 23:45:00", periods=12, freq="15min", tz="UTC"),
+        }
+    )
+
+    manifest = build_split_manifest(
+        markets,
+        series_ticker="KXBTC15M",
+        train_fraction=0.5,
+        validation_fraction=0.25,
+        purge_embargo=True,
+        purge_embargo_gap_seconds=21 * 60,
+    )
+
+    assert manifest.train_tickers == tuple(f"KXBTC15M-TEST-{i:02d}" for i in range(6))
+    assert manifest.validation_tickers == tuple(f"KXBTC15M-TEST-{i:02d}" for i in range(7, 10))
+    assert manifest.test_tickers == ("KXBTC15M-TEST-11",)
+    assert "KXBTC15M-TEST-06" not in manifest.validation_tickers
+    assert "KXBTC15M-TEST-10" not in manifest.test_tickers
+    assert manifest.purge_embargo_enabled is True
+    assert manifest.purge_embargo_gap_seconds == 21 * 60
+
+
+def test_build_walk_forward_folds_with_purge_embargo_skips_boundary_tickers():
+    markets = pd.DataFrame(
+        {
+            "ticker": [f"KXBTC15M-TEST-{i:02d}" for i in range(12)],
+            "result": ["yes"] * 12,
+            "close_time": pd.date_range("2026-01-01", periods=12, freq="15min", tz="UTC"),
+            "open_time": pd.date_range("2025-12-31 23:45:00", periods=12, freq="15min", tz="UTC"),
+        }
+    )
+
+    folds = build_walk_forward_folds(
+        markets,
+        num_blocks=6,
+        purge_embargo=True,
+        purge_embargo_gap_seconds=21 * 60,
+    )
+
+    first_fold = folds[0]
+    assert first_fold.train_tickers == ("KXBTC15M-TEST-00",)
+    assert first_fold.validation_tickers == ("KXBTC15M-TEST-02", "KXBTC15M-TEST-03")
+    assert first_fold.test_tickers == ("KXBTC15M-TEST-05",)
+
+
+def test_evaluate_walk_forward_threads_purge_embargo_settings_to_fold_builder(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    def fake_build_walk_forward_folds(markets_df, num_blocks=6, **kwargs):
+        captured["kwargs"] = kwargs
+        return [
+            type(
+                "Fold",
+                (),
+                {
+                    "fold_index": 1,
+                    "train_tickers": ("train",),
+                    "validation_tickers": ("validation",),
+                    "test_tickers": ("test",),
+                },
+            )()
+        ]
+
+    def fake_load_feature_dataset(*args, **kwargs):
+        return pd.DataFrame({"actual_outcome": [0, 1], "ticker": ["T1", "T2"]})
+
+    class _IdentityCalibration:
+        def apply(self, probabilities):
+            return probabilities
+
+    monkeypatch.setattr("src.live.kalshi.offline_training.build_walk_forward_folds", fake_build_walk_forward_folds)
+    monkeypatch.setattr("src.live.kalshi.offline_training.load_feature_dataset", fake_load_feature_dataset)
+    monkeypatch.setattr(
+        "src.live.kalshi.offline_training.train_lightgbm_model",
+        lambda train_df, validation_df, params: (object(), {"best_iteration": 7}),
+    )
+    monkeypatch.setattr(
+        "src.live.kalshi.offline_training.raw_predictions",
+        lambda model, df: np.array([0.4, 0.6], dtype=float),
+    )
+    monkeypatch.setattr("src.live.kalshi.offline_training.fit_platt_scaler", lambda raw, labels: _IdentityCalibration())
+    monkeypatch.setattr(
+        "src.live.kalshi.offline_training.sweep_policy_grid",
+        lambda df, probabilities, overall_log_loss, progress_desc=None: [
+            PolicyResult(
+                config=PolicyConfig(
+                    edge_threshold_cents=1.0,
+                    min_tau_minutes=0.0,
+                    max_tau_minutes=15.0,
+                    price_band_min_cents=10,
+                    price_band_max_cents=90,
+                    reserve_cash_pct=30.0,
+                ),
+                objective=1.0,
+                trades=12,
+                net_pnl_dollars=1.0,
+                max_drawdown_dollars=0.5,
+                max_drawdown_pct=0.05,
+                return_pct=0.01,
+                log_loss=overall_log_loss,
+            )
+        ],
+    )
+    monkeypatch.setattr("src.live.kalshi.offline_training.minimum_policy_trades_for_frame", lambda df: 12)
+    monkeypatch.setattr(
+        "src.live.kalshi.offline_training.select_policy_candidate",
+        lambda results, minimum_trades, fallback_to_best_overall: (results[0], True),
+    )
+    monkeypatch.setattr(
+        "src.live.kalshi.offline_training.evaluate_policy",
+        lambda df, probabilities, config, overall_log_loss, progress_desc=None: {"trades": 12, "log_loss": overall_log_loss},
+    )
+
+    evaluate_walk_forward(
+        Path("unused"),
+        pd.DataFrame({"ticker": ["train", "validation", "test"]}),
+        {"learning_rate": 0.1},
+        feature_schema=DEFAULT_FEATURE_SCHEMA,
+        purge_embargo=True,
+        purge_embargo_gap_seconds=1234,
+        purge_embargo_safety_margin_seconds=99,
+    )
+
+    assert captured["kwargs"] == {
+        "feature_schema": DEFAULT_FEATURE_SCHEMA,
+        "purge_embargo": True,
+        "purge_embargo_gap_seconds": 1234,
+        "purge_embargo_safety_margin_seconds": 99,
+    }
 
 
 def test_offline_market_feature_frame_matches_live_feature_engine(tmp_path: Path):
@@ -273,6 +510,96 @@ def test_build_feature_cache_and_load_dataset(tmp_path: Path):
     assert set(loaded["ticker"]) == {first_ticker, second_ticker}
 
 
+def test_prepare_external_spot_frame_for_cache_build_trims_to_market_window() -> None:
+    external_spot_df = pd.DataFrame(
+        [
+            {
+                "event_time": pd.Timestamp("2026-01-01T11:00:00Z"),
+                "received_at": pd.Timestamp("2026-01-01T11:00:00.080Z"),
+                "btc_spot_price": 69900.0,
+            },
+            {
+                "event_time": pd.Timestamp("2026-01-01T11:54:59Z"),
+                "received_at": pd.Timestamp("2026-01-01T11:54:59.080Z"),
+                "btc_spot_price": 69950.0,
+            },
+            {
+                "event_time": pd.Timestamp("2026-01-01T12:00:10Z"),
+                "received_at": pd.Timestamp("2026-01-01T12:00:10.080Z"),
+                "btc_spot_price": 70010.0,
+            },
+            {
+                "event_time": pd.Timestamp("2026-01-01T12:30:01Z"),
+                "received_at": pd.Timestamp("2026-01-01T12:30:01.080Z"),
+                "btc_spot_price": 70020.0,
+            },
+        ]
+    )
+    markets_df = pd.DataFrame(
+        [
+            {
+                **_market_row("KXBTC15M-TEST").to_dict(),
+                "open_time": pd.Timestamp("2026-01-01T11:55:00Z"),
+                "close_time": pd.Timestamp("2026-01-01T12:10:00Z"),
+            }
+        ]
+    )
+
+    prepared = _prepare_external_spot_frame_for_cache_build(
+        external_spot_df,
+        markets_df,
+        external_spot_latency_ms=20,
+    )
+
+    assert list(prepared.frame["event_time"]) == [
+        pd.Timestamp("2026-01-01T11:54:59Z"),
+        pd.Timestamp("2026-01-01T12:00:10Z"),
+    ]
+    assert "available_time" in prepared.frame.columns
+    assert prepared.frame.iloc[0]["available_time"] == pd.Timestamp("2026-01-01T11:54:59.100Z")
+
+
+def test_inspect_feature_cache_marks_partial_cache_not_ready(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "KXBTC15M-TEST-1.parquet").write_bytes(b"placeholder")
+
+    status = inspect_feature_cache(
+        cache_dir,
+        ("KXBTC15M-TEST-1", "KXBTC15M-TEST-2"),
+        feature_schema=SPOT_V1_FEATURE_SCHEMA,
+    )
+
+    assert status.ready is False
+    assert status.manifest_exists is False
+    assert status.present_requested_tickers == 1
+    assert status.missing_requested_tickers == ("KXBTC15M-TEST-2",)
+
+
+def test_inspect_feature_cache_reports_ready_when_manifest_and_requested_files_exist(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for ticker in ("KXBTC15M-TEST-1", "KXBTC15M-TEST-2"):
+        pd.DataFrame([{"ticker": ticker}]).to_parquet(cache_dir / f"{ticker}.parquet", index=False)
+    save_feature_manifest(
+        cache_dir / "feature_manifest.json",
+        feature_order=("z_implied",),
+        metadata=feature_schema_metadata(SPOT_V1_FEATURE_SCHEMA),
+    )
+
+    status = inspect_feature_cache(
+        cache_dir,
+        ("KXBTC15M-TEST-1", "KXBTC15M-TEST-2"),
+        feature_schema=SPOT_V1_FEATURE_SCHEMA,
+    )
+
+    assert status.ready is True
+    assert status.manifest_exists is True
+    assert status.schema_matches is True
+    assert status.present_requested_tickers == 2
+    assert status.missing_requested_tickers == ()
+
+
 def test_build_offline_feature_order_linear_v1_matches_agreed_schema():
     feature_order = build_offline_feature_order(
         hourly_context=HourlyContextConfig(),
@@ -285,6 +612,93 @@ def test_build_offline_feature_order_linear_v1_matches_agreed_schema():
     assert "last_trade_count" not in feature_order
     assert "trade_count_120s" not in feature_order
     assert feature_order[-len(LINEAR_V1_DERIVED_FEATURE_ORDER) :] == LINEAR_V1_DERIVED_FEATURE_ORDER
+
+
+def test_build_offline_feature_order_spot_v1_appends_spot_features():
+    feature_order = build_offline_feature_order(feature_schema=SPOT_V1_FEATURE_SCHEMA)
+
+    assert feature_order[: len(FEATURE_ORDER)] == tuple(FEATURE_ORDER)
+    assert feature_order[-len(SPOT_V1_FEATURE_ORDER) :] == SPOT_V1_FEATURE_ORDER
+    assert "btc_log_moneyness" in feature_order
+    assert "btc_kalshi_implied_vol" in feature_order
+
+
+def test_feature_schema_metadata_spot_v1_includes_feature_order_hash():
+    metadata = feature_schema_metadata(SPOT_V1_FEATURE_SCHEMA)
+
+    assert metadata["schema_name"] == SPOT_V1_FEATURE_SCHEMA
+    assert metadata["feature_order_hash"]
+
+
+def test_load_or_require_external_spot_frame_requires_root_for_spot_v1() -> None:
+    with pytest.raises(ValueError, match="requires --external-spot-root"):
+        load_or_require_external_spot_frame(SPOT_V1_FEATURE_SCHEMA, None)
+
+
+def test_policy_config_signal_config_clamps_default_maintain_edge_to_threshold() -> None:
+    zero_edge_config = PolicyConfig(
+        edge_threshold_cents=0.0,
+        min_tau_minutes=0.0,
+        max_tau_minutes=15.0,
+        price_band_min_cents=1,
+        price_band_max_cents=99,
+        reserve_cash_pct=0.0,
+    )
+
+    assert zero_edge_config.signal_config.edge_threshold_cents == pytest.approx(0.0)
+    assert zero_edge_config.signal_config.maintain_edge_cents == pytest.approx(0.0)
+
+    wider_edge_config = PolicyConfig(
+        edge_threshold_cents=6.0,
+        min_tau_minutes=0.0,
+        max_tau_minutes=15.0,
+        price_band_min_cents=1,
+        price_band_max_cents=99,
+        reserve_cash_pct=0.0,
+    )
+
+    assert wider_edge_config.signal_config.maintain_edge_cents == pytest.approx(1.0)
+
+
+def test_strike_price_from_market_supports_target_price_formats() -> None:
+    assert strike_price_from_market(
+        {
+            "yes_sub_title": "Target price: $70,029.87",
+            "no_sub_title": "Price to beat: TBD",
+        }
+    ) == pytest.approx(70029.87)
+    assert strike_price_from_market(
+        {
+            "title": "BTC 15 min · $70,029.87 target",
+            "yes_sub_title": "Target price: TBD",
+            "no_sub_title": "Target price: TBD",
+        }
+    ) == pytest.approx(70029.87)
+
+
+def test_enrich_market_feature_frame_with_external_spot_falls_back_to_open_spot_for_generic_direction_market() -> None:
+    ticker = "KXBTC15M-TEST"
+    target_df = build_market_feature_frame(_trade_frame(ticker), _market_row(ticker))
+    external_spot_df = _external_spot_frame()
+
+    enriched = enrich_market_feature_frame_with_external_spot(
+        target_df,
+        market_row=pd.Series(
+            {
+                **_market_row(ticker).to_dict(),
+                "title": "BTC price up in next 15 mins?",
+                "yes_sub_title": "Target price: TBD",
+                "no_sub_title": "Target price: TBD",
+            }
+        ),
+        external_spot_df=external_spot_df,
+    )
+
+    assert not enriched.empty
+    assert enriched["btc_log_moneyness"].notna().all()
+    assert float(enriched.iloc[0]["btc_log_moneyness"]) == pytest.approx(0.0)
+    expected = np.log(70010.0 / 70000.0)
+    assert float(enriched.iloc[-1]["btc_log_moneyness"]) == pytest.approx(expected, rel=1e-6)
 
 
 def test_project_feature_frame_linear_v1_drops_redundant_columns_and_adds_interactions():
@@ -1108,6 +1522,117 @@ def test_build_policy_diagnostics_reports_yes_and_no_breakdowns():
     assert diagnostics["calibration"]["calibrated_probability_buckets"]
 
 
+def test_build_policy_diagnostics_adds_realized_vol_and_time_slices(monkeypatch: pytest.MonkeyPatch):
+    module = importlib.import_module("src.live.kalshi.offline_training")
+    df = pd.DataFrame(
+        [
+            {
+                "ticker": "KXBTC15M-A",
+                "trade_id": "t1",
+                "created_time": pd.Timestamp("2026-01-01T12:00:00Z"),
+                "close_time": pd.Timestamp("2026-01-01T12:05:00Z"),
+                "actual_outcome": 1,
+                "market_prob": 0.40,
+                "tau_minutes": 5.0,
+            },
+            {
+                "ticker": "KXBTC15M-B",
+                "trade_id": "t2",
+                "created_time": pd.Timestamp("2026-01-01T12:01:00Z"),
+                "close_time": pd.Timestamp("2026-01-01T12:06:00Z"),
+                "actual_outcome": 0,
+                "market_prob": 0.60,
+                "tau_minutes": 5.0,
+            },
+            {
+                "ticker": "KXBTC15M-C",
+                "trade_id": "t3",
+                "created_time": pd.Timestamp("2026-01-01T12:02:00Z"),
+                "close_time": pd.Timestamp("2026-01-01T12:07:00Z"),
+                "actual_outcome": 0,
+                "market_prob": 0.35,
+                "tau_minutes": 5.0,
+            },
+            {
+                "ticker": "KXBTC15M-D",
+                "trade_id": "t4",
+                "created_time": pd.Timestamp("2026-01-01T12:03:00Z"),
+                "close_time": pd.Timestamp("2026-01-01T12:08:00Z"),
+                "actual_outcome": 1,
+                "market_prob": 0.65,
+                "tau_minutes": 5.0,
+            },
+        ]
+    )
+    raw_probabilities = np.array([0.70, 0.30, 0.60, 0.20], dtype=np.float64)
+    calibrated_probabilities = raw_probabilities.copy()
+    config = PolicyConfig(
+        edge_threshold_cents=0.0,
+        min_tau_minutes=0.0,
+        max_tau_minutes=15.0,
+        price_band_min_cents=1,
+        price_band_max_cents=99,
+        reserve_cash_pct=0.0,
+    )
+
+    def _fake_annotate(frame: pd.DataFrame, *, external_spot_root=None):
+        annotated = frame.copy()
+        annotated["realized_vol_regime_source"] = ["spot", "spot", "market_prob", "market_prob"]
+        annotated["realized_vol_regime_bucket"] = ["low", "high", "medium", "extreme"]
+        annotated["realized_vol_regime_bucket_version"] = [
+            "spot_2026q1_backfill_v1",
+            "spot_2026q1_backfill_v1",
+            "market_prob_2025q4_2026q1_proxy_v1",
+            "market_prob_2025q4_2026q1_proxy_v1",
+        ]
+        annotated["realized_vol_regime_metric"] = [0.30, 0.70, 110.0, 150.0]
+        annotated["hour_of_day_et"] = [7, 9, 14, 21]
+        annotated["hour_of_day_et_label"] = ["07", "09", "14", "21"]
+        annotated["session_block_et"] = ["us_preopen", "us_regular", "us_regular", "asia"]
+        metadata = {
+            "row_source_summary": [
+                {"realized_vol_regime_source": "spot", "rows": 2, "row_pct": 50.0},
+                {"realized_vol_regime_source": "market_prob", "rows": 2, "row_pct": 50.0},
+                {"realized_vol_regime_source": "unknown", "rows": 0, "row_pct": 0.0},
+            ],
+            "bucket_versions": {
+                "spot": {"version": "spot_2026q1_backfill_v1", "edges": [0.4, 0.6, 0.9]},
+                "market_prob": {
+                    "version": "market_prob_2025q4_2026q1_proxy_v1",
+                    "edges": [100.0, 125.0, 140.0],
+                },
+            },
+            "timezone_metadata": {
+                "timezone": "America/New_York",
+                "zoneinfo_source": "tzdata",
+                "tzdata_version": "2024.2",
+                "zoneinfo_paths": [],
+            },
+        }
+        return annotated, metadata
+
+    monkeypatch.setattr(module, "_annotate_diagnostic_context", _fake_annotate)
+
+    diagnostics, trade_records = build_policy_diagnostics(
+        df,
+        raw_probabilities,
+        calibrated_probabilities,
+        config,
+        overall_log_loss=0.5,
+        time_blocks=2,
+    )
+
+    assert diagnostics["realized_vol_regime_metadata"]["bucket_versions"]["spot"]["edges"] == [0.4, 0.6, 0.9]
+    assert diagnostics["realized_vol_regime_metadata"]["timezone_metadata"]["tzdata_version"] == "2024.2"
+    assert diagnostics["realized_vol_regime_breakdown"]
+    assert diagnostics["hour_of_day_breakdown"]
+    assert diagnostics["session_block_breakdown"]
+    assert {"realized_vol_regime_source", "realized_vol_regime_bucket", "session_block_et"} <= set(trade_records.columns)
+    hour_row = next(row for row in diagnostics["hour_of_day_breakdown"] if row["hour_of_day_et"] == 9)
+    assert hour_row["rows"] == 1
+    assert hour_row["row_pct"] == pytest.approx(25.0)
+
+
 def test_build_policy_diagnostics_supports_capital_percent_position_sizing():
     df = pd.DataFrame(
         [
@@ -1147,6 +1672,47 @@ def test_build_policy_diagnostics_supports_capital_percent_position_sizing():
     assert len(trade_records) == 1
     assert int(trade_records.iloc[0]["contracts"]) > 1
     assert diagnostics["side_breakdown"][0]["avg_contracts"] > 1.0
+
+
+def test_build_prediction_export_frame_adds_realized_vol_and_time_columns(monkeypatch: pytest.MonkeyPatch):
+    module = importlib.import_module("src.live.kalshi.offline_training")
+    frame = pd.DataFrame(
+        [
+            {
+                "ticker": "KXBTC15M-A",
+                "trade_id": "t1",
+                "created_time": pd.Timestamp("2026-01-01T12:00:00Z"),
+                "close_time": pd.Timestamp("2026-01-01T12:05:00Z"),
+                "actual_outcome": 1,
+                "market_prob": 0.40,
+                "tau_minutes": 5.0,
+            }
+        ]
+    )
+
+    def _fake_annotate(split_df: pd.DataFrame, *, external_spot_root=None):
+        annotated = split_df.copy()
+        annotated["realized_vol_regime_source"] = ["spot"]
+        annotated["realized_vol_regime_bucket"] = ["medium"]
+        annotated["realized_vol_regime_bucket_version"] = ["spot_2026q1_backfill_v1"]
+        annotated["realized_vol_regime_metric"] = [0.55]
+        annotated["hour_of_day_et"] = [9]
+        annotated["hour_of_day_et_label"] = ["09"]
+        annotated["session_block_et"] = ["us_regular"]
+        return annotated, {"timezone_metadata": {"timezone": "America/New_York"}}
+
+    monkeypatch.setattr(module, "_annotate_diagnostic_context", _fake_annotate)
+
+    export = build_prediction_export_frame(
+        frame,
+        np.array([0.7], dtype=np.float64),
+        np.array([0.6], dtype=np.float64),
+    )
+
+    assert export.loc[0, "realized_vol_regime_source"] == "spot"
+    assert export.loc[0, "realized_vol_regime_bucket"] == "medium"
+    assert export.loc[0, "hour_of_day_et"] == 9
+    assert export.loc[0, "session_block_et"] == "us_regular"
 
 
 def test_build_policy_diagnostics_supports_kelly_position_sizing():
@@ -1809,6 +2375,224 @@ def test_fast_policy_reselection_script_rebuilds_missing_predictions_from_saved_
     assert "close_time" in validation_predictions.columns
     assert set(validation_predictions["ticker"]) == {"KXBTC15M-VAL"}
     assert summary["minimum_validation_trades_required"] == 1
+
+
+def test_lightgbm_trainer_writes_bagged_lasso_diagnostic_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = importlib.import_module("scripts.train_kxbtc15m_lightgbm")
+
+    artifacts_root = tmp_path / "artifacts"
+    run_name = "lightgbm_diag_contract"
+    run_dir = artifacts_root / run_name
+    dataset_cache_dir = tmp_path / "cache"
+    markets_path = tmp_path / "markets.parquet"
+    trades_path = tmp_path / "trades.parquet"
+
+    markets_df = pd.DataFrame(
+        {
+            "ticker": [f"KXBTC15M-TEST-{index:02d}" for index in range(6)],
+            "result": ["yes", "no", "yes", "no", "yes", "no"],
+            "open_time": pd.date_range("2026-03-10T00:00:00Z", periods=6, freq="15min"),
+            "close_time": pd.date_range("2026-03-10T00:15:00Z", periods=6, freq="15min"),
+        }
+    )
+
+    split_manifest = SplitManifest(
+        series="KXBTC15M",
+        generated_at="2026-04-21T00:00:00+00:00",
+        train_fraction=0.5,
+        validation_fraction=0.25,
+        test_fraction=0.25,
+        train_tickers=("KXBTC15M-TEST-00", "KXBTC15M-TEST-01", "KXBTC15M-TEST-02"),
+        validation_tickers=("KXBTC15M-TEST-03",),
+        test_tickers=("KXBTC15M-TEST-04", "KXBTC15M-TEST-05"),
+    )
+
+    def _frame_for_tickers(tickers: tuple[str, ...]) -> pd.DataFrame:
+        rows: list[dict[str, object]] = []
+        for index, ticker in enumerate(tickers):
+            created_time = pd.Timestamp("2026-03-10T01:00:00Z") + pd.Timedelta(minutes=index)
+            close_time = created_time + pd.Timedelta(minutes=15)
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "trade_id": f"{ticker}-trade",
+                    "created_time": created_time,
+                    "open_time": created_time - pd.Timedelta(minutes=15),
+                    "close_time": close_time,
+                    "actual_outcome": int(index % 2 == 0),
+                    "market_prob": 0.55 if index % 2 == 0 else 0.45,
+                    "tau_minutes": 5.0,
+                    "count": 1,
+                    "taker_side": "yes" if index % 2 == 0 else "no",
+                    "feature_a": 0.1 + index,
+                    "feature_b": 0.2 + index,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    best_policy = PolicyResult(
+        config=PolicyConfig(
+            edge_threshold_cents=1.0,
+            min_tau_minutes=0.0,
+            max_tau_minutes=15.0,
+            price_band_min_cents=10,
+            price_band_max_cents=90,
+            reserve_cash_pct=30.0,
+        ),
+        objective=1.0,
+        trades=12,
+        net_pnl_dollars=2.5,
+        max_drawdown_dollars=1.0,
+        max_drawdown_pct=0.1,
+        return_pct=0.025,
+        log_loss=0.49,
+        skipped_due_open_ticker=0,
+        skipped_due_price_band=0,
+        skipped_due_regime=0,
+        skipped_due_post_cost_edge=0,
+    )
+
+    def _prediction_export(frame: pd.DataFrame, raw_probabilities, calibrated_probabilities) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "ticker": frame["ticker"],
+                "trade_id": frame["trade_id"],
+                "created_time": frame["created_time"],
+                "close_time": frame["close_time"],
+                "actual_outcome": frame["actual_outcome"],
+                "raw_probability": np.asarray(raw_probabilities, dtype=float),
+                "calibrated_probability": np.asarray(calibrated_probabilities, dtype=float),
+            }
+        )
+
+    def _diagnostics(frame: pd.DataFrame, raw_probabilities, calibrated_probabilities, config, *, overall_log_loss, progress_desc=None):
+        trade_records = pd.DataFrame(
+            {
+                "ticker": frame["ticker"],
+                "created_time": frame["created_time"],
+                "close_time": frame["close_time"],
+                "side": ["YES"] * len(frame),
+                "reference_price_cents": [55] * len(frame),
+                "tau_minutes": [5.0] * len(frame),
+                "net_pnl_dollars": [1.0] * len(frame),
+            }
+        )
+        diagnostics = {
+            "policy_metrics": serialize_policy_result(
+                PolicyResult(
+                    config=config,
+                    objective=1.0,
+                    trades=len(frame),
+                    net_pnl_dollars=float(len(frame)),
+                    max_drawdown_dollars=1.0,
+                    max_drawdown_pct=0.1,
+                    return_pct=0.01,
+                    log_loss=float(overall_log_loss),
+                    skipped_due_open_ticker=0,
+                    skipped_due_price_band=0,
+                    skipped_due_regime=0,
+                    skipped_due_post_cost_edge=0,
+                )
+            ),
+            "side_breakdown": [],
+            "calibration": {},
+        }
+        return diagnostics, trade_records
+
+    monkeypatch.setattr(module, "resolve_inputs", lambda *args, **kwargs: (markets_path, trades_path))
+    monkeypatch.setattr(module, "load_markets_frame", lambda path, series: markets_df.copy())
+    monkeypatch.setattr(module, "build_split_manifest", lambda *args, **kwargs: split_manifest)
+    monkeypatch.setattr(
+        module,
+        "inspect_feature_cache",
+        lambda *args, **kwargs: FeatureCacheStatus(
+            ready=False,
+            manifest_exists=False,
+            manifest_schema_name=None,
+            schema_matches=True,
+            requested_tickers=6,
+            present_requested_tickers=0,
+            missing_requested_tickers=tuple(),
+        ),
+    )
+    monkeypatch.setattr(module, "build_feature_cache", lambda *args, **kwargs: dataset_cache_dir.mkdir(parents=True, exist_ok=True))
+    monkeypatch.setattr(module, "load_feature_dataset", lambda cache_dir, tickers, **kwargs: _frame_for_tickers(tuple(tickers)))
+    monkeypatch.setattr(module, "infer_feature_names", lambda frame: ["feature_a", "feature_b"])
+    monkeypatch.setattr(
+        module,
+        "save_feature_manifest",
+        lambda path, feature_order, metadata: path.write_text(
+            json.dumps({"feature_order": feature_order, "metadata": metadata}),
+            encoding="utf-8",
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_optuna_search",
+        lambda train_subset, validation_df, n_trials=40: ({"n_estimators": 10}, [{"trial": 0, "value": 0.5}]),
+    )
+    monkeypatch.setattr(module, "train_lightgbm_model", lambda train_df, validation_df, params: (object(), {"best_iteration": 7}))
+    monkeypatch.setattr(
+        module,
+        "save_lightgbm_artifacts",
+        lambda artifacts_dir, model, metrics: (artifacts_dir / "lightgbm").mkdir(parents=True, exist_ok=True),
+    )
+    monkeypatch.setattr(module, "raw_predictions", lambda model, frame: np.linspace(0.4, 0.6, num=len(frame), dtype=float))
+    monkeypatch.setattr(
+        module,
+        "calibrate_validation_predictions",
+        lambda artifacts_dir, validation_df, validation_raw: np.asarray(validation_raw, dtype=float),
+    )
+    monkeypatch.setattr(module, "sweep_policy_grid", lambda validation_df, probabilities, overall_log_loss, progress_desc=None: [best_policy])
+    monkeypatch.setattr(
+        module,
+        "select_policy_candidate",
+        lambda policy_results, minimum_trades, fallback_to_best_overall=True: (best_policy, True),
+    )
+    monkeypatch.setattr(module, "build_prediction_export_frame", _prediction_export, raising=False)
+    monkeypatch.setattr(module, "build_policy_diagnostics", _diagnostics, raising=False)
+    monkeypatch.setattr(
+        module,
+        "apply_calibration_to_predictions",
+        lambda artifacts_dir, raw_probabilities: np.asarray(raw_probabilities, dtype=float),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_kxbtc15m_lightgbm.py",
+            "--series",
+            "KXBTC15M",
+            "--markets-path",
+            str(markets_path),
+            "--trades-path",
+            str(trades_path),
+            "--artifacts-root",
+            str(artifacts_root),
+            "--run-name",
+            run_name,
+            "--skip-walk-forward",
+            "--skip-latest-publish",
+        ],
+    )
+
+    module.main()
+
+    assert (run_dir / "validation_metrics.json").exists()
+    assert (run_dir / "validation_diagnostics.json").exists()
+    assert (run_dir / "validation_predictions.parquet").exists()
+    assert (run_dir / "validation_trade_records.parquet").exists()
+    assert (run_dir / "test_metrics.json").exists()
+    assert (run_dir / "test_diagnostics.json").exists()
+    assert (run_dir / "test_predictions.parquet").exists()
+    assert (run_dir / "test_trade_records.parquet").exists()
+
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["model_family"] == "lightgbm"
+    assert summary["validation_metrics"]["trades"] == 1
 
 
 def test_select_policy_candidate_can_fall_back_to_best_overall():

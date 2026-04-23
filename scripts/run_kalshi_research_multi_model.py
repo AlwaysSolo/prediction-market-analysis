@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.live.data.btc_spot_feed import BTCSpotFeed, BTCSpotFeedConfig  # noqa: E402
 from src.live.kalshi import (  # noqa: E402
     DEFAULT_BAGGED_LASSO_MODEL_FILE,
     DEFAULT_ELASTIC_NET_MODEL_FILE,
@@ -34,6 +35,7 @@ from src.live.kalshi import (  # noqa: E402
     KalshiResearchSamplerConfig,
     KalshiResearchSettlementUpdate,
 )
+from src.live.kalshi.features import DEFAULT_FEATURE_SCHEMA, SPOT_V1_FEATURE_SCHEMA  # noqa: E402
 from src.live.kalshi.research_archive import (  # noqa: E402
     KalshiResearchArchiveConfig,
     KalshiResearchArchiveManager,
@@ -129,6 +131,21 @@ def _runtime_requires_hourly_context(model_file: Path) -> bool:
     )
 
 
+def _runtime_feature_schema(model_file: Path) -> str:
+    manifest_path = model_file.parent.parent / "feature_manifest.json"
+    if not manifest_path.exists():
+        return DEFAULT_FEATURE_SCHEMA
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_FEATURE_SCHEMA
+    return str(manifest.get("schema_name") or DEFAULT_FEATURE_SCHEMA)
+
+
+def _runtime_requires_external_spot(model_file: Path) -> bool:
+    return _runtime_feature_schema(model_file) == SPOT_V1_FEATURE_SCHEMA
+
+
 def _apply_research_config_overrides(
     config: KalshiResearchSamplerConfig,
     args: argparse.Namespace,
@@ -218,6 +235,7 @@ async def _run(args: argparse.Namespace) -> None:
         )
 
     requires_hourly_context = any(_runtime_requires_hourly_context(model_file) for _label, _family, model_file in resolved_runtime_specs)
+    requires_external_spot = any(_runtime_requires_external_spot(model_file) for _label, _family, model_file in resolved_runtime_specs)
     collector_series = tuple(
         dict.fromkeys([*args.series, *([args.hourly_context_series] if requires_hourly_context and args.hourly_context_series else [])])
     )
@@ -233,13 +251,17 @@ async def _run(args: argparse.Namespace) -> None:
         metadata_refresh_interval_seconds=args.metadata_refresh_interval_seconds,
     )
     collector = KalshiMarketDataCollector(collector_config)
+    spot_feed: BTCSpotFeed | None = None
     feature_engine = KalshiFeatureStateEngine(
         collector,
         config=KalshiFeatureEngineConfig(
             publish_series_tickers=tuple(args.series),
             hourly_context_target_series_ticker=args.series[0] if requires_hourly_context and args.series else None,
             hourly_context_series_ticker=args.hourly_context_series if requires_hourly_context else None,
+            feature_schema=SPOT_V1_FEATURE_SCHEMA if requires_external_spot else DEFAULT_FEATURE_SCHEMA,
+            external_spot_required_for_schema=requires_external_spot,
         ),
+        spot_feed=spot_feed,
     )
 
     runtimes: list[ResearchRuntime] = []
@@ -314,48 +336,64 @@ async def _run(args: argparse.Namespace) -> None:
         await archive_manager.start()
         print(f"Archive enabled: {archive_root}")
 
-    print("Starting shared collector and feature engine...")
-    await collector.start()
-    print("Collector ready")
-    await feature_engine.start()
-    print("Feature engine ready")
-    if requires_hourly_context:
-        print(f"Hourly context enabled: target={args.series[0]} context={args.hourly_context_series}")
-
-    print("Starting research stacks...")
-    for runtime in runtimes:
-        await runtime.scorer.start()
-        await runtime.ledger.start()
-        await runtime.sampler.start()
-        print(
-            f"[{runtime.label}] started",
-            f"family={runtime.family}",
-            f"edge={research_config.min_edge_cents:.1f}c",
-            f"tau={research_config.min_tau_minutes:.1f}-{research_config.max_tau_minutes:.1f}",
-            f"price_band={research_config.price_band_min_cents}-{research_config.price_band_max_cents}c",
-            f"quote_max_age={research_config.quote_max_age_seconds:.1f}s",
-            f"contracts={research_config.contracts_per_sample}",
-        )
-
     consumer_tasks: list[asyncio.Task] = []
-    for runtime in runtimes:
-        consumer_tasks.append(
-            asyncio.create_task(
-                _consume_research_updates(runtime.label, runtime.sample_queue),
-                name=f"{runtime.label}-research-printer",
-            )
-        )
-        consumer_tasks.append(
-            asyncio.create_task(
-                _consume_settlement_updates(runtime.label, runtime.settlement_queue),
-                name=f"{runtime.label}-settlement-printer",
-            )
-        )
-
-    print("Shared multi-model research stack started.")
-    print("Research root:", log_root)
-
     try:
+        if requires_external_spot:
+            spot_feed = BTCSpotFeed(
+                BTCSpotFeedConfig(
+                    environment=environment.value,
+                    log_dir=log_root / "external_spot",
+                )
+            )
+            feature_engine.spot_feed = spot_feed
+            print("Starting external BTC spot feed...")
+            await spot_feed.start()
+            await asyncio.wait_for(spot_feed.wait_until_ready(), timeout=args.spot_start_timeout_seconds)
+            print("External spot feed ready")
+
+        print("Starting shared collector and feature engine...")
+        await collector.start()
+        print("Collector ready")
+        await collector.wait_until_ready()
+        await feature_engine.start()
+        print("Feature engine ready")
+        if requires_hourly_context:
+            print(f"Hourly context enabled: target={args.series[0]} context={args.hourly_context_series}")
+        if requires_external_spot:
+            print("External spot enabled for one or more runtimes")
+
+        print("Starting research stacks...")
+        for runtime in runtimes:
+            await runtime.scorer.start()
+            await runtime.ledger.start()
+            await runtime.sampler.start()
+            print(
+                f"[{runtime.label}] started",
+                f"family={runtime.family}",
+                f"edge={research_config.min_edge_cents:.1f}c",
+                f"tau={research_config.min_tau_minutes:.1f}-{research_config.max_tau_minutes:.1f}",
+                f"price_band={research_config.price_band_min_cents}-{research_config.price_band_max_cents}c",
+                f"quote_max_age={research_config.quote_max_age_seconds:.1f}s",
+                f"contracts={research_config.contracts_per_sample}",
+            )
+
+        for runtime in runtimes:
+            consumer_tasks.append(
+                asyncio.create_task(
+                    _consume_research_updates(runtime.label, runtime.sample_queue),
+                    name=f"{runtime.label}-research-printer",
+                )
+            )
+            consumer_tasks.append(
+                asyncio.create_task(
+                    _consume_settlement_updates(runtime.label, runtime.settlement_queue),
+                    name=f"{runtime.label}-settlement-printer",
+                )
+            )
+
+        print("Shared multi-model research stack started.")
+        print("Research root:", log_root)
+
         if args.max_runtime_seconds is None:
             await asyncio.Event().wait()
         else:
@@ -376,6 +414,8 @@ async def _run(args: argparse.Namespace) -> None:
         await collector.stop()
         if archive_manager is not None:
             await archive_manager.stop()
+        if spot_feed is not None:
+            await spot_feed.stop()
 
 
 def main() -> None:
@@ -426,6 +466,7 @@ def main() -> None:
     parser.add_argument("--contracts-per-sample", type=int, default=None)
     parser.add_argument("--slippage-pct", type=float, default=None)
     parser.add_argument("--max-runtime-seconds", type=float, default=None)
+    parser.add_argument("--spot-start-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--archive", choices=["off", "full"], default="off")
     parser.add_argument("--archive-root", default=None)
     parser.add_argument(

@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.live.data.btc_spot_feed import BTCSpotFeed, BTCSpotFeedConfig  # noqa: E402
 from src.live.kalshi import (  # noqa: E402
     KalshiCollectorConfig,
     KalshiCredentials,
@@ -30,6 +31,7 @@ from src.live.kalshi import (  # noqa: E402
     KalshiRegularizedLogisticScorerConfig,
     KalshiSignalRiskEngine,
 )
+from src.live.kalshi.features import DEFAULT_FEATURE_SCHEMA, SPOT_V1_FEATURE_SCHEMA  # noqa: E402
 from scripts.run_kalshi_regularized_execution_engine import (  # noqa: E402
     apply_signal_config_overrides,
     default_model_file_for_family,
@@ -131,6 +133,21 @@ def _runtime_requires_hourly_context(model_file: Path) -> bool:
         or feature_name.startswith("k15_k1h_")
         for feature_name in feature_names
     )
+
+
+def _runtime_feature_schema(model_file: Path) -> str:
+    manifest_path = model_file.parent.parent / "feature_manifest.json"
+    if not manifest_path.exists():
+        return DEFAULT_FEATURE_SCHEMA
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_FEATURE_SCHEMA
+    return str(manifest.get("schema_name") or DEFAULT_FEATURE_SCHEMA)
+
+
+def _runtime_requires_external_spot(model_file: Path) -> bool:
+    return _runtime_feature_schema(model_file) == SPOT_V1_FEATURE_SCHEMA
 
 
 async def _consume_signal_updates(model_family: str, queue: asyncio.Queue) -> None:
@@ -275,6 +292,9 @@ async def _run(args: argparse.Namespace) -> None:
         resolved_runtime_specs.append((spec.label, spec.family, model_file, policy_file))
 
     requires_hourly_context = any(_runtime_requires_hourly_context(model_file) for _label, _family, model_file, _policy_file in resolved_runtime_specs)
+    requires_external_spot = any(
+        _runtime_requires_external_spot(model_file) for _label, _family, model_file, _policy_file in resolved_runtime_specs
+    )
     collector_series = tuple(dict.fromkeys([*args.series, *( [args.hourly_context_series] if requires_hourly_context and args.hourly_context_series else [] )]))
 
     credentials = KalshiCredentials.from_env(environment)
@@ -287,13 +307,17 @@ async def _run(args: argparse.Namespace) -> None:
         metadata_refresh_interval_seconds=args.metadata_refresh_interval_seconds,
     )
     collector = KalshiMarketDataCollector(collector_config)
+    spot_feed: BTCSpotFeed | None = None
     feature_engine = KalshiFeatureStateEngine(
         collector,
         config=KalshiFeatureEngineConfig(
             publish_series_tickers=tuple(args.series),
             hourly_context_target_series_ticker=args.series[0] if requires_hourly_context and args.series else None,
             hourly_context_series_ticker=args.hourly_context_series if requires_hourly_context else None,
+            feature_schema=SPOT_V1_FEATURE_SCHEMA if requires_external_spot else DEFAULT_FEATURE_SCHEMA,
+            external_spot_required_for_schema=requires_external_spot,
         ),
+        spot_feed=spot_feed,
     )
 
     model_runtimes: list[ModelRuntime] = []
@@ -375,66 +399,82 @@ async def _run(args: argparse.Namespace) -> None:
             )
         )
 
-    print("Starting shared collector and feature engine...")
-    await collector.start()
-    print("Collector ready")
-    await feature_engine.start()
-    print("Feature engine ready")
-    if requires_hourly_context:
-        print(f"Hourly context enabled: target={args.series[0]} context={args.hourly_context_series}")
-
-    print("Starting model stacks...")
-    for runtime in model_runtimes:
-        await runtime.scorer.start()
-        await runtime.signal_engine.start()
-        await runtime.execution_engine.start()
-        if runtime.layering_engine is not None:
-            await runtime.layering_engine.start()
-        print(
-            f"[{runtime.label}] started",
-            f"family={runtime.family}",
-            f"mode={runtime.execution_engine.config.mode.value}",
-            f"simulate_fills={runtime.execution_engine.config.simulate_immediate_fills}",
-            f"edge={runtime.signal_engine.config.edge_threshold_cents:.1f}c",
-            f"tau={runtime.signal_engine.config.min_tau_minutes:.1f}-{runtime.signal_engine.config.max_tau_minutes:.1f}",
-            f"price_band={runtime.signal_engine.config.price_band_min_cents}-{runtime.signal_engine.config.price_band_max_cents}c",
-            f"quote_max_age={runtime.signal_engine.config.quote_max_age_seconds:.1f}s",
-            f"contracts={runtime.signal_engine.config.contracts_per_order}",
-            f"capital_pct={runtime.signal_engine.config.capital_pct_per_order}",
-            f"kelly_mult={runtime.signal_engine.config.kelly_fraction_multiplier}",
-            f"kelly_cap={runtime.signal_engine.config.kelly_fraction_cap_pct}",
-            f"stacking={runtime.signal_engine.config.allow_stacking}",
-            f"layering={runtime.layering_engine is not None}",
-        )
-
     consumer_tasks: list[asyncio.Task] = []
-    for runtime in model_runtimes:
-        consumer_tasks.append(
-            asyncio.create_task(
-                _consume_signal_updates(runtime.label, runtime.signal_queue),
-                name=f"{runtime.label}-signal-printer",
-            )
-        )
-        consumer_tasks.append(
-            asyncio.create_task(
-                _consume_execution_updates(runtime.label, runtime.execution_queue, runtime.execution_engine),
-                name=f"{runtime.label}-execution-printer",
-            )
-        )
-        if runtime.layering_queue is not None:
-            consumer_tasks.append(
-                asyncio.create_task(
-                    _consume_layering_updates(runtime.label, runtime.layering_queue),
-                    name=f"{runtime.label}-layering-printer",
+    try:
+        if requires_external_spot:
+            spot_feed = BTCSpotFeed(
+                BTCSpotFeedConfig(
+                    environment=environment.value,
+                    log_dir=log_root / "external_spot",
                 )
             )
+            feature_engine.spot_feed = spot_feed
+            print("Starting external BTC spot feed...")
+            await spot_feed.start()
+            await asyncio.wait_for(spot_feed.wait_until_ready(), timeout=args.spot_start_timeout_seconds)
+            print("External spot feed ready")
 
-    print("Shared multi-model paper stack started.")
-    print("Dashboard root:", log_root)
-    print("Open: http://localhost:8765/tools/live_trading_dashboard.html")
-    print("Choose folder:", log_root)
+        print("Starting shared collector and feature engine...")
+        await collector.start()
+        print("Collector ready")
+        await collector.wait_until_ready()
+        await feature_engine.start()
+        print("Feature engine ready")
+        if requires_hourly_context:
+            print(f"Hourly context enabled: target={args.series[0]} context={args.hourly_context_series}")
+        if requires_external_spot:
+            print("External spot enabled for one or more runtimes")
 
-    try:
+        print("Starting model stacks...")
+        for runtime in model_runtimes:
+            await runtime.scorer.start()
+            await runtime.signal_engine.start()
+            await runtime.execution_engine.start()
+            if runtime.layering_engine is not None:
+                await runtime.layering_engine.start()
+            print(
+                f"[{runtime.label}] started",
+                f"family={runtime.family}",
+                f"mode={runtime.execution_engine.config.mode.value}",
+                f"simulate_fills={runtime.execution_engine.config.simulate_immediate_fills}",
+                f"edge={runtime.signal_engine.config.edge_threshold_cents:.1f}c",
+                f"tau={runtime.signal_engine.config.min_tau_minutes:.1f}-{runtime.signal_engine.config.max_tau_minutes:.1f}",
+                f"price_band={runtime.signal_engine.config.price_band_min_cents}-{runtime.signal_engine.config.price_band_max_cents}c",
+                f"quote_max_age={runtime.signal_engine.config.quote_max_age_seconds:.1f}s",
+                f"contracts={runtime.signal_engine.config.contracts_per_order}",
+                f"capital_pct={runtime.signal_engine.config.capital_pct_per_order}",
+                f"kelly_mult={runtime.signal_engine.config.kelly_fraction_multiplier}",
+                f"kelly_cap={runtime.signal_engine.config.kelly_fraction_cap_pct}",
+                f"stacking={runtime.signal_engine.config.allow_stacking}",
+                f"layering={runtime.layering_engine is not None}",
+            )
+
+        for runtime in model_runtimes:
+            consumer_tasks.append(
+                asyncio.create_task(
+                    _consume_signal_updates(runtime.label, runtime.signal_queue),
+                    name=f"{runtime.label}-signal-printer",
+                )
+            )
+            consumer_tasks.append(
+                asyncio.create_task(
+                    _consume_execution_updates(runtime.label, runtime.execution_queue, runtime.execution_engine),
+                    name=f"{runtime.label}-execution-printer",
+                )
+            )
+            if runtime.layering_queue is not None:
+                consumer_tasks.append(
+                    asyncio.create_task(
+                        _consume_layering_updates(runtime.label, runtime.layering_queue),
+                        name=f"{runtime.label}-layering-printer",
+                    )
+                )
+
+        print("Shared multi-model paper stack started.")
+        print("Dashboard root:", log_root)
+        print("Open: http://localhost:8765/tools/live_trading_dashboard.html")
+        print("Choose folder:", log_root)
+
         await asyncio.Event().wait()
     finally:
         for task in consumer_tasks:
@@ -452,6 +492,8 @@ async def _run(args: argparse.Namespace) -> None:
             await runtime.scorer.stop()
         await feature_engine.stop()
         await collector.stop()
+        if spot_feed is not None:
+            await spot_feed.stop()
 
 
 def main() -> None:
@@ -505,6 +547,7 @@ def main() -> None:
     parser.add_argument("--ticker", action="append", default=[], help="Explicit market ticker filter")
     parser.add_argument("--log-root", default="output/live/kalshi", help="Root folder for raw, signal, and execution logs")
     parser.add_argument("--metadata-refresh-interval-seconds", type=float, default=300.0)
+    parser.add_argument("--spot-start-timeout-seconds", type=float, default=20.0)
     parser.add_argument(
         "--enable-layering",
         action="store_true",

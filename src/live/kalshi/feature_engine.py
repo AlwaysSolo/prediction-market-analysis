@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from dataclasses import replace
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import numpy as np
 
+from src.live.data.btc_spot_feed import BTCSpotFeed, BTCSpotUpdate
 from src.live.kalshi.collector import KalshiMarketDataCollector
 from src.live.kalshi.features import (
+    SPOT_V1_FEATURE_SCHEMA,
     KalshiFeatureEngineConfig,
     KalshiFeatureState,
     KalshiTradeFeatureAccumulator,
     KalshiFeatureUpdate,
     feature_update_from_state,
 )
+from src.live.kalshi.spot_features import SpotFeatureTracker
+from src.live.kalshi.strike import strike_price_from_market
 from src.live.kalshi.types import KalshiTickerState, KalshiTickerUpdate, utc_now
 
 Callback = Callable[[KalshiFeatureUpdate], Awaitable[None] | None]
@@ -26,17 +31,21 @@ class KalshiFeatureStateEngine:
         self,
         collector: KalshiMarketDataCollector,
         config: KalshiFeatureEngineConfig | None = None,
+        spot_feed: BTCSpotFeed | None = None,
     ):
         self.collector = collector
         self.config = config or KalshiFeatureEngineConfig()
+        self.spot_feed = spot_feed
         self._collector_queue: asyncio.Queue[KalshiTickerUpdate] | None = None
         self._states: dict[str, KalshiFeatureState] = {}
         self._accumulators: dict[str, KalshiTradeFeatureAccumulator] = {}
+        self._spot_trackers: dict[str, SpotFeatureTracker] = {}
         self._callbacks: list[Callback] = []
         self._queues: list[asyncio.Queue[KalshiFeatureUpdate]] = []
         self._task: asyncio.Task[Any] | None = None
         self._stop_event = asyncio.Event()
         self._ready_event = asyncio.Event()
+        self._logger = logging.getLogger(__name__)
 
     def _matches_series(self, ticker: str, series_ticker: str | None) -> bool:
         return bool(series_ticker) and ticker.startswith(f"{series_ticker}-")
@@ -178,6 +187,65 @@ class KalshiFeatureStateEngine:
             return
         await self._publish_update(feature_update_from_state(feature_state))
 
+    def _spot_tracker(self, ticker: str) -> SpotFeatureTracker:
+        tracker = self._spot_trackers.get(ticker)
+        if tracker is None:
+            tracker = SpotFeatureTracker(
+                detrend_halflife_seconds=self.config.external_spot_divergence_detrend_halflife_seconds,
+                alert_window_seconds=self.config.external_spot_divergence_lookback_seconds,
+            )
+            self._spot_trackers[ticker] = tracker
+        return tracker
+
+    def _spot_snapshot_for_time(self, event_time) -> BTCSpotUpdate | None:
+        if self.spot_feed is None:
+            return None
+        lookup = getattr(self.spot_feed, "lookup_at_or_before", None)
+        if callable(lookup):
+            return lookup(event_time, max_age_ms=self.config.external_spot_max_age_ms)
+        snapshot = self.spot_feed.snapshot_state()
+        if snapshot is None:
+            return None
+        age_ms = max(0.0, (event_time - snapshot.event_time).total_seconds() * 1000.0)
+        if age_ms > float(self.config.external_spot_max_age_ms):
+            return None
+        return snapshot
+
+    def _apply_external_spot(self, feature_state: KalshiFeatureState) -> KalshiFeatureState:
+        requires_spot = (
+            self.config.external_spot_required_for_schema
+            or self.config.feature_schema == SPOT_V1_FEATURE_SCHEMA
+        )
+        if self.spot_feed is None:
+            if requires_spot:
+                return replace(feature_state, is_scoreable=False, btc_spot_is_fresh=False)
+            return feature_state
+        snapshot = self._spot_snapshot_for_time(feature_state.event_time)
+        if snapshot is None:
+            if requires_spot:
+                return replace(feature_state, is_scoreable=False, btc_spot_is_fresh=False)
+            return feature_state
+        strike_price = strike_price_from_market(self.collector.get_market(feature_state.ticker))
+        tracker = self._spot_tracker(feature_state.ticker)
+        spot_fields = tracker.enrich(
+            event_time=feature_state.event_time,
+            quote_mid_prob=feature_state.quote_mid_prob,
+            tau_minutes=feature_state.tau_minutes,
+            strike_price=strike_price,
+            spot_update=snapshot,
+        )
+        enriched_state = replace(feature_state, **spot_fields)
+        if requires_spot and not bool(enriched_state.btc_spot_is_fresh):
+            enriched_state = replace(enriched_state, is_scoreable=False)
+        zscore = tracker.primary_detrended_zscore(feature_state.event_time)
+        if zscore is not None and abs(zscore) >= float(self.config.external_spot_divergence_sigma_threshold):
+            self._logger.warning(
+                "External spot divergence z-score breached threshold for %s: %.3f",
+                feature_state.ticker,
+                zscore,
+            )
+        return enriched_state
+
     async def _refresh_context_dependent_targets(self, event_time) -> None:
         target_series_ticker = self.config.hourly_context_target_series_ticker
         if not target_series_ticker:
@@ -249,6 +317,7 @@ class KalshiFeatureStateEngine:
             )
             feature_state = accumulator.build_feature_state_from_state(ticker_state, event_time=snapshot_time)
             feature_state = self._apply_hourly_context(feature_state)
+            feature_state = self._apply_external_spot(feature_state)
             self._states[feature_state.ticker] = feature_state
         for feature_state in self._states.values():
             await self._publish_if_scoreable(feature_state)
@@ -271,6 +340,7 @@ class KalshiFeatureStateEngine:
         )
         feature_state = accumulator.build_feature_state_from_update(update)
         feature_state = self._apply_hourly_context(feature_state)
+        feature_state = self._apply_external_spot(feature_state)
         current = self._states.get(feature_state.ticker)
         if feature_state == current:
             if self._matches_series(update.ticker, self.config.hourly_context_series_ticker):

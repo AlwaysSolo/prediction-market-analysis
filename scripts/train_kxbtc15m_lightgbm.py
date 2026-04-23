@@ -14,21 +14,29 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.live.kalshi.offline_training import (  # noqa: E402
+    DEFAULT_FEATURE_SCHEMA,
     DEFAULT_OPTUNA_SAMPLE_SIZE,
     DEFAULT_OPTUNA_TRIALS,
+    FEATURE_SCHEMA_CHOICES,
     HOURLY_CONTEXT_SERIES,
     HourlyContextConfig,
+    apply_calibration_to_predictions,
+    feature_schema_metadata,
     build_feature_cache,
+    build_policy_diagnostics,
     build_prediction_export_frame,
     build_split_manifest,
     calibrate_validation_predictions,
-    evaluate_policy,
     evaluate_walk_forward,
+    format_realized_vol_regime_source_summary,
     infer_feature_names,
+    inspect_feature_cache,
     labels,
     load_feature_dataset,
     load_markets_frame,
+    load_or_require_external_spot_frame,
     minimum_policy_trades_for_frame,
+    normalize_feature_schema,
     publish_latest_artifacts,
     raw_predictions,
     resolve_artifacts_dir,
@@ -37,8 +45,9 @@ from src.live.kalshi.offline_training import (  # noqa: E402
     sample_train_subset,
     save_feature_manifest,
     save_lightgbm_artifacts,
-    save_split_manifest,
-    tune_policy,
+    select_policy_candidate,
+    serialize_policy_result,
+    sweep_policy_grid,
     train_lightgbm_model,
     write_json,
 )
@@ -78,6 +87,17 @@ def _resolve_dataset_cache_dir(
     return artifacts_dir / "datasets" / "all"
 
 
+def _write_predictions(
+    split_name: str,
+    artifacts_dir: Path,
+    split_df: pd.DataFrame,
+    raw_probabilities,
+    calibrated_probabilities,
+) -> None:
+    predictions = build_prediction_export_frame(split_df, raw_probabilities, calibrated_probabilities)
+    predictions.to_parquet(artifacts_dir / f"{split_name}_predictions.parquet", index=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train and evaluate the KXBTC15M LightGBM model pipeline.")
     parser.add_argument("--series", default="KXBTC15M")
@@ -101,6 +121,38 @@ def main() -> None:
     parser.add_argument("--hourly-context-trades-path", help="Path to the hourly context per-market trades directory or parquet")
     parser.add_argument("--hourly-context-max-staleness-seconds", type=float, default=300.0)
     parser.add_argument("--hourly-context-min-recent-trade-count-300s", type=float, default=1.0)
+    parser.add_argument(
+        "--external-spot-root",
+        help="Path to historical external BTC spot parquet data. Required when --feature-schema spot_v1 and rebuilding a cache.",
+    )
+    parser.add_argument(
+        "--external-spot-latency-ms",
+        type=int,
+        default=0,
+        help="Synthetic latency added to historical external spot timestamps before the offline join.",
+    )
+    parser.add_argument(
+        "--feature-schema",
+        choices=list(FEATURE_SCHEMA_CHOICES),
+        default=DEFAULT_FEATURE_SCHEMA,
+        help="Feature projection to use for model training.",
+    )
+    parser.add_argument(
+        "--purge-embargo",
+        action="store_true",
+        help="Apply a time-based purge/embargo gap between train, validation, and test splits.",
+    )
+    parser.add_argument(
+        "--purge-embargo-gap-seconds",
+        type=int,
+        help="Explicit purge/embargo gap in seconds. Defaults to max feature lookback + target horizon + safety margin.",
+    )
+    parser.add_argument(
+        "--purge-embargo-safety-margin-seconds",
+        type=int,
+        default=60,
+        help="Safety margin added on top of max feature lookback + target horizon when computing the purge/embargo gap.",
+    )
     parser.add_argument("--skip-walk-forward", action="store_true", help="Skip walk-forward evaluation.")
     parser.add_argument("--skip-latest-publish", action="store_true", help="Skip publishing the deployable latest/ artifact set.")
     parser.add_argument("--no-progress", action="store_true", help="Disable dataset loading progress bars.")
@@ -109,6 +161,7 @@ def main() -> None:
     reference_run_dir = Path(args.reference_run_dir).expanduser() if args.reference_run_dir else None
     if reference_run_dir is not None and not reference_run_dir.exists():
         parser.exit(2, f'error: reference run directory does not exist: "{reference_run_dir}"\n')
+    feature_schema = normalize_feature_schema(args.feature_schema)
 
     artifacts_dir = resolve_artifacts_dir(args.artifacts_root, args.run_name)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -143,7 +196,13 @@ def main() -> None:
     trades_path: Path | None = None
     walk_forward_markets_df: pd.DataFrame | None = None
     manifest_payload: dict[str, object] | None = None
-    should_prepare_inputs = reference_run_dir is None or not dataset_cache_dir.exists() or bool(args.markets_path or args.trades_path)
+    should_prepare_inputs = (
+        reference_run_dir is None
+        or not dataset_cache_dir.exists()
+        or bool(args.markets_path or args.trades_path)
+        or not args.skip_walk_forward
+        or args.purge_embargo
+    )
     if should_prepare_inputs:
         try:
             markets_path, trades_path = resolve_inputs(args.series, args.markets_path, args.trades_path)
@@ -157,7 +216,14 @@ def main() -> None:
             parser.exit(2, f"error: {exc}\n")
     else:
         assert markets_df is not None
-        manifest = build_split_manifest(markets_df, series_ticker=args.series)
+        manifest = build_split_manifest(
+            markets_df,
+            series_ticker=args.series,
+            feature_schema=feature_schema,
+            purge_embargo=bool(args.purge_embargo),
+            purge_embargo_gap_seconds=args.purge_embargo_gap_seconds,
+            purge_embargo_safety_margin_seconds=int(args.purge_embargo_safety_margin_seconds),
+        )
         manifest_payload = {
             "series": manifest.series,
             "generated_at": manifest.generated_at,
@@ -167,6 +233,11 @@ def main() -> None:
             "train_tickers": list(manifest.train_tickers),
             "validation_tickers": list(manifest.validation_tickers),
             "test_tickers": list(manifest.test_tickers),
+            "purge_embargo_enabled": manifest.purge_embargo_enabled,
+            "purge_embargo_gap_seconds": manifest.purge_embargo_gap_seconds,
+            "feature_lookback_seconds": manifest.feature_lookback_seconds,
+            "target_horizon_seconds": manifest.target_horizon_seconds,
+            "safety_margin_seconds": manifest.safety_margin_seconds,
         }
 
     assert manifest_payload is not None
@@ -174,13 +245,54 @@ def main() -> None:
     validation_tickers = _manifest_tickers(manifest_payload, "validation_tickers")
     test_tickers = _manifest_tickers(manifest_payload, "test_tickers")
     ordered_tickers = train_tickers + validation_tickers + test_tickers
-    walk_forward_markets_df = pd.DataFrame({"ticker": list(ordered_tickers)})
+    manifest_purge_embargo_enabled = bool(manifest_payload.get("purge_embargo_enabled", False))
+    manifest_purge_embargo_gap_seconds = int(manifest_payload.get("purge_embargo_gap_seconds", 0))
+    if markets_df is not None:
+        ticker_order = pd.CategoricalDtype(categories=list(ordered_tickers), ordered=True)
+        walk_forward_markets_df = (
+            markets_df.loc[markets_df["ticker"].astype(str).isin(ordered_tickers)]
+            .drop_duplicates(subset=["ticker"], keep="first")
+            .assign(_order=lambda frame: frame["ticker"].astype(str).astype(ticker_order))
+            .sort_values("_order")
+            .drop(columns="_order")
+            .reset_index(drop=True)
+        )
+        missing_walk_forward_tickers = [ticker for ticker in ordered_tickers if ticker not in set(walk_forward_markets_df["ticker"].astype(str))]
+        if missing_walk_forward_tickers:
+            parser.exit(
+                2,
+                "error: could not recover close_time/open_time rows for all walk-forward tickers; "
+                f"missing {len(missing_walk_forward_tickers)} ticker(s), for example {missing_walk_forward_tickers[:3]}\n",
+            )
+    elif not args.skip_walk_forward:
+        parser.exit(
+            2,
+            "error: walk-forward evaluation requires the source markets frame so purge/embargo can be applied; "
+            "pass --markets-path/--trades-path or rerun without --reference-run-dir-only cache reuse.\n",
+        )
+    else:
+        walk_forward_markets_df = pd.DataFrame({"ticker": list(ordered_tickers)})
+    cache_status = inspect_feature_cache(
+        dataset_cache_dir,
+        ordered_tickers,
+        feature_schema=feature_schema,
+    )
 
     print(f"Series: {args.series}")
     print(f"Artifacts: {artifacts_dir}")
     print(f"Dataset cache: {dataset_cache_dir}")
     print(f"Reference run: {reference_run_dir if reference_run_dir is not None else 'none'}")
     print(f"Progress bars: {not args.no_progress}")
+    print(f"Feature schema: {feature_schema}")
+    print(
+        "Purge/embargo: "
+        f"{'enabled' if manifest_purge_embargo_enabled else 'disabled'}"
+        + (
+            f" ({manifest_purge_embargo_gap_seconds}s gap)"
+            if manifest_purge_embargo_enabled
+            else ""
+        )
+    )
     print(
         "Hourly context: "
         f"{hourly_context_config.series_ticker if hourly_context_config is not None else 'disabled'}"
@@ -188,13 +300,30 @@ def main() -> None:
 
     write_json(artifacts_dir / "split_manifest.json", manifest_payload)
 
-    if not dataset_cache_dir.exists():
-        if markets_df is None or trades_path is None:
+    if not cache_status.ready:
+        if cache_status.manifest_exists and not cache_status.schema_matches:
             parser.exit(
                 2,
-                "error: dataset cache does not exist and target markets/trades could not be resolved.\n",
+                "error: dataset cache exists but was built for a different feature schema "
+                f"({cache_status.manifest_schema_name}); use a fresh --run-name or remove the cache directory.\n",
             )
-        print("Building feature cache...")
+        if markets_df is None or trades_path is None:
+            try:
+                markets_path, trades_path = resolve_inputs(args.series, args.markets_path, args.trades_path)
+                markets_df = load_markets_frame(markets_path, args.series)
+            except (FileNotFoundError, ValueError) as exc:
+                parser.exit(2, f"error: {exc}\n")
+        try:
+            external_spot_df = load_or_require_external_spot_frame(feature_schema, args.external_spot_root)
+        except (FileNotFoundError, ValueError) as exc:
+            parser.exit(2, f"error: {exc}\n")
+        if dataset_cache_dir.exists():
+            print(
+                "Resuming feature cache build: "
+                f"{cache_status.present_requested_tickers}/{cache_status.requested_tickers} requested ticker files present."
+            )
+        else:
+            print("Building feature cache...")
         build_feature_cache(
             markets_df,
             trades_path,
@@ -202,6 +331,10 @@ def main() -> None:
             hourly_context=hourly_context_config,
             context_markets_df=context_markets_df,
             context_trades_path=context_trades_path,
+            feature_schema=feature_schema,
+            external_spot_df=external_spot_df,
+            external_spot_latency_ms=int(args.external_spot_latency_ms),
+            progress_desc=None if args.no_progress else "Feature cache",
         )
 
     print("Loading datasets...")
@@ -209,16 +342,19 @@ def main() -> None:
         dataset_cache_dir,
         train_tickers,
         progress_desc=None if args.no_progress else "Train dataset",
+        feature_schema=feature_schema,
     )
     validation_df = load_feature_dataset(
         dataset_cache_dir,
         validation_tickers,
         progress_desc=None if args.no_progress else "Validation dataset",
+        feature_schema=feature_schema,
     )
     test_df = load_feature_dataset(
         dataset_cache_dir,
         test_tickers,
         progress_desc=None if args.no_progress else "Test dataset",
+        feature_schema=feature_schema,
     )
     print(f"Train rows: {len(train_df)}")
     print(f"Validation rows: {len(validation_df)}")
@@ -228,6 +364,7 @@ def main() -> None:
         artifacts_dir / "feature_manifest.json",
         feature_order=feature_names,
         metadata={
+            **feature_schema_metadata(feature_schema),
             "hourly_context_series": hourly_context_config.series_ticker if hourly_context_config is not None else None,
         },
     )
@@ -251,55 +388,109 @@ def main() -> None:
     validation_log_loss = float(log_loss(labels(validation_df), validation_calibrated, labels=[0, 1]))
     minimum_validation_trades = minimum_policy_trades_for_frame(validation_df)
 
-    best_policy, grid_results = tune_policy(validation_df, validation_calibrated, validation_log_loss)
-    write_json(artifacts_dir / "policy_search.json", grid_results)
+    policy_results = sweep_policy_grid(
+        validation_df,
+        validation_calibrated,
+        validation_log_loss,
+        progress_desc=None if args.no_progress else "Validation policy sweep",
+    )
+    best_policy, met_validation_requirements = select_policy_candidate(
+        policy_results,
+        minimum_trades=minimum_validation_trades,
+        fallback_to_best_overall=True,
+    )
+    policy_selection_mode = "strict" if met_validation_requirements else "fallback_best_overall"
+    write_json(artifacts_dir / "policy_search.json", [serialize_policy_result(result) for result in policy_results])
     write_json(
         artifacts_dir / "policy.json",
-        {
-            "config": best_policy.config.__dict__,
-            "objective": best_policy.objective,
-            "trades": best_policy.trades,
-            "net_pnl_dollars": best_policy.net_pnl_dollars,
-            "max_drawdown_dollars": best_policy.max_drawdown_dollars,
-            "max_drawdown_pct": best_policy.max_drawdown_pct,
-            "return_pct": best_policy.return_pct,
-            "log_loss": best_policy.log_loss,
-            "minimum_trades_required": minimum_validation_trades,
-        },
+        serialize_policy_result(
+            best_policy,
+            selection_mode=policy_selection_mode,
+            met_validation_requirements=met_validation_requirements,
+            minimum_trades_required=minimum_validation_trades,
+        ),
     )
 
-    from src.live.kalshi.offline_training import apply_calibration_to_predictions  # noqa: E402
+    validation_diagnostics, validation_trade_records = build_policy_diagnostics(
+        validation_df,
+        validation_raw,
+        validation_calibrated,
+        best_policy.config,
+        overall_log_loss=validation_log_loss,
+        progress_desc=None if args.no_progress else "Validation policy diagnostics",
+    )
+    validation_metrics = dict(validation_diagnostics["policy_metrics"])
+    validation_metrics["selection_mode"] = policy_selection_mode
+    validation_metrics["met_validation_requirements"] = met_validation_requirements
+    validation_metrics["minimum_validation_trades_required"] = minimum_validation_trades
+    write_json(artifacts_dir / "validation_metrics.json", validation_metrics)
+    write_json(artifacts_dir / "validation_diagnostics.json", validation_diagnostics)
+    print(format_realized_vol_regime_source_summary("Validation", validation_diagnostics))
+    _write_predictions("validation", artifacts_dir, validation_df, validation_raw, validation_calibrated)
+    validation_trade_records.to_parquet(artifacts_dir / "validation_trade_records.parquet", index=False)
 
     test_raw = raw_predictions(model, test_df)
     test_calibrated = apply_calibration_to_predictions(artifacts_dir, test_raw)
     test_log_loss = float(log_loss(labels(test_df), test_calibrated, labels=[0, 1]))
-    test_metrics = evaluate_policy(test_df, test_calibrated, best_policy.config, test_log_loss)
+    test_diagnostics, test_trade_records = build_policy_diagnostics(
+        test_df,
+        test_raw,
+        test_calibrated,
+        best_policy.config,
+        overall_log_loss=test_log_loss,
+        progress_desc=None if args.no_progress else "Test policy diagnostics",
+    )
+    test_metrics = dict(test_diagnostics["policy_metrics"])
+    test_metrics["selection_mode"] = policy_selection_mode
+    test_metrics["met_validation_requirements"] = met_validation_requirements
+    test_metrics["minimum_validation_trades_required"] = minimum_validation_trades
     write_json(artifacts_dir / "test_metrics.json", test_metrics)
-
-    test_predictions = build_prediction_export_frame(test_df, test_raw, test_calibrated)
-    test_predictions.to_parquet(artifacts_dir / "test_predictions.parquet", index=False)
+    write_json(artifacts_dir / "test_diagnostics.json", test_diagnostics)
+    print(format_realized_vol_regime_source_summary("Test", test_diagnostics))
+    _write_predictions("test", artifacts_dir, test_df, test_raw, test_calibrated)
+    test_trade_records.to_parquet(artifacts_dir / "test_trade_records.parquet", index=False)
 
     walk_forward: list[dict[str, object]] | None = None
     if args.skip_walk_forward:
         print("Skipping walk-forward evaluation.")
     else:
         print("Running walk-forward evaluation...")
-        walk_forward = evaluate_walk_forward(dataset_cache_dir, walk_forward_markets_df, best_params)
+        walk_forward = evaluate_walk_forward(
+            dataset_cache_dir,
+            walk_forward_markets_df,
+            best_params,
+            feature_schema=feature_schema,
+            purge_embargo=manifest_purge_embargo_enabled,
+            purge_embargo_gap_seconds=manifest_purge_embargo_gap_seconds if manifest_purge_embargo_enabled else None,
+            purge_embargo_safety_margin_seconds=int(manifest_payload.get("safety_margin_seconds", 0)),
+            fallback_to_best_overall_policy=True,
+        )
         write_json(artifacts_dir / "walk_forward.json", walk_forward)
 
     summary = {
         "series": args.series,
+        "model_family": "lightgbm",
+        "model_type": "lightgbm_classifier",
         "train_rows": int(len(train_df)),
         "validation_rows": int(len(validation_df)),
         "test_rows": int(len(test_df)),
         "feature_count": len(feature_names),
         "best_params": best_params,
+        "best_iteration": training_metrics["best_iteration"],
         "minimum_validation_trades_required": minimum_validation_trades,
         "validation_log_loss_calibrated": validation_log_loss,
         "test_log_loss_calibrated": test_log_loss,
         "policy": json.loads((artifacts_dir / "policy.json").read_text(encoding="utf-8")),
+        "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
         "hourly_context_series": hourly_context_config.series_ticker if hourly_context_config is not None else None,
+        "feature_schema": feature_schema,
+        "external_spot_latency_ms": int(args.external_spot_latency_ms),
+        "purge_embargo_enabled": manifest_purge_embargo_enabled,
+        "purge_embargo_gap_seconds": manifest_purge_embargo_gap_seconds,
+        "feature_lookback_seconds": int(manifest_payload.get("feature_lookback_seconds", 0)),
+        "target_horizon_seconds": int(manifest_payload.get("target_horizon_seconds", 0)),
+        "purge_embargo_safety_margin_seconds": int(manifest_payload.get("safety_margin_seconds", 0)),
         "walk_forward_completed": walk_forward is not None,
     }
     write_json(artifacts_dir / "summary.json", summary)

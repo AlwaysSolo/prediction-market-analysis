@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -12,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.live.data.btc_spot_feed import BTCSpotFeed, BTCSpotFeedConfig  # noqa: E402
 from src.live.kalshi import (  # noqa: E402
     DEFAULT_BAGGED_LASSO_MODEL_FILE,
     KalshiCollectorConfig,
@@ -29,6 +31,7 @@ from src.live.kalshi import (  # noqa: E402
     KalshiSignalRiskConfig,
     KalshiSignalRiskEngine,
 )
+from src.live.kalshi.features import DEFAULT_FEATURE_SCHEMA, SPOT_V1_FEATURE_SCHEMA  # noqa: E402
 from src.live.kalshi.client import KalshiLiveRestClient  # noqa: E402
 from src.live.kalshi.live_archive import (  # noqa: E402
     KalshiLiveArchiveConfig,
@@ -56,6 +59,19 @@ DEDICATED_LIVE_BANNED_COMBO_BUCKETS = frozenset(
         "10-12|30-40|30-40|5-10",
     }
 )
+
+
+def feature_schema_for_model_file(model_file: Path) -> str | None:
+    manifest_path = model_file.parent.parent / "feature_manifest.json"
+    if not manifest_path.exists():
+        return None
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    schema_name = payload.get("schema_name")
+    return None if schema_name is None else str(schema_name)
+
+
+def requires_external_spot_feature_schema(feature_schema: str | None) -> bool:
+    return str(feature_schema or "").strip().lower() == SPOT_V1_FEATURE_SCHEMA
 
 
 def _resolve_model_and_policy(run_dir: Path | None, policy_file: str | None) -> tuple[Path, Path]:
@@ -327,6 +343,8 @@ async def _run(args: argparse.Namespace) -> None:
         Path(args.run_dir) if args.run_dir else None,
         args.policy_file,
     )
+    feature_schema = feature_schema_for_model_file(model_file) or DEFAULT_FEATURE_SCHEMA
+    requires_external_spot = requires_external_spot_feature_schema(feature_schema)
     credentials = KalshiCredentials.from_env(environment)
 
     signal_config = _build_live_signal_config(
@@ -379,6 +397,7 @@ async def _run(args: argparse.Namespace) -> None:
     print(f"Subaccount: {execution_config.subaccount}")
     print(f"Model file: {model_file}")
     print(f"Policy file: {policy_file}")
+    print(f"Feature schema: {feature_schema}")
     print(f"Signal profile: {args.signal_profile}")
     print(
         "Resolved signal config:",
@@ -409,6 +428,7 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     collector = KalshiMarketDataCollector(collector_config)
+    spot_feed: BTCSpotFeed | None = None
     preflight_raw_queue = collector.subscribe_raw_stream_queue()
     feature_engine = KalshiFeatureStateEngine(
         collector,
@@ -416,7 +436,10 @@ async def _run(args: argparse.Namespace) -> None:
             publish_series_tickers=(DEDICATED_LIVE_TARGET_SERIES,),
             hourly_context_target_series_ticker=DEDICATED_LIVE_TARGET_SERIES,
             hourly_context_series_ticker=DEDICATED_LIVE_HOURLY_CONTEXT_SERIES,
+            feature_schema=feature_schema,
+            external_spot_required_for_schema=requires_external_spot,
         ),
+        spot_feed=spot_feed,
     )
     scorer = KalshiRegularizedLogisticScorer(
         feature_engine,
@@ -466,51 +489,72 @@ async def _run(args: argparse.Namespace) -> None:
     execution_queue = execution_engine.subscribe_queue()
     layering_queue = None if layering_engine is None else layering_engine.subscribe_queue()
 
-    print("Starting collector...")
-    await collector.start()
-    await collector.wait_until_ready()
-    first_ticker_event = await _await_ticker_stream(
-        preflight_raw_queue,
-        timeout_seconds=args.quote_start_timeout_seconds,
-    )
-    print(
-        "Quote stream preflight:",
-        f"ticker={first_ticker_event.market_ticker}",
-        f"received_at={first_ticker_event.received_at.isoformat()}",
-    )
-
-    print("Starting feature, scorer, signal, execution, and archive layers...")
-    await feature_engine.start()
-    await scorer.start()
-    await signal_engine.start()
-    await execution_engine.start()
-    if layering_engine is not None:
-        await layering_engine.start()
-    await archive_manager.start()
-
-    print("Dedicated bagged-lasso live stack started.")
-    print(f"Dashboard root: {args.log_root}")
-    print("Open: http://localhost:8765/tools/live_trading_dashboard.html")
-    print(f"Choose folder: {args.log_root}")
-
-    signal_task = asyncio.create_task(_consume_signal_updates(signal_queue), name="bagged-lasso-live-signal")
-    execution_task = asyncio.create_task(
-        _consume_execution_updates(execution_queue, execution_engine),
-        name="bagged-lasso-live-execution",
-    )
-    layering_task = None
-    if layering_queue is not None:
-        layering_task = asyncio.create_task(
-            _consume_layering_updates(layering_queue),
-            name="bagged-lasso-live-layering",
-        )
+    signal_task: asyncio.Task | None = None
+    execution_task: asyncio.Task | None = None
+    layering_task: asyncio.Task | None = None
     try:
+        if requires_external_spot:
+            spot_feed = BTCSpotFeed(
+                BTCSpotFeedConfig(
+                    environment=environment.value,
+                    log_dir=Path(args.log_root) / "external_spot",
+                )
+            )
+            feature_engine.spot_feed = spot_feed
+            print("Starting external BTC spot feed...")
+            await spot_feed.start()
+            await asyncio.wait_for(spot_feed.wait_until_ready(), timeout=args.spot_start_timeout_seconds)
+            spot_snapshot = spot_feed.snapshot_state()
+            if spot_snapshot is None or not spot_snapshot.btc_spot_is_fresh:
+                raise RuntimeError("spot_v1 model selected but external BTC spot feed did not produce a fresh startup snapshot.")
+            print(
+                "External spot preflight:",
+                f"price={spot_snapshot.btc_spot_price}",
+                f"event_time={spot_snapshot.event_time.isoformat()}",
+                f"venues={spot_snapshot.btc_spot_venues_fresh}",
+            )
+
+        print("Starting collector...")
+        await collector.start()
+        await collector.wait_until_ready()
+        first_ticker_event = await _await_ticker_stream(
+            preflight_raw_queue,
+            timeout_seconds=args.quote_start_timeout_seconds,
+        )
+        print(
+            "Quote stream preflight:",
+            f"ticker={first_ticker_event.market_ticker}",
+            f"received_at={first_ticker_event.received_at.isoformat()}",
+        )
+
+        print("Starting feature, scorer, signal, execution, and archive layers...")
+        await feature_engine.start()
+        await scorer.start()
+        await signal_engine.start()
+        await execution_engine.start()
+        if layering_engine is not None:
+            await layering_engine.start()
+        await archive_manager.start()
+
+        print("Dedicated bagged-lasso live stack started.")
+        print(f"Dashboard root: {args.log_root}")
+        print("Open: http://localhost:8765/tools/live_trading_dashboard.html")
+        print(f"Choose folder: {args.log_root}")
+
+        signal_task = asyncio.create_task(_consume_signal_updates(signal_queue), name="bagged-lasso-live-signal")
+        execution_task = asyncio.create_task(
+            _consume_execution_updates(execution_queue, execution_engine),
+            name="bagged-lasso-live-execution",
+        )
+        if layering_queue is not None:
+            layering_task = asyncio.create_task(
+                _consume_layering_updates(layering_queue),
+                name="bagged-lasso-live-layering",
+            )
         await asyncio.Event().wait()
     finally:
-        signal_task.cancel()
-        execution_task.cancel()
-        if layering_task is not None:
-            layering_task.cancel()
+        for task in tuple(task for task in (signal_task, execution_task, layering_task) if task is not None):
+            task.cancel()
         for task in tuple(task for task in (signal_task, execution_task, layering_task) if task is not None):
             try:
                 await task
@@ -524,6 +568,8 @@ async def _run(args: argparse.Namespace) -> None:
         await scorer.stop()
         await feature_engine.stop()
         await collector.stop()
+        if spot_feed is not None:
+            await spot_feed.stop()
 
 
 def main() -> None:
@@ -581,6 +627,7 @@ def main() -> None:
     parser.add_argument("--no-archive-compact-on-shutdown", action="store_true")
     parser.add_argument("--metadata-refresh-interval-seconds", type=float, default=300.0)
     parser.add_argument("--quote-start-timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--spot-start-timeout-seconds", type=float, default=20.0)
     args = parser.parse_args()
     if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

@@ -12,6 +12,7 @@ from src.live.kalshi.execution import (
     KalshiExecutionMode,
     KalshiExecutionUpdate,
     KalshiLiveOrderRecord,
+    build_close_position_payload,
     build_create_order_payload,
     execution_update_from_state,
     parse_fill_event,
@@ -90,6 +91,12 @@ from src.live.kalshi.regime import (
     evaluate_kxbtc15m_regime,
     evaluate_kxbtc15m_regime_for_state,
 )
+from src.live.kalshi.risk_governor import (
+    SessionRiskGovernor,
+    SessionRiskGovernorConfig,
+    SessionRiskGovernorHaltRecord,
+    SessionRiskGovernorState,
+)
 from src.live.kalshi.signal_risk import (
     KalshiExecutionFeedback,
     KalshiPortfolioPosition,
@@ -167,6 +174,10 @@ __all__ = [
     "KalshiSignalPortfolioState",
     "KalshiSignalRiskConfig",
     "KalshiSignalRiskEngine",
+    "SessionRiskGovernor",
+    "SessionRiskGovernorConfig",
+    "SessionRiskGovernorHaltRecord",
+    "SessionRiskGovernorState",
     "KalshiTickerState",
     "KalshiTickerUpdate",
     "KalshiRawStreamEvent",
@@ -176,6 +187,7 @@ __all__ = [
     "TAU_BUCKETS",
     "KalshiExecutionFeedback",
     "apply_adverse_slippage",
+    "build_close_position_payload",
     "build_create_order_payload",
     "build_feature_row",
     "calculate_cost_metrics",

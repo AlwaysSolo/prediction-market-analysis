@@ -5,6 +5,7 @@ import inspect
 import json
 import math
 import os
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from src.live.kalshi.signal_risk import (
     KalshiSignalRiskEngine,
     KalshiTradeIntent,
     calculate_realized_cash_metrics,
+    find_max_acceptable_entry_price_cents,
 )
 from src.live.kalshi.trade_intent_source import KalshiTradeIntentSource
 
@@ -315,6 +317,7 @@ class KalshiExecutionIntentState:
     hard_max_price_cents: int | None = None
     retry_reason: str | None = None
     was_first_attempt: bool | None = None
+    time_in_force: str | None = None
 
 
 @dataclass(frozen=True)
@@ -359,6 +362,7 @@ class KalshiExecutionUpdate:
     hard_max_price_cents: int | None = None
     retry_reason: str | None = None
     was_first_attempt: bool | None = None
+    time_in_force: str | None = None
 
 
 @dataclass(frozen=True)
@@ -425,6 +429,7 @@ def execution_update_from_state(state: KalshiExecutionIntentState) -> KalshiExec
         hard_max_price_cents=state.hard_max_price_cents,
         retry_reason=state.retry_reason,
         was_first_attempt=state.was_first_attempt,
+        time_in_force=state.time_in_force,
     )
 
 
@@ -547,6 +552,39 @@ def build_create_order_payload(
     }
     price_field = "yes_price" if intent.side.upper() == "YES" else "no_price"
     payload[price_field] = intent.max_acceptable_entry_price_cents
+    if expiration_ts is not None:
+        payload["expiration_ts"] = expiration_ts
+    if subaccount is not None:
+        payload["subaccount"] = subaccount
+    return payload
+
+
+def build_close_position_payload(
+    position: KalshiPortfolioPosition,
+    *,
+    client_order_id: str,
+    limit_price_cents: int,
+    subaccount: int | None = None,
+    time_in_force: str = "immediate_or_cancel",
+    expiration_ts: int | None = None,
+) -> dict[str, Any]:
+    if position.side.upper() == "YES":
+        close_side = "NO"
+        price_field = "no_price"
+    else:
+        close_side = "YES"
+        price_field = "yes_price"
+    payload: dict[str, Any] = {
+        "ticker": position.ticker,
+        "client_order_id": client_order_id,
+        "side": close_side.lower(),
+        "action": "sell",
+        "count": position.contracts,
+        "type": "limit",
+        "time_in_force": time_in_force,
+        "reduce_only": True,
+        price_field: limit_price_cents,
+    }
     if expiration_ts is not None:
         payload["expiration_ts"] = expiration_ts
     if subaccount is not None:
@@ -683,10 +721,10 @@ class KalshiExecutionEngine:
         if self.config.mode is KalshiExecutionMode.SHADOW:
             await self._refresh_portfolio_snapshot()
             self._reconcile_task = asyncio.create_task(self._reconcile_loop(), name="kalshi-execution-reconcile")
-        elif self._simulation_enabled():
+        elif self.config.mode is KalshiExecutionMode.PAPER or self._simulation_enabled():
             await self._sync_signal_portfolio_snapshot(
                 event_time=utc_now(),
-                log_event_type="simulated_portfolio_initialized",
+                log_event_type=f"{self._simulation_label()}_portfolio_initialized",
             )
             self._reconcile_task = asyncio.create_task(self._reconcile_loop(), name="kalshi-execution-reconcile")
         elif self.config.mode in {KalshiExecutionMode.LIVE, KalshiExecutionMode.SHADOW}:
@@ -757,6 +795,9 @@ class KalshiExecutionEngine:
     def get_realized_pnl_dollars(self) -> float:
         return self._simulated_realized_pnl_dollars + self._live_realized_pnl_dollars
 
+    def request_full_reconcile(self) -> None:
+        self._request_reconcile(full=True)
+
     def _simulation_enabled(self) -> bool:
         return self.config.simulate_immediate_fills
 
@@ -826,16 +867,29 @@ class KalshiExecutionEngine:
             return self.config.shadow_fill_latency_seconds
         return 0.0
 
-    def _resolve_shadow_executable_price(
+    def _requires_quote_aware_simulated_fill(self) -> bool:
+        return self.config.mode in {KalshiExecutionMode.PAPER, KalshiExecutionMode.SHADOW} or self._simulation_enabled()
+
+    def _score_state_for_ticker(self, ticker: str) -> Any | None:
+        get_state = getattr(self.signal_engine.scorer, "get_state", None)
+        if callable(get_state):
+            return get_state(ticker)
+        snapshot_states = getattr(self.signal_engine.scorer, "snapshot_states", None)
+        if callable(snapshot_states):
+            return snapshot_states().get(ticker)
+        return None
+
+    def _resolve_simulated_executable_price(
         self,
         intent: KalshiTradeIntent,
     ) -> _SimulatedFillResolution:
-        score_state = self.signal_engine.scorer.get_state(intent.ticker)
+        simulation_label = self._simulation_label()
+        score_state = self._score_state_for_ticker(intent.ticker)
         if score_state is None:
             return _SimulatedFillResolution(
                 filled=False,
                 fill_price_cents=None,
-                message="shadow_cancelled_missing_score_state",
+                message=f"{simulation_label}_cancelled_missing_score_state",
             )
         if (
             score_state.yes_bid_cents is None
@@ -846,13 +900,13 @@ class KalshiExecutionEngine:
             return _SimulatedFillResolution(
                 filled=False,
                 fill_price_cents=None,
-                message="shadow_cancelled_missing_quote",
+                message=f"{simulation_label}_cancelled_missing_quote",
             )
         if score_state.yes_bid_cents >= score_state.yes_ask_cents:
             return _SimulatedFillResolution(
                 filled=False,
                 fill_price_cents=None,
-                message="shadow_cancelled_crossed_quote",
+                message=f"{simulation_label}_cancelled_crossed_quote",
             )
         if (
             score_state.quote_age_seconds is None
@@ -861,7 +915,7 @@ class KalshiExecutionEngine:
             return _SimulatedFillResolution(
                 filled=False,
                 fill_price_cents=None,
-                message="shadow_cancelled_stale_quote",
+                message=f"{simulation_label}_cancelled_stale_quote",
             )
         fill_price_cents = (
             score_state.buy_yes_price_cents if intent.side.upper() == "YES" else score_state.buy_no_price_cents
@@ -870,18 +924,34 @@ class KalshiExecutionEngine:
             return _SimulatedFillResolution(
                 filled=False,
                 fill_price_cents=None,
-                message="shadow_cancelled_missing_executable_price",
+                message=f"{simulation_label}_cancelled_missing_executable_price",
             )
         if fill_price_cents > intent.max_acceptable_entry_price_cents:
+            refreshed_max_acceptable_entry_price_cents = find_max_acceptable_entry_price_cents(
+                side=intent.side.upper(),
+                predicted_yes_probability=score_state.predicted_yes_probability,
+                config=self.signal_engine.config,
+                contracts=intent.contracts,
+                edge_threshold_cents=self.signal_engine.config.maintain_edge_cents,
+            )
+            if (
+                refreshed_max_acceptable_entry_price_cents is not None
+                and fill_price_cents <= refreshed_max_acceptable_entry_price_cents
+            ):
+                return _SimulatedFillResolution(
+                    filled=True,
+                    fill_price_cents=fill_price_cents,
+                    message=f"{simulation_label}_fill_requoted_edge_maintained",
+                )
             return _SimulatedFillResolution(
                 filled=False,
                 fill_price_cents=None,
-                message="shadow_cancelled_limit_moved_away",
+                message=f"{simulation_label}_cancelled_limit_moved_away",
             )
         return _SimulatedFillResolution(
             filled=True,
             fill_price_cents=fill_price_cents,
-            message="shadow_fill_requoted",
+            message=f"{simulation_label}_fill_requoted",
         )
 
     def _current_quote_context(self, ticker: str, side: str) -> _FeedQuoteContext:
@@ -904,7 +974,7 @@ class KalshiExecutionEngine:
                 top_book_contracts=collector_state.no_bid_size,
                 executable_ask_cents=collector_state.buy_yes_price_cents,
             )
-        score_state = self.signal_engine.scorer.get_state(ticker)
+        score_state = self._score_state_for_ticker(ticker)
         if score_state is not None:
             executable_ask_cents = score_state.buy_no_price_cents if side.upper() == "NO" else score_state.buy_yes_price_cents
             top_book_side = "yes_bid" if side.upper() == "NO" else "no_bid"
@@ -1283,6 +1353,7 @@ class KalshiExecutionEngine:
 
         execution_intent = intent
         limit_adjustment_cents = 0
+        claimed_time_in_force = "immediate_or_cancel"
         if self.config.mode is KalshiExecutionMode.LIVE and not self._simulation_enabled():
             preview_submission_policy = self._build_live_submission_policy(
                 intent,
@@ -1292,6 +1363,7 @@ class KalshiExecutionEngine:
                 intent,
                 submission_policy=preview_submission_policy,
             )
+            claimed_time_in_force = preview_submission_policy.time_in_force
         self.signal_engine.claim_trade_intent_reservation(execution_intent)
 
         claimed_state = KalshiExecutionIntentState(
@@ -1335,6 +1407,7 @@ class KalshiExecutionEngine:
             hard_max_price_cents=execution_intent.hard_max_price_cents,
             retry_reason=execution_intent.retry_reason,
             was_first_attempt=execution_intent.was_first_attempt,
+            time_in_force=claimed_time_in_force,
         )
         self._states[execution_intent.decision_id] = claimed_state
         self._client_order_to_decision[execution_intent.decision_id] = execution_intent.decision_id
@@ -1395,13 +1468,13 @@ class KalshiExecutionEngine:
 
         simulated_fill_price_cents = intent.reference_price_cents
         fill_message = f"{simulation_label}_fill"
-        if self.config.mode is KalshiExecutionMode.SHADOW:
+        if self._requires_quote_aware_simulated_fill():
             latency_seconds = self._simulated_fill_latency_seconds()
             if latency_seconds > 0:
                 await asyncio.sleep(latency_seconds)
-            resolution = self._resolve_shadow_executable_price(intent)
+            resolution = self._resolve_simulated_executable_price(intent)
             await self._logger.write(
-                "shadow_quote_recheck",
+                f"{simulation_label}_quote_recheck",
                 {
                     "decision_id": intent.decision_id,
                     "ticker": intent.ticker,
@@ -1431,7 +1504,7 @@ class KalshiExecutionEngine:
                 self._states[intent.decision_id] = cancelled_state
                 await self._sync_signal_portfolio_snapshot(
                     event_time=cancelled_state.event_time,
-                    log_event_type="shadow_portfolio_cancelled",
+                    log_event_type=f"{simulation_label}_portfolio_cancelled",
                 )
                 await self._publish_state(cancelled_state)
                 return
@@ -1458,7 +1531,7 @@ class KalshiExecutionEngine:
         entry_cost_dollars = accepted_state.entry_cost_dollars
         fees_dollars = accepted_state.fees_dollars
         cash_required_dollars = accepted_state.cash_required_dollars
-        if self.config.mode is KalshiExecutionMode.SHADOW:
+        if self._requires_quote_aware_simulated_fill():
             entry_cost_dollars, fees_dollars, cash_required_dollars = calculate_realized_cash_metrics(
                 entry_price_cents=simulated_fill_price_cents,
                 contracts=intent.contracts,
@@ -1711,6 +1784,163 @@ class KalshiExecutionEngine:
         else:
             await self._finalize_cancelled(decision_id, reason)
         return True
+
+    async def cancel_open_gtc_orders(self, *, reason: str) -> list[str]:
+        cancelled_decision_ids: list[str] = []
+        for decision_id, state in list(self._states.items()):
+            if state.mode is not KalshiExecutionMode.LIVE or self._simulation_enabled():
+                continue
+            if state.status in {"cancelled", "rejected", "error", "filled", "settled"}:
+                continue
+            is_resting_gtc = state.time_in_force == "good_till_canceled"
+            if state.live_order is not None and state.live_order.status == "resting":
+                is_resting_gtc = True
+            if not is_resting_gtc:
+                continue
+            if await self.cancel_live_intent(decision_id, reason=reason):
+                cancelled_decision_ids.append(decision_id)
+        return cancelled_decision_ids
+
+    async def flatten_open_positions_if_rational(
+        self,
+        *,
+        reason: str,
+        settle_instead_of_close_tau_minutes: float,
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        portfolio_state = self.signal_engine.get_portfolio_state()
+        for position in portfolio_state.open_positions:
+            score_state = self._score_state_for_ticker(position.ticker)
+            collector_state = self._collector.get_state(position.ticker)
+            tau_minutes: float | None = None
+            if score_state is not None:
+                tau_minutes = score_state.tau_minutes
+            elif collector_state is not None and collector_state.close_time is not None:
+                tau_minutes = max(0.0, (collector_state.close_time - utc_now()).total_seconds() / 60.0)
+            if tau_minutes is not None and tau_minutes <= settle_instead_of_close_tau_minutes:
+                actions.append(
+                    {
+                        "ticker": position.ticker,
+                        "side": position.side,
+                        "contracts": position.contracts,
+                        "tau_minutes": tau_minutes,
+                        "action": "settle",
+                        "reason": "within_settlement_tau_window",
+                    }
+                )
+                continue
+            if collector_state is not None and not collector_state.is_open:
+                actions.append(
+                    {
+                        "ticker": position.ticker,
+                        "side": position.side,
+                        "contracts": position.contracts,
+                        "tau_minutes": tau_minutes,
+                        "action": "settle",
+                        "reason": "market_already_closed",
+                    }
+                )
+                continue
+
+            close_limit_price_cents: int | None
+            if position.side.upper() == "YES":
+                close_limit_price_cents = None if score_state is None else score_state.no_ask_cents
+            else:
+                close_limit_price_cents = None if score_state is None else score_state.yes_ask_cents
+            if close_limit_price_cents is None:
+                actions.append(
+                    {
+                        "ticker": position.ticker,
+                        "side": position.side,
+                        "contracts": position.contracts,
+                        "tau_minutes": tau_minutes,
+                        "action": "skip",
+                        "reason": "no_closing_quote_available",
+                    }
+                )
+                continue
+
+            if self.config.mode is not KalshiExecutionMode.LIVE or self._simulation_enabled():
+                actions.append(
+                    {
+                        "ticker": position.ticker,
+                        "side": position.side,
+                        "contracts": position.contracts,
+                        "tau_minutes": tau_minutes,
+                        "action": "settle",
+                        "reason": "non_live_mode_close_not_submitted",
+                    }
+                )
+                continue
+
+            client_order_id = f"risk-close-{uuid.uuid4()}"
+            payload = build_close_position_payload(
+                position,
+                client_order_id=client_order_id,
+                limit_price_cents=close_limit_price_cents,
+                subaccount=self.config.subaccount,
+            )
+            await self._logger.write(
+                "risk_governor_flatten_requested",
+                {
+                    "reason": reason,
+                    "ticker": position.ticker,
+                    "side": position.side,
+                    "contracts": position.contracts,
+                    "tau_minutes": tau_minutes,
+                    "client_order_id": client_order_id,
+                    "limit_price_cents": close_limit_price_cents,
+                    "payload": payload,
+                },
+            )
+            try:
+                response = await self._call_rest(self._rest_client.create_order, payload)
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as exc:
+                error_detail = repr(exc)
+                await self._logger.write(
+                    "risk_governor_flatten_failed",
+                    {
+                        "reason": reason,
+                        "ticker": position.ticker,
+                        "side": position.side,
+                        "contracts": position.contracts,
+                        "tau_minutes": tau_minutes,
+                        "client_order_id": client_order_id,
+                        "limit_price_cents": close_limit_price_cents,
+                        "error": error_detail,
+                    },
+                )
+                actions.append(
+                    {
+                        "ticker": position.ticker,
+                        "side": position.side,
+                        "contracts": position.contracts,
+                        "tau_minutes": tau_minutes,
+                        "action": "skip",
+                        "reason": "close_submission_failed",
+                        "client_order_id": client_order_id,
+                        "close_limit_price_cents": close_limit_price_cents,
+                        "error": error_detail,
+                    }
+                )
+                continue
+            actions.append(
+                {
+                    "ticker": position.ticker,
+                    "side": position.side,
+                    "contracts": position.contracts,
+                    "tau_minutes": tau_minutes,
+                    "action": "close_submitted",
+                    "reason": "close_order_submitted",
+                    "client_order_id": client_order_id,
+                    "close_limit_price_cents": close_limit_price_cents,
+                    "response": response,
+                }
+            )
+
+        if actions and self.config.mode is KalshiExecutionMode.LIVE and not self._simulation_enabled():
+            self._request_reconcile(full=True)
+        return actions
 
     async def _reconcile_or_retry(self, intent: KalshiTradeIntent, *, reason: str) -> bool:
         await self._ensure_signal_accepted(intent.decision_id)
@@ -2150,7 +2380,7 @@ class KalshiExecutionEngine:
                 self._reconcile_event.clear()
                 if self._stop_event.is_set():
                     break
-                if self.config.mode is KalshiExecutionMode.SHADOW or self._simulation_enabled():
+                if self.config.mode in {KalshiExecutionMode.PAPER, KalshiExecutionMode.SHADOW} or self._simulation_enabled():
                     await self._settle_simulated_positions()
                 elif full_reconcile:
                     await self._refresh_portfolio_snapshot()
@@ -2267,7 +2497,7 @@ class KalshiExecutionEngine:
             )
             await self._sync_signal_portfolio_snapshot(
                 event_time=settled_at,
-                log_event_type="simulated_portfolio_settled",
+                log_event_type=f"{self._simulation_label()}_portfolio_settled",
             )
             await self._publish_state(settled_state)
 

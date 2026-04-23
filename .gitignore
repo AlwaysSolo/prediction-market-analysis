@@ -37,13 +37,20 @@ graphify-out/
 # Local scratch / temp outputs
 .backfill_cursor
 .tmp/
+tmp/
+tmp_*/
 scratchpad/
 fig/
 catboost_info/
 tmp_*.txt
+*.tgz
 
 # Large local data and runtime logs
 data/
+!src/live/data/
+!src/live/data/**
+src/live/data/**/__pycache__/
+src/live/data/**/*.py[oc]
 data.zip
 output/
 *.tar.zst

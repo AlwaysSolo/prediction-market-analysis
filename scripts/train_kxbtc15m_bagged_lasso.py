@@ -36,6 +36,7 @@ from src.live.kalshi.offline_training import (  # noqa: E402
     calibrate_validation_predictions,
     feature_schema_metadata,
     evaluate_walk_forward_bagged_lasso,
+    format_realized_vol_regime_source_summary,
     labels,
     load_feature_dataset,
     load_markets_frame,
@@ -43,6 +44,8 @@ from src.live.kalshi.offline_training import (  # noqa: E402
     normalize_feature_schema,
     publish_latest_artifacts,
     infer_feature_names,
+    inspect_feature_cache,
+    load_or_require_external_spot_frame,
     resolve_artifacts_dir,
     resolve_inputs,
     run_bagged_lasso_search,
@@ -138,6 +141,16 @@ def main() -> None:
     parser.add_argument("--hourly-context-max-staleness-seconds", type=float, default=300.0)
     parser.add_argument("--hourly-context-min-recent-trade-count-300s", type=float, default=1.0)
     parser.add_argument(
+        "--external-spot-root",
+        help="Path to historical external BTC spot parquet data. Required when --feature-schema spot_v1 and rebuilding a cache.",
+    )
+    parser.add_argument(
+        "--external-spot-latency-ms",
+        type=int,
+        default=0,
+        help="Synthetic latency added to historical external spot timestamps before the offline join.",
+    )
+    parser.add_argument(
         "--feature-schema",
         choices=list(FEATURE_SCHEMA_CHOICES),
         default=DEFAULT_FEATURE_SCHEMA,
@@ -222,6 +235,11 @@ def main() -> None:
     test_tickers = _manifest_tickers(manifest_payload, "test_tickers")
     ordered_tickers = train_tickers + validation_tickers + test_tickers
     walk_forward_markets_df = pd.DataFrame({"ticker": list(ordered_tickers)})
+    cache_status = inspect_feature_cache(
+        dataset_cache_dir,
+        ordered_tickers,
+        feature_schema=feature_schema,
+    )
 
     print(f"Series: {args.series}")
     print(f"Artifacts: {artifacts_dir}")
@@ -236,13 +254,30 @@ def main() -> None:
 
     write_json(artifacts_dir / "split_manifest.json", manifest_payload)
 
-    if not dataset_cache_dir.exists():
-        if markets_df is None or trades_path is None:
+    if not cache_status.ready:
+        if cache_status.manifest_exists and not cache_status.schema_matches:
             parser.exit(
                 2,
-                "error: dataset cache does not exist and target markets/trades could not be resolved.\n",
+                "error: dataset cache exists but was built for a different feature schema "
+                f"({cache_status.manifest_schema_name}); use a fresh --run-name or remove the cache directory.\n",
             )
-        print("Building feature cache...")
+        if markets_df is None or trades_path is None:
+            try:
+                markets_path, trades_path = resolve_inputs(args.series, args.markets_path, args.trades_path)
+                markets_df = load_markets_frame(markets_path, args.series)
+            except (FileNotFoundError, ValueError) as exc:
+                parser.exit(2, f"error: {exc}\n")
+        try:
+            external_spot_df = load_or_require_external_spot_frame(feature_schema, args.external_spot_root)
+        except (FileNotFoundError, ValueError) as exc:
+            parser.exit(2, f"error: {exc}\n")
+        if dataset_cache_dir.exists():
+            print(
+                "Resuming feature cache build: "
+                f"{cache_status.present_requested_tickers}/{cache_status.requested_tickers} requested ticker files present."
+            )
+        else:
+            print("Building feature cache...")
         build_feature_cache(
             markets_df,
             trades_path,
@@ -250,6 +285,10 @@ def main() -> None:
             hourly_context=hourly_context_config,
             context_markets_df=context_markets_df,
             context_trades_path=context_trades_path,
+            feature_schema=feature_schema,
+            external_spot_df=external_spot_df,
+            external_spot_latency_ms=int(args.external_spot_latency_ms),
+            progress_desc=None if args.no_progress else "Feature cache",
         )
 
     print("Loading datasets...")
@@ -363,6 +402,7 @@ def main() -> None:
     validation_metrics["minimum_validation_trades_required"] = minimum_validation_trades
     write_json(artifacts_dir / "validation_metrics.json", validation_metrics)
     write_json(artifacts_dir / "validation_diagnostics.json", validation_diagnostics)
+    print(format_realized_vol_regime_source_summary("Validation", validation_diagnostics))
     _write_predictions("validation", artifacts_dir, validation_df, validation_raw, validation_calibrated)
     validation_trade_records.to_parquet(artifacts_dir / "validation_trade_records.parquet", index=False)
 
@@ -384,6 +424,7 @@ def main() -> None:
     test_metrics["minimum_validation_trades_required"] = minimum_validation_trades
     write_json(artifacts_dir / "test_metrics.json", test_metrics)
     write_json(artifacts_dir / "test_diagnostics.json", test_diagnostics)
+    print(format_realized_vol_regime_source_summary("Test", test_diagnostics))
     _write_predictions("test", artifacts_dir, test_df, test_raw, test_calibrated)
     test_trade_records.to_parquet(artifacts_dir / "test_trade_records.parquet", index=False)
 
@@ -396,6 +437,7 @@ def main() -> None:
             dataset_cache_dir,
             walk_forward_markets_df,
             best_params,
+            feature_schema=feature_schema,
             fallback_to_best_overall_policy=True,
             progress_desc=None if args.no_progress else "Walk-forward",
         )
@@ -419,6 +461,8 @@ def main() -> None:
         "test_metrics": test_metrics,
         "walk_forward_completed": walk_forward is not None,
         "hourly_context_series": hourly_context_config.series_ticker if hourly_context_config is not None else None,
+        "feature_schema": feature_schema,
+        "external_spot_latency_ms": int(args.external_spot_latency_ms),
     }
     write_json(artifacts_dir / "summary.json", summary)
 

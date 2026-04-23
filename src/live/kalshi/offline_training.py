@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import heapq
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from shutil import copy2
 from typing import Any
+from zoneinfo import TZPATH, ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -23,6 +27,7 @@ from sklearn.svm import LinearSVC
 from tqdm.auto import tqdm
 
 from src.live.kalshi.calibration import fit_platt_scaler, save_platt_calibration
+from src.live.data.btc_spot_feed import BTCSpotUpdate
 from src.live.kalshi.features import (
     DEFAULT_FEATURE_SCHEMA,
     FEATURE_ORDER,
@@ -32,8 +37,11 @@ from src.live.kalshi.features import (
     LINEAR_V1_DERIVED_FORMULAS,
     LINEAR_V1_FEATURE_ORDER,
     LINEAR_V1_FEATURE_SCHEMA,
+    SPOT_V1_FEATURE_ORDER,
+    SPOT_V1_FEATURE_SCHEMA,
     KalshiFeatureEngineConfig,
     KalshiTradeFeatureAccumulator,
+    feature_order_hash,
 )
 from src.live.kalshi.regime import evaluate_kxbtc15m_regime
 from src.live.kalshi.signal_risk import (
@@ -42,6 +50,8 @@ from src.live.kalshi.signal_risk import (
     calculate_cost_metrics,
     find_max_acceptable_entry_price_cents,
 )
+from src.live.kalshi.spot_features import SpotFeatureTracker
+from src.live.kalshi.strike import strike_price_from_market
 from src.live.kalshi.types import KalshiTickerUpdate
 
 DEFAULT_SERIES = "KXBTC15M"
@@ -77,6 +87,8 @@ DEFAULT_LINEAR_SVM_TOL = 1e-4
 ML_RANDOM_SEED = 42
 MINIMUM_POLICY_TRADES = 500
 MINIMUM_POLICY_TRADES_PER_DAY = 10.0
+DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS = 60
+DEFAULT_TARGET_HORIZON_SECONDS = 15 * 60
 _BINARY_CLASS_LABELS = [0, 1]
 _BASE_FEATURE_ORDER = tuple(FEATURE_ORDER)
 _MARKET_FEATURE_METADATA_COLUMNS = (
@@ -95,6 +107,25 @@ HOURLY_CONTEXT_TAU_MAX_MINUTES = 60.0
 HOURLY_CONTEXT_MAX_STALENESS_SECONDS = 300.0
 HOURLY_CONTEXT_MIN_RECENT_TRADE_COUNT = 1.0
 HOURLY_CONTEXT_FEATURE_ORDER = tuple(LIVE_HOURLY_CONTEXT_FEATURE_ORDER)
+_GENERIC_BTC_DIRECTION_TITLE = "btc price up in next 15 mins?"
+LOGGER = logging.getLogger(__name__)
+DIAGNOSTIC_TIMEZONE = "America/New_York"
+DIAGNOSTIC_TIMEZONE_INFO = ZoneInfo(DIAGNOSTIC_TIMEZONE)
+REALIZED_VOL_LOOKBACK_MINUTES = 240
+REALIZED_VOL_MIN_PERIODS = 180
+REALIZED_VOL_ANNUALIZATION_FACTOR = float(np.sqrt(60.0 * 24.0 * 365.0))
+REALIZED_VOL_REGIME_LABELS = ("low", "medium", "high", "extreme")
+REALIZED_VOL_REGIME_UNKNOWN = "unknown"
+SPOT_REALIZED_VOL_REGIME_EDGES = (0.40, 0.60, 0.90)
+SPOT_REALIZED_VOL_REGIME_VERSION = "spot_2026q1_backfill_v1"
+SPOT_REALIZED_VOL_REGIME_DERIVED_FROM = "2026 Q1 external_spot_normalized/backfill prior-4h BTC spot vol"
+MARKET_PROB_REALIZED_VOL_REGIME_EDGES = (100.0, 125.0, 140.0)
+MARKET_PROB_REALIZED_VOL_REGIME_VERSION = "market_prob_2025q4_2026q1_proxy_v1"
+MARKET_PROB_REALIZED_VOL_REGIME_DERIVED_FROM = (
+    "2025-12-10 to 2026-03-17 KXBTC15M 1-minute last yes-price proxy prior-4h vol"
+)
+REALIZED_VOL_REGIME_REVISIT_NOTE = "Revisit fixed edges after broader historical coverage is available."
+SESSION_BLOCK_LABELS = ("asia", "europe", "us_preopen", "us_regular", "us_postclose")
 
 
 @dataclass(frozen=True)
@@ -103,6 +134,224 @@ class HourlyContextConfig:
     tau_max_minutes: float = HOURLY_CONTEXT_TAU_MAX_MINUTES
     max_staleness_seconds: float = HOURLY_CONTEXT_MAX_STALENESS_SECONDS
     min_recent_trade_count_300s: float = HOURLY_CONTEXT_MIN_RECENT_TRADE_COUNT
+
+
+def _default_external_spot_normalized_root() -> Path | None:
+    repo_root = Path(__file__).resolve().parents[3]
+    candidate = repo_root / "output" / "kalshi_kxbtc15m_data" / "curated" / "external_spot_normalized" / "backfill"
+    return candidate if candidate.exists() else None
+
+
+def _timezone_metadata() -> dict[str, object]:
+    try:
+        tzdata_version = importlib_metadata.version("tzdata")
+        zoneinfo_source = "tzdata"
+    except importlib_metadata.PackageNotFoundError:
+        tzdata_version = None
+        zoneinfo_source = "system_zoneinfo"
+    return {
+        "timezone": DIAGNOSTIC_TIMEZONE,
+        "zoneinfo_source": zoneinfo_source,
+        "tzdata_version": tzdata_version,
+        "zoneinfo_paths": [str(path) for path in TZPATH],
+    }
+
+
+@lru_cache(maxsize=256)
+def _load_external_spot_events_for_day(day_dir: str) -> pd.DataFrame:
+    day_path = Path(day_dir)
+    events_path = day_path / "events.parquet"
+    if not events_path.exists():
+        return pd.DataFrame(columns=["event_time", "btc_spot_price"])
+    frame = pd.read_parquet(events_path, columns=["event_time", "btc_spot_price"])
+    if frame.empty:
+        return frame
+    frame["event_time"] = pd.to_datetime(frame["event_time"], utc=True)
+    return frame.dropna(subset=["btc_spot_price"]).sort_values("event_time").reset_index(drop=True)
+
+
+def _load_external_spot_minute_series(
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    *,
+    external_spot_root: Path | None = None,
+) -> pd.DataFrame | None:
+    root = external_spot_root or _default_external_spot_normalized_root()
+    if root is None or not root.exists():
+        return None
+    start_day = (pd.Timestamp(start_time) - pd.Timedelta(minutes=REALIZED_VOL_LOOKBACK_MINUTES)).floor("D")
+    end_day = pd.Timestamp(end_time).floor("D")
+    day_range = pd.date_range(start=start_day, end=end_day, freq="D", tz=UTC)
+    frames: list[pd.DataFrame] = []
+    for day in day_range:
+        day_dir = root / day.strftime("%Y-%m-%d")
+        if not day_dir.exists():
+            continue
+        day_frame = _load_external_spot_events_for_day(str(day_dir))
+        if not day_frame.empty:
+            frames.append(day_frame)
+    if not frames:
+        return None
+    spot_events = pd.concat(frames, ignore_index=True).sort_values("event_time")
+    minute_series = (
+        spot_events.set_index("event_time")["btc_spot_price"].resample("1min").last().ffill().to_frame("btc_spot_price")
+    )
+    minute_series["spot_realized_vol_4h"] = (
+        np.log(minute_series["btc_spot_price"]).diff().rolling(REALIZED_VOL_LOOKBACK_MINUTES, min_periods=REALIZED_VOL_MIN_PERIODS).std()
+        * REALIZED_VOL_ANNUALIZATION_FACTOR
+    )
+    return minute_series.reset_index(names="event_minute")
+
+
+def _align_spot_realized_vol_to_rows(
+    created_times: pd.Series,
+    *,
+    external_spot_root: Path | None = None,
+) -> pd.Series:
+    if created_times.empty:
+        return pd.Series(dtype=np.float64)
+    minute_series = _load_external_spot_minute_series(
+        pd.Timestamp(created_times.min()),
+        pd.Timestamp(created_times.max()),
+        external_spot_root=external_spot_root,
+    )
+    if minute_series is None or minute_series.empty:
+        return pd.Series(np.nan, index=created_times.index, dtype=np.float64)
+    lookup = pd.DataFrame({"created_time": pd.to_datetime(created_times, utc=True)}).sort_values("created_time")
+    aligned = pd.merge_asof(
+        lookup,
+        minute_series[["event_minute", "spot_realized_vol_4h"]].sort_values("event_minute"),
+        left_on="created_time",
+        right_on="event_minute",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=1),
+    )
+    result = pd.Series(aligned["spot_realized_vol_4h"].to_numpy(dtype=np.float64), index=lookup.index)
+    return result.reindex(created_times.index)
+
+
+def _align_market_prob_realized_vol_to_rows(created_times: pd.Series, market_prob: pd.Series) -> pd.Series:
+    if created_times.empty:
+        return pd.Series(dtype=np.float64)
+    minute_frame = (
+        pd.DataFrame({"created_time": pd.to_datetime(created_times, utc=True), "market_prob": pd.to_numeric(market_prob, errors="coerce")})
+        .dropna(subset=["market_prob"])
+        .sort_values("created_time")
+        .set_index("created_time")
+    )
+    if minute_frame.empty:
+        return pd.Series(np.nan, index=created_times.index, dtype=np.float64)
+    minute_series = minute_frame["market_prob"].resample("1min").last().ffill().to_frame("market_prob")
+    minute_series["market_prob_realized_vol_4h"] = (
+        minute_series["market_prob"].diff().rolling(REALIZED_VOL_LOOKBACK_MINUTES, min_periods=REALIZED_VOL_MIN_PERIODS).std()
+        * REALIZED_VOL_ANNUALIZATION_FACTOR
+    )
+    lookup = pd.DataFrame({"created_time": pd.to_datetime(created_times, utc=True)}).sort_values("created_time")
+    aligned = pd.merge_asof(
+        lookup,
+        minute_series.reset_index(names="event_minute")[["event_minute", "market_prob_realized_vol_4h"]].sort_values("event_minute"),
+        left_on="created_time",
+        right_on="event_minute",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=1),
+    )
+    result = pd.Series(aligned["market_prob_realized_vol_4h"].to_numpy(dtype=np.float64), index=lookup.index)
+    return result.reindex(created_times.index)
+
+
+def _assign_realized_vol_bucket(metric: float, edges: Sequence[float]) -> str:
+    if pd.isna(metric):
+        return REALIZED_VOL_REGIME_UNKNOWN
+    if metric < edges[0]:
+        return REALIZED_VOL_REGIME_LABELS[0]
+    if metric < edges[1]:
+        return REALIZED_VOL_REGIME_LABELS[1]
+    if metric < edges[2]:
+        return REALIZED_VOL_REGIME_LABELS[2]
+    return REALIZED_VOL_REGIME_LABELS[3]
+
+
+def _session_block_for_timestamp(timestamp: pd.Timestamp) -> str:
+    hour = int(timestamp.hour)
+    minute = int(timestamp.minute)
+    total_minutes = hour * 60 + minute
+    if 20 * 60 <= total_minutes or total_minutes < 60:
+        return "asia"
+    if total_minutes < 7 * 60:
+        return "europe"
+    if total_minutes < 9 * 60 + 30:
+        return "us_preopen"
+    # BTC trades 24/7, but we still use the NYSE regular-hours window as the US macro/liquidity anchor.
+    if total_minutes < 16 * 60:
+        return "us_regular"
+    return "us_postclose"
+
+
+def _annotate_diagnostic_context(
+    split_df: pd.DataFrame,
+    *,
+    external_spot_root: Path | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    annotated = split_df.copy()
+    annotated["created_time"] = pd.to_datetime(annotated["created_time"], utc=True)
+    spot_metric = _align_spot_realized_vol_to_rows(annotated["created_time"], external_spot_root=external_spot_root)
+    fallback_metric = _align_market_prob_realized_vol_to_rows(annotated["created_time"], annotated["market_prob"])
+    source = np.where(~spot_metric.isna(), "spot", np.where(~fallback_metric.isna(), "market_prob", "unknown"))
+    metric = np.where(source == "spot", spot_metric.to_numpy(dtype=np.float64), fallback_metric.to_numpy(dtype=np.float64))
+    annotated["realized_vol_regime_source"] = source
+    annotated["realized_vol_regime_metric"] = metric
+    annotated["realized_vol_regime_bucket_version"] = np.where(
+        annotated["realized_vol_regime_source"] == "spot",
+        SPOT_REALIZED_VOL_REGIME_VERSION,
+        np.where(
+            annotated["realized_vol_regime_source"] == "market_prob",
+            MARKET_PROB_REALIZED_VOL_REGIME_VERSION,
+            "unknown",
+        ),
+    )
+    annotated["realized_vol_regime_bucket"] = [
+        _assign_realized_vol_bucket(value, SPOT_REALIZED_VOL_REGIME_EDGES if src == "spot" else MARKET_PROB_REALIZED_VOL_REGIME_EDGES)
+        if src in {"spot", "market_prob"}
+        else REALIZED_VOL_REGIME_UNKNOWN
+        for value, src in zip(annotated["realized_vol_regime_metric"], annotated["realized_vol_regime_source"], strict=False)
+    ]
+    created_time_et = annotated["created_time"].dt.tz_convert(DIAGNOSTIC_TIMEZONE_INFO)
+    annotated["hour_of_day_et"] = created_time_et.dt.hour.astype(int)
+    annotated["hour_of_day_et_label"] = created_time_et.dt.strftime("%H")
+    annotated["session_block_et"] = created_time_et.apply(_session_block_for_timestamp)
+
+    total_rows = int(len(annotated))
+    source_counts = annotated["realized_vol_regime_source"].value_counts(dropna=False).to_dict()
+    source_summary = []
+    for source_name in ("spot", "market_prob", "unknown"):
+        count = int(source_counts.get(source_name, 0))
+        source_summary.append(
+            {
+                "realized_vol_regime_source": source_name,
+                "rows": count,
+                "row_pct": (count / total_rows * 100.0) if total_rows else 0.0,
+            }
+        )
+    metadata = {
+        "lookback_minutes": REALIZED_VOL_LOOKBACK_MINUTES,
+        "annualization_factor": REALIZED_VOL_ANNUALIZATION_FACTOR,
+        "row_source_summary": source_summary,
+        "bucket_versions": {
+            "spot": {
+                "version": SPOT_REALIZED_VOL_REGIME_VERSION,
+                "edges": list(SPOT_REALIZED_VOL_REGIME_EDGES),
+                "derived_from": SPOT_REALIZED_VOL_REGIME_DERIVED_FROM,
+            },
+            "market_prob": {
+                "version": MARKET_PROB_REALIZED_VOL_REGIME_VERSION,
+                "edges": list(MARKET_PROB_REALIZED_VOL_REGIME_EDGES),
+                "derived_from": MARKET_PROB_REALIZED_VOL_REGIME_DERIVED_FROM,
+            },
+        },
+        "revisit_note": REALIZED_VOL_REGIME_REVISIT_NOTE,
+        "timezone_metadata": _timezone_metadata(),
+    }
+    return annotated, metadata
 
 
 def _candidate_input_pairs(series_ticker: str) -> list[tuple[Path, Path]]:
@@ -174,6 +423,28 @@ class SplitManifest:
     train_tickers: tuple[str, ...]
     validation_tickers: tuple[str, ...]
     test_tickers: tuple[str, ...]
+    purge_embargo_enabled: bool = False
+    purge_embargo_gap_seconds: int = 0
+    feature_lookback_seconds: int = 0
+    target_horizon_seconds: int = 0
+    safety_margin_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class PreparedExternalSpotFrame:
+    frame: pd.DataFrame
+    available_time_ns: np.ndarray
+
+
+@dataclass(frozen=True)
+class FeatureCacheStatus:
+    ready: bool
+    manifest_exists: bool
+    manifest_schema_name: str | None
+    schema_matches: bool
+    requested_tickers: int
+    present_requested_tickers: int
+    missing_requested_tickers: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -184,6 +455,7 @@ class PolicyConfig:
     price_band_min_cents: int
     price_band_max_cents: int
     reserve_cash_pct: float
+    maintain_edge_cents: float | None = None
     apply_regime_hard_gate: bool = False
     starting_cash_dollars: float = DEFAULT_STARTING_CASH_DOLLARS
     contracts_per_order: int = 1
@@ -197,8 +469,14 @@ class PolicyConfig:
 
     @property
     def signal_config(self) -> KalshiSignalRiskConfig:
+        maintain_edge_cents = (
+            float(self.maintain_edge_cents)
+            if self.maintain_edge_cents is not None
+            else min(1.0, float(self.edge_threshold_cents))
+        )
         return KalshiSignalRiskConfig(
             edge_threshold_cents=self.edge_threshold_cents,
+            maintain_edge_cents=maintain_edge_cents,
             min_tau_minutes=self.min_tau_minutes,
             max_tau_minutes=self.max_tau_minutes,
             apply_regime_hard_gate=self.apply_regime_hard_gate,
@@ -234,6 +512,45 @@ class WalkForwardFold:
     train_tickers: tuple[str, ...]
     validation_tickers: tuple[str, ...]
     test_tickers: tuple[str, ...]
+
+
+def _max_feature_lookback_seconds(
+    *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+) -> int:
+    normalized_schema = normalize_feature_schema(feature_schema)
+    lookback_seconds = max(int(window) for window in KalshiFeatureEngineConfig().rolling_window_seconds)
+    if normalized_schema == SPOT_V1_FEATURE_SCHEMA:
+        lookback_seconds = max(lookback_seconds, 1800)
+    return lookback_seconds
+
+
+def _infer_target_horizon_seconds(markets_df: pd.DataFrame) -> int:
+    if "open_time" not in markets_df.columns or "close_time" not in markets_df.columns or markets_df.empty:
+        return DEFAULT_TARGET_HORIZON_SECONDS
+    open_times = pd.to_datetime(markets_df["open_time"], utc=True, errors="coerce")
+    close_times = pd.to_datetime(markets_df["close_time"], utc=True, errors="coerce")
+    durations = (close_times - open_times).dropna()
+    if durations.empty:
+        return DEFAULT_TARGET_HORIZON_SECONDS
+    max_seconds = int(max(duration.total_seconds() for duration in durations if duration.total_seconds() > 0.0))
+    return max_seconds if max_seconds > 0 else DEFAULT_TARGET_HORIZON_SECONDS
+
+
+def compute_purge_embargo_gap_seconds(
+    markets_df: pd.DataFrame,
+    *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
+) -> int:
+    feature_lookback_seconds = _max_feature_lookback_seconds(feature_schema=feature_schema)
+    target_horizon_seconds = _infer_target_horizon_seconds(markets_df)
+    return int(feature_lookback_seconds + target_horizon_seconds + max(0, int(safety_margin_seconds)))
+
+
+def _searchsorted_timestamp(close_times: pd.Series, cutoff: pd.Timestamp) -> int:
+    close_time_ns = pd.to_datetime(close_times, utc=True).astype("int64", copy=False).to_numpy(copy=False)
+    return int(np.searchsorted(close_time_ns, cutoff.value, side="left"))
 
 
 @dataclass(frozen=True)
@@ -372,6 +689,11 @@ def feature_schema_metadata(feature_schema: str | None = None) -> dict[str, obje
     metadata: dict[str, object] = {"schema_name": normalized}
     if normalized == LINEAR_V1_FEATURE_SCHEMA:
         metadata["derived_feature_formulas"] = dict(LINEAR_V1_DERIVED_FORMULAS)
+    feature_order = build_offline_feature_order(
+        hourly_context=(HourlyContextConfig() if normalized == LINEAR_V1_FEATURE_SCHEMA else None),
+        feature_schema=normalized,
+    )
+    metadata["feature_order_hash"] = feature_order_hash(feature_order)
     return metadata
 
 
@@ -388,6 +710,8 @@ def build_offline_feature_order(
         if hourly_context is None:
             raise ValueError("The linear_v1 feature schema requires hourly context features.")
         return LINEAR_V1_FEATURE_ORDER
+    if normalized_schema == SPOT_V1_FEATURE_SCHEMA:
+        return tuple([*raw_feature_order, *SPOT_V1_FEATURE_ORDER])
     raise ValueError(f"Unsupported feature schema '{feature_schema}'.")
 
 
@@ -432,6 +756,52 @@ def _load_feature_manifest_payload(cache_dir: Path) -> dict[str, object] | None:
     return payload
 
 
+def inspect_feature_cache(
+    cache_dir: Path,
+    tickers: Sequence[str],
+    *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+) -> FeatureCacheStatus:
+    normalized_schema = normalize_feature_schema(feature_schema)
+    if not cache_dir.exists():
+        return FeatureCacheStatus(
+            ready=False,
+            manifest_exists=False,
+            manifest_schema_name=None,
+            schema_matches=False,
+            requested_tickers=len(tuple(tickers)),
+            present_requested_tickers=0,
+            missing_requested_tickers=tuple(str(ticker) for ticker in tickers),
+        )
+    manifest_payload = _load_feature_manifest_payload(cache_dir)
+    manifest_exists = manifest_payload is not None
+    manifest_schema_name: str | None = None
+    schema_matches = False
+    if manifest_payload is not None:
+        raw_schema_name = manifest_payload.get("schema_name", DEFAULT_FEATURE_SCHEMA)
+        try:
+            manifest_schema_name = normalize_feature_schema(str(raw_schema_name))
+        except ValueError:
+            manifest_schema_name = str(raw_schema_name)
+        schema_matches = manifest_schema_name == normalized_schema
+    missing_requested_tickers = tuple(
+        str(ticker)
+        for ticker in tickers
+        if not (cache_dir / f"{ticker}.parquet").exists()
+    )
+    requested_tickers = len(tuple(tickers))
+    present_requested_tickers = requested_tickers - len(missing_requested_tickers)
+    return FeatureCacheStatus(
+        ready=manifest_exists and schema_matches and not missing_requested_tickers,
+        manifest_exists=manifest_exists,
+        manifest_schema_name=manifest_schema_name,
+        schema_matches=schema_matches,
+        requested_tickers=requested_tickers,
+        present_requested_tickers=present_requested_tickers,
+        missing_requested_tickers=missing_requested_tickers,
+    )
+
+
 def project_feature_frame(
     df: pd.DataFrame,
     *,
@@ -439,6 +809,11 @@ def project_feature_frame(
 ) -> pd.DataFrame:
     normalized_schema = normalize_feature_schema(feature_schema)
     if normalized_schema == DEFAULT_FEATURE_SCHEMA:
+        projected = df.copy()
+        projected.attrs["feature_schema"] = normalized_schema
+        return projected
+
+    if normalized_schema == SPOT_V1_FEATURE_SCHEMA:
         projected = df.copy()
         projected.attrs["feature_schema"] = normalized_schema
         return projected
@@ -502,23 +877,73 @@ def build_split_manifest(
     series_ticker: str = DEFAULT_SERIES,
     train_fraction: float = 0.65,
     validation_fraction: float = 0.15,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
 ) -> SplitManifest:
     if markets_df.empty:
         raise ValueError("No resolved markets found to split.")
-    ordered_tickers = tuple(markets_df["ticker"].astype(str))
+    ordered_markets = markets_df.sort_values(["close_time", "ticker"]).reset_index(drop=True)
+    ordered_tickers = tuple(ordered_markets["ticker"].astype(str))
     total = len(ordered_tickers)
     train_end = max(1, int(total * train_fraction))
     validation_end = max(train_end + 1, int(total * (train_fraction + validation_fraction)))
     validation_end = min(validation_end, total - 1)
+    feature_lookback_seconds = _max_feature_lookback_seconds(feature_schema=feature_schema)
+    target_horizon_seconds = _infer_target_horizon_seconds(ordered_markets)
+    resolved_gap_seconds = (
+        int(purge_embargo_gap_seconds)
+        if purge_embargo_gap_seconds is not None
+        else compute_purge_embargo_gap_seconds(
+            ordered_markets,
+            feature_schema=feature_schema,
+            safety_margin_seconds=purge_embargo_safety_margin_seconds,
+        )
+    )
+    if not purge_embargo:
+        resolved_gap_seconds = 0
+    if purge_embargo:
+        if "close_time" not in ordered_markets.columns:
+            raise ValueError("Purged/embargoed splits require close_time in the markets frame.")
+        close_times = pd.to_datetime(ordered_markets["close_time"], utc=True)
+        gap = pd.Timedelta(seconds=resolved_gap_seconds)
+        train_end_time = pd.Timestamp(close_times.iloc[train_end - 1])
+        validation_start_index = _searchsorted_timestamp(close_times, train_end_time + gap)
+        if validation_start_index >= total - 1:
+            raise ValueError("Purged/embargoed split leaves no room for validation and test tickers.")
+        desired_validation_end = min(total, validation_start_index + max(1, int(total * validation_fraction)))
+        validation_end_index = desired_validation_end
+        test_start_index = total
+        while validation_end_index > validation_start_index:
+            validation_end_time = pd.Timestamp(close_times.iloc[validation_end_index - 1])
+            test_start_index = _searchsorted_timestamp(close_times, validation_end_time + gap)
+            if test_start_index < total:
+                break
+            validation_end_index -= 1
+        if validation_end_index <= validation_start_index or test_start_index >= total:
+            raise ValueError("Purged/embargoed split leaves no room for the test segment.")
+        train_tickers = ordered_tickers[:train_end]
+        validation_tickers = ordered_tickers[validation_start_index:validation_end_index]
+        test_tickers = ordered_tickers[test_start_index:]
+    else:
+        train_tickers = ordered_tickers[:train_end]
+        validation_tickers = ordered_tickers[train_end:validation_end]
+        test_tickers = ordered_tickers[validation_end:]
     return SplitManifest(
         series=series_ticker,
         generated_at=datetime.now(UTC).isoformat(),
         train_fraction=train_fraction,
         validation_fraction=validation_fraction,
         test_fraction=1.0 - train_fraction - validation_fraction,
-        train_tickers=ordered_tickers[:train_end],
-        validation_tickers=ordered_tickers[train_end:validation_end],
-        test_tickers=ordered_tickers[validation_end:],
+        train_tickers=train_tickers,
+        validation_tickers=validation_tickers,
+        test_tickers=test_tickers,
+        purge_embargo_enabled=bool(purge_embargo),
+        purge_embargo_gap_seconds=int(resolved_gap_seconds),
+        feature_lookback_seconds=int(feature_lookback_seconds),
+        target_horizon_seconds=int(target_horizon_seconds),
+        safety_margin_seconds=int(purge_embargo_safety_margin_seconds) if purge_embargo else 0,
     )
 
 
@@ -604,6 +1029,236 @@ def build_market_feature_frame(
         payload.update(dict(zip(FEATURE_ORDER, state.feature_values())))
         rows.append(payload)
     return pd.DataFrame(rows, columns=_market_feature_frame_columns())
+
+
+def load_external_spot_frame(external_spot_root: Path) -> pd.DataFrame:
+    root = Path(external_spot_root)
+    if not root.exists():
+        raise FileNotFoundError(f"External spot root does not exist: {root}")
+    if root.is_file():
+        frames = [pd.read_parquet(root)]
+    else:
+        parquet_paths = sorted(root.rglob("*.parquet"))
+        if not parquet_paths:
+            raise FileNotFoundError(f"No parquet files found under external spot root: {root}")
+        frames = [pd.read_parquet(path) for path in parquet_paths]
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    if df.empty:
+        return df
+    if "event_time" not in df.columns:
+        raise ValueError("External spot frame must include an event_time column.")
+    df = df.copy()
+    df["event_time"] = pd.to_datetime(df["event_time"], utc=True)
+    if "received_at" in df.columns:
+        df["received_at"] = pd.to_datetime(df["received_at"], utc=True)
+        return df.sort_values(["received_at", "event_time"]).reset_index(drop=True)
+    return df.sort_values("event_time").reset_index(drop=True)
+
+
+def load_or_require_external_spot_frame(
+    feature_schema: str | None,
+    external_spot_root: str | Path | None,
+) -> pd.DataFrame | None:
+    normalized_schema = normalize_feature_schema(feature_schema)
+    if normalized_schema != SPOT_V1_FEATURE_SCHEMA:
+        return None
+    if external_spot_root is None:
+        raise ValueError("The spot_v1 feature schema requires --external-spot-root.")
+    return load_external_spot_frame(Path(external_spot_root).expanduser())
+
+
+def _prepare_external_spot_frame_for_cache_build(
+    external_spot_df: pd.DataFrame,
+    markets_df: pd.DataFrame,
+    *,
+    external_spot_latency_ms: int = 0,
+) -> PreparedExternalSpotFrame:
+    if external_spot_df.empty:
+        empty = external_spot_df.copy()
+        empty["available_time"] = pd.Series(dtype="datetime64[ns, UTC]")
+        return PreparedExternalSpotFrame(frame=empty, available_time_ns=np.array([], dtype=np.int64))
+    spot_rows = external_spot_df.copy()
+    spot_rows["event_time"] = pd.to_datetime(spot_rows["event_time"], utc=True)
+    if "received_at" in spot_rows.columns:
+        spot_rows["received_at"] = pd.to_datetime(spot_rows["received_at"], utc=True)
+        availability_base = spot_rows["received_at"]
+    else:
+        availability_base = spot_rows["event_time"]
+    spot_rows["available_time"] = availability_base + pd.to_timedelta(int(external_spot_latency_ms), unit="ms")
+    spot_rows = spot_rows.sort_values(["available_time", "event_time"]).reset_index(drop=True)
+    if not markets_df.empty and "close_time" in markets_df.columns:
+        market_end = pd.to_datetime(markets_df["close_time"], utc=True).max()
+        market_start_candidates: list[pd.Timestamp] = [market_end]
+        if "open_time" in markets_df.columns:
+            open_times = pd.to_datetime(markets_df["open_time"], utc=True)
+            if not open_times.empty:
+                market_start_candidates.append(open_times.min())
+        available_time_ns = spot_rows["available_time"].astype("int64", copy=False).to_numpy()
+        market_start_ns = min(timestamp.value for timestamp in market_start_candidates)
+        market_end_ns = market_end.value
+        start_idx = max(int(np.searchsorted(available_time_ns, market_start_ns, side="right")) - 1, 0)
+        end_idx = int(np.searchsorted(available_time_ns, market_end_ns, side="right"))
+        if end_idx <= start_idx:
+            end_idx = min(len(spot_rows), start_idx + 1)
+        spot_rows = spot_rows.iloc[start_idx:end_idx].reset_index(drop=True)
+    return PreparedExternalSpotFrame(
+        frame=spot_rows,
+        available_time_ns=spot_rows["available_time"].astype("int64", copy=False).to_numpy(),
+    )
+
+
+def _slice_prepared_external_spot_frame_for_market_window(
+    prepared_spot: PreparedExternalSpotFrame,
+    *,
+    market_row: pd.Series,
+    target_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if target_df.empty or prepared_spot.frame.empty:
+        return prepared_spot.frame.iloc[0:0].copy()
+    market_start_candidates = [pd.Timestamp(target_df["created_time"].min())]
+    open_time = market_row.get("open_time")
+    if open_time is not None and not pd.isna(open_time):
+        market_start_candidates.append(pd.Timestamp(open_time))
+    market_start_ns = min(timestamp.value for timestamp in market_start_candidates)
+    market_end_ns = pd.Timestamp(target_df["created_time"].max()).value
+    available_time_ns = prepared_spot.available_time_ns
+    start_idx = max(int(np.searchsorted(available_time_ns, market_start_ns, side="right")) - 1, 0)
+    end_idx = int(np.searchsorted(available_time_ns, market_end_ns, side="right"))
+    if end_idx <= start_idx:
+        end_idx = min(len(prepared_spot.frame), start_idx + 1)
+    return prepared_spot.frame.iloc[start_idx:end_idx].reset_index(drop=True)
+
+
+def enrich_market_feature_frame_with_external_spot(
+    target_df: pd.DataFrame,
+    *,
+    market_row: pd.Series,
+    external_spot_df: pd.DataFrame,
+    external_spot_latency_ms: int = 0,
+) -> pd.DataFrame:
+    feature_order = build_offline_feature_order(feature_schema=SPOT_V1_FEATURE_SCHEMA)
+    if target_df.empty:
+        return pd.DataFrame(columns=_market_feature_frame_columns(feature_order))
+    if external_spot_df.empty:
+        raise ValueError("External spot frame is empty; cannot build spot_v1 features.")
+    required_columns = {
+        "event_time",
+        "btc_spot_price",
+        "btc_spot_twap_60s",
+        "btc_spot_age_ms",
+        "btc_spot_is_fresh",
+        "btc_spot_venues_fresh",
+        "btc_spot_venue_divergence_bps",
+        "btc_vol_effective_sample_size",
+        "btc_spot_source",
+        "btc_spot_return_30s",
+        "btc_spot_return_120s",
+        "btc_spot_return_300s",
+        "btc_spot_return_900s",
+        "btc_spot_vol_120s",
+        "btc_spot_vol_300s",
+        "btc_spot_vol_900s",
+        "btc_spot_vol_1800s",
+        "btc_spot_vol_ewma_hl300",
+    }
+    missing = sorted(required_columns.difference(external_spot_df.columns))
+    if missing:
+        raise ValueError(f"External spot frame is missing required columns: {', '.join(missing)}")
+    strike_price = strike_price_from_market(market_row.to_dict())
+    if strike_price is None:
+        strike_price = _fallback_spot_open_strike_price(market_row, external_spot_df)
+    if strike_price is None:
+        raise ValueError(f"Could not determine strike price for {market_row.get('ticker')}.")
+    if "available_time" in external_spot_df.columns and int(external_spot_latency_ms) == 0:
+        spot_rows = external_spot_df
+    else:
+        spot_rows = external_spot_df.copy()
+        latency = pd.to_timedelta(int(external_spot_latency_ms), unit="ms")
+        if "received_at" in spot_rows.columns:
+            spot_rows["available_time"] = pd.to_datetime(spot_rows["received_at"], utc=True) + latency
+        else:
+            spot_rows["available_time"] = pd.to_datetime(spot_rows["event_time"], utc=True) + latency
+    tracker = SpotFeatureTracker()
+    spot_pointer = -1
+    selected_row: pd.Series | None = None
+    records: list[dict[str, object]] = []
+    for target_row in target_df.itertuples(index=False):
+        payload = target_row._asdict()
+        target_time = pd.Timestamp(payload["created_time"])
+        while spot_pointer + 1 < len(spot_rows) and pd.Timestamp(spot_rows.iloc[spot_pointer + 1]["available_time"]) <= target_time:
+            spot_pointer += 1
+            selected_row = spot_rows.iloc[spot_pointer]
+        if selected_row is None:
+            raise ValueError(f"No external spot snapshot available before {target_time} for {payload['ticker']}.")
+        spot_update = BTCSpotUpdate(
+            event_time=pd.Timestamp(selected_row["event_time"]).to_pydatetime(warn=False),
+            received_at=(
+                pd.Timestamp(selected_row["received_at"]).to_pydatetime(warn=False)
+                if "received_at" in selected_row.index
+                else pd.Timestamp(selected_row["event_time"]).to_pydatetime(warn=False)
+            ),
+            btc_spot_price=float(selected_row["btc_spot_price"]),
+            btc_spot_twap_60s=float(selected_row["btc_spot_twap_60s"]),
+            btc_spot_age_ms=float(selected_row["btc_spot_age_ms"]),
+            btc_spot_is_fresh=bool(selected_row["btc_spot_is_fresh"]),
+            btc_spot_venues_fresh=int(selected_row["btc_spot_venues_fresh"]),
+            btc_spot_venue_divergence_bps=float(selected_row["btc_spot_venue_divergence_bps"]),
+            btc_vol_effective_sample_size=float(selected_row["btc_vol_effective_sample_size"]),
+            btc_spot_source=str(selected_row["btc_spot_source"]),
+            btc_spot_return_30s=float(selected_row["btc_spot_return_30s"]),
+            btc_spot_return_120s=float(selected_row["btc_spot_return_120s"]),
+            btc_spot_return_300s=float(selected_row["btc_spot_return_300s"]),
+            btc_spot_return_900s=float(selected_row["btc_spot_return_900s"]),
+            btc_spot_vol_120s=float(selected_row["btc_spot_vol_120s"]),
+            btc_spot_vol_300s=float(selected_row["btc_spot_vol_300s"]),
+            btc_spot_vol_900s=float(selected_row["btc_spot_vol_900s"]),
+            btc_spot_vol_1800s=float(selected_row["btc_spot_vol_1800s"]),
+            btc_spot_vol_ewma_hl300=float(selected_row["btc_spot_vol_ewma_hl300"]),
+        )
+        payload.update(
+            tracker.enrich(
+                event_time=target_time.to_pydatetime(),
+                quote_mid_prob=float(payload.get("market_prob")) if payload.get("market_prob") is not None else None,
+                tau_minutes=float(payload.get("tau_minutes")) if payload.get("tau_minutes") is not None else None,
+                strike_price=strike_price,
+                spot_update=spot_update,
+            )
+        )
+        records.append(payload)
+    enriched = pd.DataFrame(records)
+    return enriched.loc[:, _market_feature_frame_columns(feature_order)]
+
+
+def _fallback_spot_open_strike_price(
+    market_row: pd.Series,
+    external_spot_df: pd.DataFrame,
+) -> float | None:
+    title = str(market_row.get("title") or "").strip().lower()
+    if title != _GENERIC_BTC_DIRECTION_TITLE:
+        return None
+    open_time_value = market_row.get("open_time")
+    if open_time_value is None or pd.isna(open_time_value):
+        return None
+    open_time = pd.Timestamp(open_time_value)
+    if open_time.tzinfo is None:
+        open_time = open_time.tz_localize("UTC")
+    else:
+        open_time = open_time.tz_convert("UTC")
+    event_times = pd.to_datetime(external_spot_df["event_time"], utc=True)
+    prior_or_open = external_spot_df.loc[event_times <= open_time]
+    if prior_or_open.empty:
+        candidate_frame = external_spot_df.loc[event_times >= open_time]
+        if candidate_frame.empty:
+            return None
+        candidate_row = candidate_frame.iloc[0]
+    else:
+        candidate_row = prior_or_open.iloc[-1]
+    strike_price = float(candidate_row["btc_spot_price"])
+    LOGGER.warning(
+        "Falling back to external spot at market open for %s because strike metadata was unavailable.",
+        market_row.get("ticker"),
+    )
+    return strike_price
 
 
 def _context_cache_dir(cache_dir: Path, series_ticker: str) -> Path:
@@ -794,38 +1449,76 @@ def build_feature_cache(
     hourly_context: HourlyContextConfig | None = None,
     context_markets_df: pd.DataFrame | None = None,
     context_trades_path: Path | None = None,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    external_spot_df: pd.DataFrame | None = None,
+    external_spot_latency_ms: int = 0,
+    progress_desc: str | None = None,
 ) -> None:
+    normalized_schema = normalize_feature_schema(feature_schema)
     cache_dir.mkdir(parents=True, exist_ok=True)
     context_cache_dir: Path | None = None
     context_frame_cache: dict[str, pd.DataFrame] = {}
+    prepared_external_spot: PreparedExternalSpotFrame | None = None
     if hourly_context is not None:
         if context_markets_df is None or context_trades_path is None:
             raise ValueError("Hourly context build requires both context_markets_df and context_trades_path.")
         context_cache_dir = _context_cache_dir(cache_dir, hourly_context.series_ticker)
         _build_context_feature_cache(context_markets_df, context_trades_path, context_cache_dir, hourly_context)
-    for market_row in markets_df.itertuples(index=False):
-        path = cache_dir / f"{market_row.ticker}.parquet"
-        if path.exists():
-            continue
-        feature_df = build_market_feature_frame(
-            load_trades_for_ticker(trades_path, market_row.ticker),
-            pd.Series(market_row._asdict()),
+    if normalized_schema == SPOT_V1_FEATURE_SCHEMA:
+        if external_spot_df is None:
+            raise ValueError("spot_v1 cache builds require external_spot_df.")
+        prepared_external_spot = _prepare_external_spot_frame_for_cache_build(
+            external_spot_df,
+            markets_df,
+            external_spot_latency_ms=int(external_spot_latency_ms),
         )
-        if hourly_context is not None and context_markets_df is not None and context_cache_dir is not None:
-            feature_df = enrich_market_feature_frame_with_hourly_context(
-                feature_df,
-                context_markets_df=context_markets_df,
-                context_cache_dir=context_cache_dir,
-                hourly_context=hourly_context,
-                frame_cache=context_frame_cache,
+    progress = tqdm(total=len(markets_df), desc=progress_desc, unit="ticker", leave=False) if progress_desc else None
+    try:
+        for market_row in markets_df.itertuples(index=False):
+            path = cache_dir / f"{market_row.ticker}.parquet"
+            if path.exists():
+                if progress is not None:
+                    progress.update(1)
+                continue
+            market_series = pd.Series(market_row._asdict())
+            feature_df = build_market_feature_frame(
+                load_trades_for_ticker(trades_path, market_row.ticker),
+                market_series,
             )
-        feature_df.to_parquet(path, index=False)
+            if hourly_context is not None and context_markets_df is not None and context_cache_dir is not None:
+                feature_df = enrich_market_feature_frame_with_hourly_context(
+                    feature_df,
+                    context_markets_df=context_markets_df,
+                    context_cache_dir=context_cache_dir,
+                    hourly_context=hourly_context,
+                    frame_cache=context_frame_cache,
+                )
+            if normalized_schema == SPOT_V1_FEATURE_SCHEMA:
+                assert prepared_external_spot is not None
+                market_spot_df = _slice_prepared_external_spot_frame_for_market_window(
+                    prepared_external_spot,
+                    market_row=market_series,
+                    target_df=feature_df,
+                )
+                feature_df = enrich_market_feature_frame_with_external_spot(
+                    feature_df,
+                    market_row=market_series,
+                    external_spot_df=market_spot_df,
+                    external_spot_latency_ms=0,
+                )
+            feature_df.to_parquet(path, index=False)
+            if progress is not None:
+                progress.update(1)
+    finally:
+        if progress is not None:
+            progress.close()
     save_feature_manifest(
         cache_dir / "feature_manifest.json",
-        feature_order=build_offline_feature_order(hourly_context=hourly_context),
+        feature_order=build_offline_feature_order(hourly_context=hourly_context, feature_schema=normalized_schema),
         metadata={
-            **feature_schema_metadata(DEFAULT_FEATURE_SCHEMA),
+            **feature_schema_metadata(normalized_schema),
             "hourly_context_series": hourly_context.series_ticker if hourly_context is not None else None,
+            "external_spot_latency_ms": int(external_spot_latency_ms),
         },
     )
 
@@ -2078,6 +2771,13 @@ def _trade_record_columns() -> list[str]:
         "market_prob",
         "predicted_yes_probability",
         "tau_minutes",
+        "realized_vol_regime_source",
+        "realized_vol_regime_bucket",
+        "realized_vol_regime_bucket_version",
+        "realized_vol_regime_metric",
+        "hour_of_day_et",
+        "hour_of_day_et_label",
+        "session_block_et",
         "regime_label",
         "bearish_vote_count",
         "bullish_vote_count",
@@ -2115,6 +2815,13 @@ def prediction_export_columns() -> list[str]:
         "actual_outcome",
         "raw_probability",
         "calibrated_probability",
+        "realized_vol_regime_source",
+        "realized_vol_regime_bucket",
+        "realized_vol_regime_bucket_version",
+        "realized_vol_regime_metric",
+        "hour_of_day_et",
+        "hour_of_day_et_label",
+        "session_block_et",
     ]
 
 
@@ -2123,8 +2830,24 @@ def build_prediction_export_frame(
     raw_probabilities: np.ndarray,
     calibrated_probabilities: np.ndarray,
 ) -> pd.DataFrame:
-    columns = ["ticker", "trade_id", "created_time", "close_time", "market_prob", "tau_minutes", "actual_outcome"]
-    predictions = split_df[columns].copy()
+    annotated, _metadata = _annotate_diagnostic_context(split_df)
+    columns = [
+        "ticker",
+        "trade_id",
+        "created_time",
+        "close_time",
+        "market_prob",
+        "tau_minutes",
+        "actual_outcome",
+        "realized_vol_regime_source",
+        "realized_vol_regime_bucket",
+        "realized_vol_regime_bucket_version",
+        "realized_vol_regime_metric",
+        "hour_of_day_et",
+        "hour_of_day_et_label",
+        "session_block_et",
+    ]
+    predictions = annotated[columns].copy()
     predictions["raw_probability"] = np.asarray(raw_probabilities, dtype=np.float64)
     predictions["calibrated_probability"] = np.asarray(calibrated_probabilities, dtype=np.float64)
     return predictions.loc[:, prediction_export_columns()]
@@ -2409,6 +3132,27 @@ def _simulate_policy_with_trade_records(
                     "market_prob": float(row.market_prob),
                     "predicted_yes_probability": float(row.predicted_yes_probability),
                     "tau_minutes": float(row.tau_minutes),
+                    "realized_vol_regime_source": getattr(row, "realized_vol_regime_source", "unknown"),
+                    "realized_vol_regime_bucket": getattr(
+                        row,
+                        "realized_vol_regime_bucket",
+                        REALIZED_VOL_REGIME_UNKNOWN,
+                    ),
+                    "realized_vol_regime_bucket_version": getattr(
+                        row,
+                        "realized_vol_regime_bucket_version",
+                        "unknown",
+                    ),
+                    "realized_vol_regime_metric": (
+                        float(row.realized_vol_regime_metric)
+                        if pd.notna(getattr(row, "realized_vol_regime_metric", np.nan))
+                        else None
+                    ),
+                    "hour_of_day_et": (
+                        int(row.hour_of_day_et) if pd.notna(getattr(row, "hour_of_day_et", np.nan)) else None
+                    ),
+                    "hour_of_day_et_label": getattr(row, "hour_of_day_et_label", "unknown"),
+                    "session_block_et": getattr(row, "session_block_et", "unknown"),
                     "regime_label": regime_payload["regime_label"],
                     "bearish_vote_count": regime_payload["bearish_vote_count"],
                     "bullish_vote_count": regime_payload["bullish_vote_count"],
@@ -2669,11 +3413,13 @@ def _summarize_trade_groups(
     if trade_records.empty:
         return []
     summaries: list[dict[str, object]] = []
+    total_trades = int(len(trade_records))
     grouped = trade_records.groupby(group_column, dropna=False, sort=False, observed=False)
     for group_value, group in grouped:
         payload: dict[str, object] = {
             group_column: "unknown" if pd.isna(group_value) else group_value,
             "trades": int(len(group)),
+            "trade_pct": (float(len(group)) / total_trades * 100.0) if total_trades else 0.0,
             "contracts": int(group["contracts"].sum()),
             "wins": int(group["is_win"].sum()),
             "win_rate": float(group["is_win"].mean()),
@@ -2708,6 +3454,7 @@ def _summarize_regime_row_counts(df: pd.DataFrame) -> list[dict[str, object]]:
     if df.empty:
         return []
     summaries: list[dict[str, object]] = []
+    total_rows = int(len(df))
     grouped = df.groupby("regime_label", dropna=False, sort=False, observed=False)
     for regime_label, group in grouped:
         side_counts = group["offline_rule_side"].value_counts(dropna=False)
@@ -2715,6 +3462,7 @@ def _summarize_regime_row_counts(df: pd.DataFrame) -> list[dict[str, object]]:
             {
                 "regime_label": "unknown" if pd.isna(regime_label) else regime_label,
                 "rows": int(len(group)),
+                "row_pct": (float(len(group)) / total_rows * 100.0) if total_rows else 0.0,
                 "offline_rule_yes_rows": int(side_counts.get("YES", 0)),
                 "offline_rule_no_rows": int(side_counts.get("NO", 0)),
             }
@@ -2769,6 +3517,7 @@ def _calibration_bucket_summary(
         include_lowest=True,
         right=True,
     )
+    total_rows = int(len(summary_df))
     rows: list[dict[str, object]] = []
     for bucket_label, group in summary_df.groupby("bucket", observed=False, sort=False):
         if group.empty:
@@ -2779,6 +3528,7 @@ def _calibration_bucket_summary(
             {
                 "bucket": bucket_label,
                 "count": int(len(group)),
+                "count_pct": (float(len(group)) / total_rows * 100.0) if total_rows else 0.0,
                 "mean_predicted_yes_probability": mean_probability,
                 "empirical_yes_rate": empirical_yes_rate,
                 "mean_market_probability": float(group["market_prob"].mean()),
@@ -2787,6 +3537,77 @@ def _calibration_bucket_summary(
             }
         )
     return rows
+
+
+def _log_loss_for_group(actual_outcome: pd.Series, probabilities: pd.Series) -> float | None:
+    if actual_outcome.empty:
+        return None
+    return float(log_loss(actual_outcome, probabilities, labels=[0, 1]))
+
+
+def _summarize_row_trade_breakdown(
+    row_frame: pd.DataFrame,
+    trade_records: pd.DataFrame,
+    group_columns: Sequence[str],
+    *,
+    ordered_keys: Sequence[tuple[object, ...]] | None = None,
+) -> list[dict[str, object]]:
+    if row_frame.empty and trade_records.empty:
+        return []
+    row_total = int(len(row_frame))
+    trade_total = int(len(trade_records))
+    row_groups = {
+        tuple(key if isinstance(key, tuple) else (key,)): group
+        for key, group in row_frame.groupby(list(group_columns), dropna=False, sort=False, observed=False)
+    }
+    trade_groups = {
+        tuple(key if isinstance(key, tuple) else (key,)): group
+        for key, group in trade_records.groupby(list(group_columns), dropna=False, sort=False, observed=False)
+    }
+    keys = list(ordered_keys) if ordered_keys is not None else list(dict.fromkeys([*row_groups.keys(), *trade_groups.keys()]))
+    summaries: list[dict[str, object]] = []
+    for key in keys:
+        row_group = row_groups.get(tuple(key), pd.DataFrame())
+        trade_group = trade_groups.get(tuple(key), pd.DataFrame())
+        payload: dict[str, object] = {}
+        for column, value in zip(group_columns, tuple(key), strict=False):
+            payload[column] = "unknown" if pd.isna(value) else value
+        row_count = int(len(row_group))
+        trade_count = int(len(trade_group))
+        payload["rows"] = row_count
+        payload["row_pct"] = (row_count / row_total * 100.0) if row_total else 0.0
+        payload["trades"] = trade_count
+        payload["trade_pct"] = (trade_count / trade_total * 100.0) if trade_total else 0.0
+        payload["calibrated_log_loss"] = (
+            _log_loss_for_group(row_group["actual_outcome"], row_group["calibrated_probability"])
+            if row_count
+            else None
+        )
+        payload["raw_log_loss"] = (
+            _log_loss_for_group(row_group["actual_outcome"], row_group["raw_probability"])
+            if row_count
+            else None
+        )
+        payload["empirical_yes_rate"] = float(row_group["actual_outcome"].mean()) if row_count else None
+        payload["mean_market_probability"] = float(row_group["market_prob"].mean()) if row_count else None
+        payload["mean_raw_probability"] = float(row_group["raw_probability"].mean()) if row_count else None
+        payload["mean_calibrated_probability"] = (
+            float(row_group["calibrated_probability"].mean()) if row_count else None
+        )
+        payload["avg_reference_price_cents"] = (
+            float(trade_group["reference_price_cents"].mean()) if trade_count else None
+        )
+        payload["contracts"] = int(trade_group["contracts"].sum()) if trade_count else 0
+        payload["wins"] = int(trade_group["is_win"].sum()) if trade_count else 0
+        payload["win_rate"] = float(trade_group["is_win"].mean()) if trade_count else None
+        payload["net_pnl_dollars"] = float(trade_group["net_pnl_dollars"].sum()) if trade_count else 0.0
+        payload["gross_pnl_dollars"] = float(trade_group["gross_pnl_dollars"].sum()) if trade_count else 0.0
+        payload["fees_dollars"] = float(trade_group["fees_dollars"].sum()) if trade_count else 0.0
+        payload["avg_net_pnl_dollars"] = float(trade_group["net_pnl_dollars"].mean()) if trade_count else None
+        payload["avg_post_cost_edge"] = float(trade_group["post_cost_edge"].mean()) if trade_count else None
+        payload["avg_tau_minutes"] = float(trade_group["tau_minutes"].mean()) if trade_count else None
+        summaries.append(payload)
+    return summaries
 
 
 def build_policy_diagnostics(
@@ -2799,7 +3620,10 @@ def build_policy_diagnostics(
     progress_desc: str | None = None,
     time_blocks: int = 10,
 ) -> tuple[dict[str, object], pd.DataFrame]:
-    regime_inputs = df.copy()
+    diagnostics_inputs, realized_vol_metadata = _annotate_diagnostic_context(df)
+    diagnostics_inputs["raw_probability"] = np.asarray(raw_probabilities, dtype=np.float64)
+    diagnostics_inputs["calibrated_probability"] = np.asarray(calibrated_probabilities, dtype=np.float64)
+    regime_inputs = diagnostics_inputs.copy()
     regime_payloads = regime_inputs.apply(_regime_payload_for_row, axis=1, result_type="expand")
     regime_inputs = pd.concat([regime_inputs.reset_index(drop=True), regime_payloads.reset_index(drop=True)], axis=1)
     regime_inputs["offline_rule_side"] = np.where(
@@ -2808,7 +3632,7 @@ def build_policy_diagnostics(
         "NO",
     )
     result, trade_records = _simulate_policy_with_trade_records(
-        df,
+        regime_inputs,
         calibrated_probabilities,
         config,
         overall_log_loss=overall_log_loss,
@@ -2845,6 +3669,11 @@ def build_policy_diagnostics(
                 labels=labels_for_blocks,
                 duplicates="drop",
             )
+    vol_order = [
+        (source, bucket) for source in ("spot", "market_prob") for bucket in REALIZED_VOL_REGIME_LABELS
+    ] + [("unknown", REALIZED_VOL_REGIME_UNKNOWN)]
+    hour_order = [(hour, f"{hour:02d}") for hour in range(24)]
+    session_order = [(label,) for label in SESSION_BLOCK_LABELS]
 
     counterfactual_policy = None
     if not config.apply_regime_hard_gate:
@@ -2883,6 +3712,25 @@ def build_policy_diagnostics(
         "regime_breakdown": _summarize_trade_groups(trade_records, "regime_label"),
         "regime_side_breakdown": _summarize_regime_side_breakdown(trade_records),
         "regime_row_counts": _summarize_regime_row_counts(regime_inputs),
+        "realized_vol_regime_metadata": realized_vol_metadata,
+        "realized_vol_regime_breakdown": _summarize_row_trade_breakdown(
+            regime_inputs,
+            trade_records,
+            ["realized_vol_regime_source", "realized_vol_regime_bucket"],
+            ordered_keys=vol_order,
+        ),
+        "hour_of_day_breakdown": _summarize_row_trade_breakdown(
+            regime_inputs,
+            trade_records,
+            ["hour_of_day_et", "hour_of_day_et_label"],
+            ordered_keys=hour_order,
+        ),
+        "session_block_breakdown": _summarize_row_trade_breakdown(
+            regime_inputs,
+            trade_records,
+            ["session_block_et"],
+            ordered_keys=session_order,
+        ),
         "tau_bucket_breakdown": _summarize_trade_groups(trade_records, "tau_bucket"),
         "price_bucket_breakdown": _summarize_trade_groups(trade_records, "price_bucket"),
         "time_block_breakdown": _summarize_trade_groups(trade_records, "time_block", include_time_range=True),
@@ -2899,14 +3747,73 @@ def build_policy_diagnostics(
     return diagnostics, trade_records
 
 
-def build_walk_forward_folds(markets_df: pd.DataFrame, num_blocks: int = 6) -> list[WalkForwardFold]:
-    tickers = list(markets_df["ticker"].astype(str))
-    blocks = np.array_split(tickers, num_blocks)
+def format_realized_vol_regime_source_summary(split_name: str, diagnostics: dict[str, object]) -> str:
+    metadata = diagnostics.get("realized_vol_regime_metadata", {})
+    source_rows = metadata.get("row_source_summary", [])
+    if not source_rows:
+        return f"{split_name} realized vol regimes: unavailable"
+    parts = [
+        f"{row['realized_vol_regime_source']} {int(row['rows'])} rows ({float(row['row_pct']):.1f}%)"
+        for row in source_rows
+    ]
+    return f"{split_name} realized vol regimes: " + " / ".join(parts)
+
+
+def build_walk_forward_folds(
+    markets_df: pd.DataFrame,
+    num_blocks: int = 6,
+    *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
+) -> list[WalkForwardFold]:
+    ordered_markets = markets_df.copy()
+    if "close_time" in ordered_markets.columns:
+        ordered_markets["close_time"] = pd.to_datetime(ordered_markets["close_time"], utc=True)
+        ordered_markets = ordered_markets.sort_values(["close_time", "ticker"]).reset_index(drop=True)
+    else:
+        ordered_markets = ordered_markets.reset_index(drop=True)
+    tickers = list(ordered_markets["ticker"].astype(str))
+    blocks = np.array_split(np.arange(len(tickers)), num_blocks)
     folds: list[WalkForwardFold] = []
-    for fold_index in range(4):
-        train_tickers = tuple(ticker for block in blocks[: fold_index + 1] for ticker in block.tolist())
-        validation_tickers = tuple(blocks[fold_index + 1].tolist())
-        test_tickers = tuple(blocks[fold_index + 2].tolist())
+    resolved_gap_seconds = (
+        int(purge_embargo_gap_seconds)
+        if purge_embargo_gap_seconds is not None
+        else compute_purge_embargo_gap_seconds(
+            ordered_markets,
+            feature_schema=feature_schema,
+            safety_margin_seconds=purge_embargo_safety_margin_seconds,
+        )
+    )
+    gap = pd.Timedelta(seconds=resolved_gap_seconds)
+    for fold_index in range(max(0, len(blocks) - 2)):
+        validation_indices = blocks[fold_index + 1]
+        test_indices = blocks[fold_index + 2]
+        if not purge_embargo:
+            train_tickers = tuple(tickers[index] for block in blocks[: fold_index + 1] for index in block.tolist())
+            validation_tickers = tuple(tickers[index] for index in validation_indices.tolist())
+            test_tickers = tuple(tickers[index] for index in test_indices.tolist())
+        else:
+            if "close_time" not in ordered_markets.columns:
+                raise ValueError("Purged/embargoed walk-forward folds require close_time in the markets frame.")
+            close_times = pd.to_datetime(ordered_markets["close_time"], utc=True)
+            validation_start_time = pd.Timestamp(close_times.iloc[int(validation_indices[0])])
+            validation_end_time = pd.Timestamp(close_times.iloc[int(validation_indices[-1])])
+            core_test_start_time = pd.Timestamp(close_times.iloc[int(test_indices[0])])
+            core_test_end_time = pd.Timestamp(close_times.iloc[int(test_indices[-1])])
+            train_cutoff = validation_start_time - gap
+            test_cutoff = max(core_test_start_time, validation_end_time + gap)
+            train_mask = close_times < train_cutoff
+            test_mask = (close_times >= test_cutoff) & (close_times <= core_test_end_time)
+            train_tickers = tuple(ordered_markets.loc[train_mask, "ticker"].astype(str))
+            validation_tickers = tuple(ordered_markets.iloc[validation_indices]["ticker"].astype(str))
+            test_tickers = tuple(ordered_markets.loc[test_mask, "ticker"].astype(str))
+            if not train_tickers or not validation_tickers or not test_tickers:
+                raise ValueError(
+                    f"Purged/embargoed walk-forward fold {fold_index + 1} is empty. "
+                    "Reduce the gap or increase the time span."
+                )
         folds.append(
             WalkForwardFold(
                 fold_index=fold_index + 1,
@@ -2990,11 +3897,21 @@ def evaluate_walk_forward(
     markets_df: pd.DataFrame,
     params: dict[str, object],
     *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
     fallback_to_best_overall_policy: bool = False,
     progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
-    folds = build_walk_forward_folds(markets_df)
+    folds = build_walk_forward_folds(
+        markets_df,
+        feature_schema=feature_schema,
+        purge_embargo=purge_embargo,
+        purge_embargo_gap_seconds=purge_embargo_gap_seconds,
+        purge_embargo_safety_margin_seconds=purge_embargo_safety_margin_seconds,
+    )
     progress = tqdm(folds, desc=progress_desc, unit="fold") if progress_desc else None
     iterator = progress if progress is not None else folds
     try:
@@ -3003,16 +3920,19 @@ def evaluate_walk_forward(
                 cache_dir,
                 fold.train_tickers,
                 progress_desc=f"Fold {fold.fold_index} train dataset" if progress is not None else None,
+                feature_schema=feature_schema,
             )
             validation_df = load_feature_dataset(
                 cache_dir,
                 fold.validation_tickers,
                 progress_desc=f"Fold {fold.fold_index} validation dataset" if progress is not None else None,
+                feature_schema=feature_schema,
             )
             test_df = load_feature_dataset(
                 cache_dir,
                 fold.test_tickers,
                 progress_desc=f"Fold {fold.fold_index} test dataset" if progress is not None else None,
+                feature_schema=feature_schema,
             )
             model, metrics = train_lightgbm_model(train_df, validation_df, params)
             validation_raw = raw_predictions(model, validation_df)
@@ -3066,13 +3986,23 @@ def _evaluate_walk_forward_regularized_logistic(
     markets_df: pd.DataFrame,
     params: dict[str, object],
     *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
     train_fn: Any,
     predict_fn: Any,
     fallback_to_best_overall_policy: bool = False,
     progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
-    folds = build_walk_forward_folds(markets_df)
+    folds = build_walk_forward_folds(
+        markets_df,
+        feature_schema=feature_schema,
+        purge_embargo=purge_embargo,
+        purge_embargo_gap_seconds=purge_embargo_gap_seconds,
+        purge_embargo_safety_margin_seconds=purge_embargo_safety_margin_seconds,
+    )
     progress = tqdm(folds, desc=progress_desc, unit="fold") if progress_desc else None
     iterator = progress if progress is not None else folds
     try:
@@ -3081,16 +4011,19 @@ def _evaluate_walk_forward_regularized_logistic(
                 cache_dir,
                 fold.train_tickers,
                 progress_desc=f"Fold {fold.fold_index} train dataset" if progress is not None else None,
+                feature_schema=feature_schema,
             )
             validation_df = load_feature_dataset(
                 cache_dir,
                 fold.validation_tickers,
                 progress_desc=f"Fold {fold.fold_index} validation dataset" if progress is not None else None,
+                feature_schema=feature_schema,
             )
             test_df = load_feature_dataset(
                 cache_dir,
                 fold.test_tickers,
                 progress_desc=f"Fold {fold.fold_index} test dataset" if progress is not None else None,
+                feature_schema=feature_schema,
             )
             artifact, metrics = train_fn(train_df, validation_df, params)
             validation_raw = predict_fn(artifact, validation_df)
@@ -3144,6 +4077,10 @@ def evaluate_walk_forward_lasso(
     markets_df: pd.DataFrame,
     params: dict[str, object],
     *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
     fallback_to_best_overall_policy: bool = False,
     progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
@@ -3151,6 +4088,10 @@ def evaluate_walk_forward_lasso(
         cache_dir,
         markets_df,
         params,
+        feature_schema=feature_schema,
+        purge_embargo=purge_embargo,
+        purge_embargo_gap_seconds=purge_embargo_gap_seconds,
+        purge_embargo_safety_margin_seconds=purge_embargo_safety_margin_seconds,
         train_fn=train_lasso_model,
         predict_fn=lasso_raw_predictions,
         fallback_to_best_overall_policy=fallback_to_best_overall_policy,
@@ -3163,6 +4104,10 @@ def evaluate_walk_forward_bagged_lasso(
     markets_df: pd.DataFrame,
     params: dict[str, object],
     *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
     fallback_to_best_overall_policy: bool = False,
     progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
@@ -3170,6 +4115,10 @@ def evaluate_walk_forward_bagged_lasso(
         cache_dir,
         markets_df,
         params,
+        feature_schema=feature_schema,
+        purge_embargo=purge_embargo,
+        purge_embargo_gap_seconds=purge_embargo_gap_seconds,
+        purge_embargo_safety_margin_seconds=purge_embargo_safety_margin_seconds,
         train_fn=train_bagged_lasso_model,
         predict_fn=bagged_lasso_raw_predictions,
         fallback_to_best_overall_policy=fallback_to_best_overall_policy,
@@ -3182,6 +4131,10 @@ def evaluate_walk_forward_elastic_net(
     markets_df: pd.DataFrame,
     params: dict[str, object],
     *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
     fallback_to_best_overall_policy: bool = False,
     progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
@@ -3189,6 +4142,10 @@ def evaluate_walk_forward_elastic_net(
         cache_dir,
         markets_df,
         params,
+        feature_schema=feature_schema,
+        purge_embargo=purge_embargo,
+        purge_embargo_gap_seconds=purge_embargo_gap_seconds,
+        purge_embargo_safety_margin_seconds=purge_embargo_safety_margin_seconds,
         train_fn=train_elastic_net_model,
         predict_fn=elastic_net_raw_predictions,
         fallback_to_best_overall_policy=fallback_to_best_overall_policy,
@@ -3201,6 +4158,10 @@ def evaluate_walk_forward_linear_svm(
     markets_df: pd.DataFrame,
     params: dict[str, object],
     *,
+    feature_schema: str = DEFAULT_FEATURE_SCHEMA,
+    purge_embargo: bool = False,
+    purge_embargo_gap_seconds: int | None = None,
+    purge_embargo_safety_margin_seconds: int = DEFAULT_PURGE_EMBARGO_SAFETY_MARGIN_SECONDS,
     fallback_to_best_overall_policy: bool = False,
     progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
@@ -3208,6 +4169,10 @@ def evaluate_walk_forward_linear_svm(
         cache_dir,
         markets_df,
         params,
+        feature_schema=feature_schema,
+        purge_embargo=purge_embargo,
+        purge_embargo_gap_seconds=purge_embargo_gap_seconds,
+        purge_embargo_safety_margin_seconds=purge_embargo_safety_margin_seconds,
         train_fn=train_linear_svm_model,
         predict_fn=linear_svm_raw_predictions,
         fallback_to_best_overall_policy=fallback_to_best_overall_policy,

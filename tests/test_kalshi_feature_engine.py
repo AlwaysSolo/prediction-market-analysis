@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from datetime import UTC, datetime, timedelta
+import math
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from src.live.data.btc_spot_feed import BTCSpotUpdate
+from src.indexers.kalshi.models import Market
 from src.live.kalshi import (
     FEATURE_ORDER,
     KalshiCollectorConfig,
@@ -18,12 +21,29 @@ from src.live.kalshi import (
     KalshiMarketDataCollector,
 )
 from src.live.kalshi.features import (
+    SPOT_V1_FEATURE_SCHEMA,
     KalshiTradeFeatureAccumulator,
     build_feature_row,
     feature_state_from_ticker_state,
     feature_state_from_ticker_update,
 )
 from src.live.kalshi.types import KalshiTickerState, KalshiTickerUpdate
+
+
+class _FakeSpotFeed:
+    def __init__(self, lookup=None):
+        self._lookup = lookup
+
+    def subscribe_queue(self, maxsize: int = 0) -> asyncio.Queue:
+        return asyncio.Queue(maxsize=maxsize)
+
+    def lookup_at_or_before(self, event_time: datetime, *, max_age_ms: int | None = None):
+        if callable(self._lookup):
+            return self._lookup(event_time, max_age_ms=max_age_ms)
+        return self._lookup
+
+    def snapshot_state(self):
+        return self._lookup
 
 
 def _collector_config(tmp_path: Path) -> KalshiCollectorConfig:
@@ -164,6 +184,126 @@ def test_feature_state_exposes_quote_diagnostics_without_changing_feature_row():
     assert state.last_to_mid_gap == pytest.approx(-0.005)
     assert state.feature_row() is not None
     assert state.feature_row().shape == (1, len(FEATURE_ORDER))
+
+
+def test_feature_state_engine_requires_fresh_external_spot_for_spot_v1(tmp_path: Path):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    collector._markets[ticker] = Market(
+        ticker=ticker,
+        event_ticker="KXBTC15M",
+        market_type="binary",
+        title="BTC price up in next 15 mins?",
+        yes_sub_title="Price to beat: $85,000.00",
+        no_sub_title="Price to beat: TBD",
+        status="open",
+        yes_bid=54,
+        yes_ask=56,
+        no_bid=44,
+        no_ask=46,
+        last_price=55,
+        volume=0,
+        volume_24h=0,
+        open_interest=0,
+        result="",
+        created_time=None,
+        open_time=datetime(2026, 1, 1, 11, 55, tzinfo=UTC),
+        close_time=datetime(2026, 1, 1, 12, 10, tzinfo=UTC),
+    )
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    stale_lookup = None
+    engine = KalshiFeatureStateEngine(
+        collector,
+        config=KalshiFeatureEngineConfig(
+            feature_schema=SPOT_V1_FEATURE_SCHEMA,
+            external_spot_required_for_schema=True,
+        ),
+        spot_feed=_FakeSpotFeed(lookup=stale_lookup),
+    )
+
+    async def run() -> None:
+        queue = engine.subscribe_queue()
+        await engine.start()
+        assert queue.empty()
+        await collector._publish_update(_ticker_update(ticker=ticker, event_time=event_time))
+        await asyncio.sleep(0)
+        assert queue.empty()
+        state = engine.get_state(ticker)
+        assert state is not None
+        assert state.is_scoreable is False
+
+    asyncio.run(run())
+
+
+def test_feature_state_engine_enriches_spot_v1_from_fresh_external_spot(tmp_path: Path):
+    collector = KalshiMarketDataCollector(_collector_config(tmp_path))
+    ticker = "KXBTC15M-TEST"
+    collector._markets[ticker] = Market(
+        ticker=ticker,
+        event_ticker="KXBTC15M",
+        market_type="binary",
+        title="BTC price up in next 15 mins?",
+        yes_sub_title="Price to beat: $85,000.00",
+        no_sub_title="Price to beat: TBD",
+        status="open",
+        yes_bid=54,
+        yes_ask=56,
+        no_bid=44,
+        no_ask=46,
+        last_price=55,
+        volume=0,
+        volume_24h=0,
+        open_interest=0,
+        result="",
+        created_time=None,
+        open_time=datetime(2026, 1, 1, 11, 55, tzinfo=UTC),
+        close_time=datetime(2026, 1, 1, 12, 10, tzinfo=UTC),
+    )
+    event_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    spot_update = BTCSpotUpdate(
+        event_time=event_time - timedelta(milliseconds=100),
+        received_at=event_time - timedelta(milliseconds=50),
+        btc_spot_price=86000.0,
+        btc_spot_twap_60s=85980.0,
+        btc_spot_age_ms=100.0,
+        btc_spot_is_fresh=True,
+        btc_spot_venues_fresh=2,
+        btc_spot_venue_divergence_bps=3.0,
+        btc_vol_effective_sample_size=120.0,
+        btc_spot_source="quote",
+        btc_spot_return_30s=0.001,
+        btc_spot_return_120s=0.002,
+        btc_spot_return_300s=0.003,
+        btc_spot_return_900s=0.004,
+        btc_spot_vol_120s=0.55,
+        btc_spot_vol_300s=0.5,
+        btc_spot_vol_900s=0.45,
+        btc_spot_vol_1800s=0.4,
+        btc_spot_vol_ewma_hl300=0.48,
+    )
+    engine = KalshiFeatureStateEngine(
+        collector,
+        config=KalshiFeatureEngineConfig(
+            feature_schema=SPOT_V1_FEATURE_SCHEMA,
+            external_spot_required_for_schema=True,
+        ),
+        spot_feed=_FakeSpotFeed(lookup=spot_update),
+    )
+
+    async def run() -> None:
+        queue = engine.subscribe_queue()
+        await engine.start()
+        await collector._publish_update(_ticker_update(ticker=ticker, event_time=event_time))
+        update = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert update.ticker == ticker
+        assert update.is_scoreable is True
+        assert update.btc_spot_is_fresh == pytest.approx(1.0)
+        assert update.btc_spot_price == pytest.approx(86000.0)
+        assert update.btc_log_moneyness == pytest.approx(math.log(86000.0 / 85000.0))
+        assert update.btc_log_moneyness_twap60 == pytest.approx(math.log(85980.0 / 85000.0))
+        await engine.stop()
+
+    asyncio.run(run())
 
 
 def test_feature_state_from_ticker_state_uses_snapshot_time():

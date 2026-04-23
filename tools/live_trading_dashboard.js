@@ -64,6 +64,22 @@ const fmtRatio = (v, d = 2) => {
 const fmtDate = (v) => (v ? new Date(v).toLocaleString() : "n/a");
 const num = (v, f = 0) => (Number.isFinite(Number(v)) ? Number(v) : f);
 
+function calculateKalshiFeeDollars(entryPrice, contracts) {
+  const rawFee = 0.07 * num(contracts, 0) * num(entryPrice, 0) * (1 - num(entryPrice, 0));
+  return Math.ceil(rawFee * 100) / 100;
+}
+
+function calculateRealizedCashMetrics(entryPriceCents, contracts) {
+  const entryPrice = num(entryPriceCents, 0) / 100;
+  const entryCost = entryPrice * num(contracts, 0);
+  const fees = calculateKalshiFeeDollars(entryPrice, contracts);
+  return {
+    entryCost,
+    fees,
+    cashRequired: entryCost + fees,
+  };
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
@@ -340,6 +356,282 @@ function createSideStats() {
   };
 }
 
+function syntheticApprovalDecisionId(index) {
+  return `approved:${index}`;
+}
+
+function isSyntheticApprovalDecisionId(decisionId) {
+  return String(decisionId || "").startsWith("approved:");
+}
+
+function approvalDecisionKey(ticker, side) {
+  return `${ticker || "unknown"}|${normalizeSide(side)}`;
+}
+
+function applySignalPayloadToDecision(decision, payload, loggedAt) {
+  decision.ticker = payload.ticker || decision.ticker;
+  decision.side = normalizeSide(payload.side || decision.side);
+  decision.approvedAt = decision.approvedAt || loggedAt;
+  decision.status = decision.claimedAt ? decision.status : "approved";
+  decision.tau = payload.tau_minutes ?? decision.tau;
+  decision.predictedYesProbability = payload.predicted_yes_probability ?? decision.predictedYesProbability;
+  decision.predictedNoProbability = payload.predicted_no_probability ?? (
+    payload.predicted_yes_probability == null ? decision.predictedNoProbability : 1 - payload.predicted_yes_probability
+  );
+  decision.featureBasisMarketProb = payload.feature_basis_market_prob ?? payload.market_prob ?? decision.featureBasisMarketProb;
+  decision.rawEdge = payload.raw_model_edge ?? decision.rawEdge;
+  decision.postEdge = payload.post_cost_edge ?? decision.postEdge;
+  decision.yesEdge = payload.yes_post_cost_edge ?? decision.yesEdge;
+  decision.noEdge = payload.no_post_cost_edge ?? decision.noEdge;
+  decision.refPx = payload.reference_price_cents ?? decision.refPx;
+  decision.maxPx = payload.max_acceptable_entry_price_cents ?? decision.maxPx;
+  decision.lastYesPx = payload.last_yes_price_cents ?? decision.lastYesPx;
+  decision.yesBid = payload.yes_bid_cents ?? decision.yesBid;
+  decision.yesAsk = payload.yes_ask_cents ?? decision.yesAsk;
+  decision.buyYesPx = payload.buy_yes_price_cents ?? decision.buyYesPx;
+  decision.buyNoPx = payload.buy_no_price_cents ?? decision.buyNoPx;
+  decision.quoteMid = payload.quote_mid_prob ?? decision.quoteMid;
+  decision.quoteSpread = payload.quote_spread_cents ?? decision.quoteSpread;
+  decision.quoteAge = payload.quote_age_seconds ?? decision.quoteAge;
+}
+
+function applyApprovalSnapshotToDecision(decision, snapshot) {
+  if (!snapshot?.payload) return;
+  applySignalPayloadToDecision(decision, snapshot.payload, snapshot.loggedAt || decision.approvedAt);
+}
+
+function closeApprovalEpisodes(approvalEpisodes, ticker, side = null) {
+  for (const key of [...approvalEpisodes.keys()]) {
+    const [episodeTicker, episodeSide] = key.split("|");
+    if (episodeTicker !== ticker) continue;
+    if (side && episodeSide !== side) continue;
+    approvalEpisodes.delete(key);
+  }
+}
+
+function findPendingApprovalDecisionId(decisions, ticker, side, claimTime) {
+  let chosenId = null;
+  let chosenAt = null;
+  for (const [decisionId, decision] of decisions.entries()) {
+    if (!isSyntheticApprovalDecisionId(decisionId)) continue;
+    if (decision.claimedAt || decision.settledAt) continue;
+    if ((decision.ticker || "unknown") !== ticker) continue;
+    if (normalizeSide(decision.side) !== side) continue;
+    if (!decision.approvedAt) continue;
+    const approvedAt = new Date(decision.approvedAt);
+    if (Number.isNaN(approvedAt.getTime())) continue;
+    if (claimTime && approvedAt > claimTime) continue;
+    if (!chosenAt || approvedAt > chosenAt) {
+      chosenAt = approvedAt;
+      chosenId = decisionId;
+    }
+  }
+  return chosenId;
+}
+
+function discardPendingApprovalDecisions(decisions, ticker, side, claimTime, keepDecisionId = null) {
+  for (const [decisionId, decision] of decisions.entries()) {
+    if (!isSyntheticApprovalDecisionId(decisionId)) continue;
+    if (decisionId === keepDecisionId) continue;
+    if (decision.claimedAt || decision.settledAt) continue;
+    if ((decision.ticker || "unknown") !== ticker) continue;
+    if (normalizeSide(decision.side) !== side) continue;
+    if (!decision.approvedAt) continue;
+    const approvedAt = new Date(decision.approvedAt);
+    if (claimTime && !Number.isNaN(approvedAt.getTime()) && approvedAt > claimTime) continue;
+    decisions.delete(decisionId);
+  }
+}
+
+function promoteApprovalDecision(decisions, sourceId, targetId, seed = {}) {
+  if (!sourceId || sourceId === targetId) return ensureDecision(decisions, targetId, seed);
+  const source = decisions.get(sourceId);
+  const target = ensureDecision(decisions, targetId, seed);
+  if (source) {
+    Object.assign(target, source, { decisionId: targetId });
+    decisions.delete(sourceId);
+  }
+  return target;
+}
+
+function tickersFromRawPositions(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((entry) => (typeof entry === "string" ? entry : entry?.ticker || "unknown"));
+}
+
+function tallyTickers(items) {
+  const counts = new Map();
+  for (const item of items) counts.set(item, (counts.get(item) || 0) + 1);
+  return counts;
+}
+
+function addedTickers(prevRaw, nextRaw) {
+  const prior = tallyTickers(tickersFromRawPositions(prevRaw));
+  const current = tallyTickers(tickersFromRawPositions(nextRaw));
+  const added = [];
+  for (const [ticker, count] of current.entries()) {
+    const delta = count - (prior.get(ticker) || 0);
+    for (let index = 0; index < Math.max(0, delta); index += 1) added.push(ticker);
+  }
+  return added;
+}
+
+function removedTickers(prevRaw, nextRaw) {
+  const prior = tallyTickers(tickersFromRawPositions(prevRaw));
+  const current = tallyTickers(tickersFromRawPositions(nextRaw));
+  const removed = [];
+  for (const [ticker, count] of prior.entries()) {
+    const delta = count - (current.get(ticker) || 0);
+    for (let index = 0; index < Math.max(0, delta); index += 1) removed.push(ticker);
+  }
+  return removed;
+}
+
+function assignSnapshotDeltasToClaims(decisions, previousSnapshot, currentSnapshot) {
+  if (!previousSnapshot) {
+    const initialPending = tickersFromRawPositions(currentSnapshot.pendingRaw);
+    if (!initialPending.length || !(num(currentSnapshot.deployed, 0) > 0)) return;
+    const share = num(currentSnapshot.deployed, 0) / initialPending.length;
+    for (const ticker of initialPending) {
+    const candidates = [...decisions.values()]
+      .filter((decision) => decision.claimedAt
+        && !decision.settledAt
+        && (decision.ticker || "unknown") === ticker)
+      .sort((a, b) => new Date(b.claimedAt) - new Date(a.claimedAt));
+    const match = candidates.find((decision) => decision.cashRequired == null);
+    if (!match) continue;
+    match.cashRequired = share;
+    match.entryCost = share;
+    match.contracts = match.contracts ?? 1;
+  }
+    return;
+  }
+  const added = addedTickers(previousSnapshot.openRaw, currentSnapshot.openRaw);
+  const pendingAdded = addedTickers(previousSnapshot.pendingRaw, currentSnapshot.pendingRaw);
+  const removed = removedTickers(previousSnapshot.openRaw, currentSnapshot.openRaw);
+  if ((!added.length && !pendingAdded.length) || removed.length) return;
+  const delta = num(currentSnapshot.deployed, 0) - num(previousSnapshot.deployed, 0);
+  if (!(delta > 0)) return;
+  const targets = pendingAdded.length ? pendingAdded : added;
+  const share = delta / targets.length;
+  const snapshotTime = currentSnapshot.time;
+  for (const ticker of targets) {
+    const candidates = [...decisions.values()]
+      .filter((decision) => decision.claimedAt
+        && !decision.settledAt
+        && (decision.ticker || "unknown") === ticker
+        && (!snapshotTime || new Date(decision.claimedAt) <= snapshotTime))
+      .sort((a, b) => new Date(b.claimedAt) - new Date(a.claimedAt));
+    const match = candidates.find((decision) => decision.cashRequired == null);
+    if (!match) continue;
+    match.cashRequired = share;
+    match.entryCost = share;
+    match.contracts = match.contracts ?? 1;
+  }
+}
+
+function buildOpenExposure(raw, decisions) {
+  const enriched = [];
+  if (Array.isArray(raw) && raw.some((entry) => typeof entry !== "string")) {
+    return exposure(raw);
+  }
+
+  const openDecisionGroups = new Map();
+  for (const decision of decisions.values()) {
+    if (!decision.claimedAt || decision.settledAt) continue;
+    if (["cancelled", "rejected", "error"].includes(String(decision.status || "").toLowerCase())) continue;
+    const side = normalizeSide(decision.side);
+    const key = `${decision.ticker}|${side}`;
+    const group = openDecisionGroups.get(key) || {
+      ticker: decision.ticker || "unknown",
+      side,
+      remaining: 0,
+      avgCash: 0,
+      totalCash: 0,
+    };
+    group.remaining += 1;
+    group.totalCash += num(decision.cashRequired, 0);
+    group.avgCash = group.remaining ? group.totalCash / group.remaining : 0;
+    openDecisionGroups.set(key, group);
+  }
+
+  for (const ticker of tickersFromRawPositions(raw)) {
+    const matches = [...openDecisionGroups.values()].filter((group) => group.ticker === ticker && group.remaining > 0);
+    if (matches.length === 1) {
+      const match = matches[0];
+      enriched.push({
+        ticker,
+        side: match.side,
+        contracts: 1,
+        cash_required_dollars: match.avgCash,
+      });
+      match.remaining -= 1;
+      continue;
+    }
+    enriched.push({ ticker, side: "?", contracts: 1, cash_required_dollars: 0 });
+  }
+
+  if (!enriched.length && openDecisionGroups.size) {
+    for (const group of openDecisionGroups.values()) {
+      for (let index = 0; index < group.remaining; index += 1) {
+        enriched.push({
+          ticker: group.ticker,
+          side: group.side,
+          contracts: 1,
+          cash_required_dollars: group.avgCash,
+        });
+      }
+    }
+  }
+
+  return exposure(enriched);
+}
+
+function isDecisionOpen(decision) {
+  const status = String(decision.status || "").toLowerCase();
+  return Boolean(
+    decision.claimedAt
+      && !decision.settledAt
+      && !["cancelled", "rejected", "error"].includes(status),
+  );
+}
+
+function deriveOpenDecisionPositions(decisions) {
+  return decisions
+    .filter((decision) => isDecisionOpen(decision))
+    .sort((a, b) => new Date(a.claimedAt || 0) - new Date(b.claimedAt || 0))
+    .map((decision) => ({
+      ticker: decision.ticker || "unknown",
+      side: normalizeSide(decision.side),
+      contracts: Math.max(1, num(decision.contracts, 1)),
+      cash_required_dollars: num(decision.cashRequired, 0),
+    }));
+}
+
+function deriveLatestPortfolio(decisions, realized, initialEquity, fallbackSnapshot = null) {
+  const openPositions = deriveOpenDecisionPositions(decisions);
+  const deployed = openPositions.reduce((sum, row) => sum + num(row.cash_required_dollars, 0), 0);
+  const equity = num(initialEquity, 0) + num(realized, 0);
+  const cash = equity - deployed;
+  const latestDecisionTime = decisions
+    .map((decision) => [decision.settledAt, decision.claimedAt].find(Boolean))
+    .filter(Boolean)
+    .map((value) => new Date(value))
+    .filter((value) => !Number.isNaN(value.getTime()))
+    .sort((a, b) => b - a)[0] || null;
+  return {
+    time: fallbackSnapshot?.time || latestDecisionTime,
+    label: fallbackSnapshot?.label || (latestDecisionTime ? latestDecisionTime.toISOString() : null),
+    cash,
+    deployed,
+    equity,
+    open: openPositions.length,
+    pending: 0,
+    openRaw: openPositions,
+    pendingRaw: [],
+  };
+}
+
 function ensureDecision(decisions, decisionId, seed = {}) {
   const existing = decisions.get(decisionId);
   if (existing) return existing;
@@ -392,17 +684,21 @@ function analyze(signalRows, executionRows) {
 
   const signalStart = signals.filter((r) => r.event_type === "signal_started").at(-1)?.payload || {};
   const decisions = new Map();
+  const approvalEpisodes = new Map();
+  const latestApprovedByKey = new Map();
   const blockCounts = new Map();
-  let approved = 0;
   let blocked = 0;
   let latestSignal = null;
+  let nextSyntheticApprovalId = 0;
 
   for (const row of signals) {
     if (row.event_type !== "signal_decision") continue;
     const p = row.payload || {};
+    const ticker = p.ticker || "unknown";
+    const side = normalizeSide(p.side);
     latestSignal = {
       loggedAt: row.logged_at,
-      ticker: p.ticker || "unknown",
+      ticker,
       side: p.side || "UNKNOWN",
       approved: Boolean(p.approved),
       predicted_yes_probability: p.predicted_yes_probability ?? null,
@@ -427,48 +723,25 @@ function analyze(signalRows, executionRows) {
     };
 
     if (p.approved) {
-      approved += 1;
-    }
-
-    if (p.approved && p.decision_id) {
-      const d = ensureDecision(decisions, p.decision_id, { ticker: p.ticker, side: normalizeSide(p.side) });
-      d.ticker = p.ticker || d.ticker;
-      d.side = normalizeSide(p.side);
-      d.approvedAt = row.logged_at;
-      d.status = "approved";
-      d.tau = p.tau_minutes ?? d.tau;
-      d.predictedYesProbability = p.predicted_yes_probability ?? d.predictedYesProbability;
-      d.predictedNoProbability = p.predicted_no_probability ?? (p.predicted_yes_probability == null ? d.predictedNoProbability : 1 - p.predicted_yes_probability);
-      d.featureBasisMarketProb = p.feature_basis_market_prob ?? p.market_prob ?? d.featureBasisMarketProb;
-      d.rawEdge = p.raw_model_edge ?? d.rawEdge;
-      d.postEdge = p.post_cost_edge ?? d.postEdge;
-      d.yesEdge = p.yes_post_cost_edge ?? d.yesEdge;
-      d.noEdge = p.no_post_cost_edge ?? d.noEdge;
-      d.refPx = p.reference_price_cents ?? d.refPx;
-      d.maxPx = p.max_acceptable_entry_price_cents ?? d.maxPx;
-      d.lastYesPx = p.last_yes_price_cents ?? d.lastYesPx;
-      d.yesBid = p.yes_bid_cents ?? d.yesBid;
-      d.yesAsk = p.yes_ask_cents ?? d.yesAsk;
-      d.buyYesPx = p.buy_yes_price_cents ?? d.buyYesPx;
-      d.buyNoPx = p.buy_no_price_cents ?? d.buyNoPx;
-      d.quoteMid = p.quote_mid_prob ?? d.quoteMid;
-      d.quoteSpread = p.quote_spread_cents ?? d.quoteSpread;
-      d.quoteAge = p.quote_age_seconds ?? d.quoteAge;
-      continue;
-    }
-
-    if (p.approved) {
+      const decisionKey = approvalDecisionKey(ticker, side);
+      const decisionId = p.decision_id || approvalEpisodes.get(decisionKey) || syntheticApprovalDecisionId(nextSyntheticApprovalId++);
+      approvalEpisodes.set(decisionKey, decisionId);
+      latestApprovedByKey.set(decisionKey, { loggedAt: row.logged_at, payload: { ...p } });
+      const decision = ensureDecision(decisions, decisionId, { ticker, side });
+      applySignalPayloadToDecision(decision, p, row.logged_at);
       continue;
     }
 
     blocked += 1;
     const reason = p.block_reason || "unknown";
     blockCounts.set(reason, (blockCounts.get(reason) || 0) + 1);
+    closeApprovalEpisodes(approvalEpisodes, ticker);
   }
 
   let mode = null;
   let executionActive = false;
   let executionStartedPayload = null;
+  let previousSnapshot = null;
   for (const row of execs) {
     const p = row.payload || {};
     if (row.event_type === "execution_started") {
@@ -482,11 +755,32 @@ function analyze(signalRows, executionRows) {
       continue;
     }
     if (row.event_type === "intent_claimed") {
-      const d = ensureDecision(decisions, p.decision_id, { ticker: p.ticker, side: normalizeSide(p.side) });
+      const claimTime = row.t;
+      const ticker = p.ticker || "unknown";
+      const side = normalizeSide(p.side);
+      const decisionKey = approvalDecisionKey(ticker, side);
+      const approvalSnapshot = latestApprovedByKey.get(decisionKey) || null;
+      const pendingApprovalId = approvalEpisodes.get(decisionKey)
+        || findPendingApprovalDecisionId(decisions, ticker, side, claimTime);
+      const d = pendingApprovalId
+        ? promoteApprovalDecision(decisions, pendingApprovalId, p.decision_id, { ticker, side })
+        : ensureDecision(decisions, p.decision_id, { ticker, side });
       d.ticker = p.ticker || d.ticker;
-      d.side = normalizeSide(p.side);
+      d.side = side;
       d.claimedAt = row.logged_at;
       d.status = mode === "live" ? "claimed" : "simulated";
+      d.contracts = num(
+        p.contracts ?? p.remaining_contracts_before_submit ?? p.desired_contracts,
+        d.contracts ?? 1,
+      );
+      applyApprovalSnapshotToDecision(d, approvalSnapshot);
+      if (d.cashRequired == null && p.limit_price_cents != null) {
+        d.cashRequired = calculateRealizedCashMetrics(p.limit_price_cents, d.contracts).cashRequired;
+      }
+      d.refPx = p.model_limit_price_cents ?? d.refPx;
+      d.maxPx = p.limit_price_cents ?? d.maxPx;
+      closeApprovalEpisodes(approvalEpisodes, ticker, side);
+      discardPendingApprovalDecisions(decisions, ticker, side, claimTime, p.decision_id);
       continue;
     }
     if (row.event_type === "submit_response" || row.event_type === "submit_retry_response") {
@@ -522,7 +816,7 @@ function analyze(signalRows, executionRows) {
       const p = r.payload || {};
       const cash = num(p.available_cash_dollars, 0);
       const deployed = num(p.deployed_capital_dollars, 0);
-      return {
+      const snapshot = {
         time: r.t,
         label: r.logged_at,
         cash,
@@ -531,20 +825,12 @@ function analyze(signalRows, executionRows) {
         open: normOpen(p.open_positions).length,
         pending: Array.isArray(p.pending_reservations) ? p.pending_reservations.length : 0,
         openRaw: p.open_positions || [],
+        pendingRaw: p.pending_reservations || [],
       };
+      assignSnapshotDeltasToClaims(decisions, previousSnapshot, snapshot);
+      previousSnapshot = snapshot;
+      return snapshot;
     });
-
-  let peak = portfolio[0]?.equity || 0;
-  let maxDd = 0;
-  let maxDdPct = 0;
-  for (const pt of portfolio) {
-    peak = Math.max(peak, pt.equity);
-    if (peak > 0) {
-      const dd = peak - pt.equity;
-      maxDd = Math.max(maxDd, dd);
-      maxDdPct = Math.max(maxDdPct, dd / peak);
-    }
-  }
 
   const settled = [...decisions.values()]
     .filter((d) => d.settledAt)
@@ -561,21 +847,7 @@ function analyze(signalRows, executionRows) {
   const bestTrade = wins.reduce((best, d) => (!best || num(d.pnl, 0) > num(best.pnl, 0) ? d : best), null);
   const worstTrade = losses.reduce((worst, d) => (!worst || num(d.pnl, 0) < num(worst.pnl, 0) ? d : worst), null);
   const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Number.POSITIVE_INFINITY : 0;
-  const paperObjective = realized / Math.max(1, maxDd);
   const initialEquity = portfolio[0]?.equity ?? num(signalStart.starting_cash_dollars, 0);
-  const latestEquity = portfolio.at(-1)?.equity ?? initialEquity;
-  const equityDelta = latestEquity - initialEquity;
-
-  const latest = portfolio.at(-1) || {
-    cash: 0,
-    deployed: 0,
-    equity: 0,
-    open: 0,
-    pending: 0,
-    openRaw: [],
-    label: null,
-  };
-
   const tickerMap = new Map();
   const sideStats = createSideStats();
   const tauRows = createTauRows();
@@ -609,15 +881,17 @@ function analyze(signalRows, executionRows) {
       tickerStats.claimed += 1;
       sideRow.claimed += 1;
       if (tauRow) tauRow.claimed += 1;
-      timeline.push({
-        time: d.claimedAt,
-        type: "claimed",
-        ticker: d.ticker,
-        side: d.side,
-        status: d.status,
-        result: null,
-        pnl: null,
-      });
+      if (!d.settledAt) {
+        timeline.push({
+          time: d.claimedAt,
+          type: "claimed",
+          ticker: d.ticker,
+          side: d.side,
+          status: d.status,
+          result: null,
+          pnl: null,
+        });
+      }
     }
     if (d.settledAt) {
       tickerStats.settled += 1;
@@ -651,6 +925,46 @@ function analyze(signalRows, executionRows) {
     tickerMap.set(tickerKey, tickerStats);
   }
 
+  for (const row of tauRows) {
+    row.winRate = row.settled ? row.wins / row.settled : 0;
+    row.expectancy = row.settled ? row.realized / row.settled : 0;
+  }
+
+  const decisionValues = [...decisions.values()];
+  const approved = decisionValues.filter((d) => d.approvedAt).length;
+  const claimCount = decisionValues.filter((d) => d.claimedAt).length;
+  const latestSnapshot = portfolio.at(-1) || null;
+  const shouldUseDerivedLatest = ["paper", "shadow"].includes(String(mode || "").toLowerCase());
+  const derivedLatest = deriveLatestPortfolio(decisionValues, realized, initialEquity, latestSnapshot);
+  const latest = shouldUseDerivedLatest
+    ? derivedLatest
+    : (latestSnapshot || derivedLatest);
+  const portfolioForDisplay = (() => {
+    if (!shouldUseDerivedLatest) return portfolio;
+    if (!latestSnapshot) return [latest];
+    const materiallyDifferent = (
+      latestSnapshot.open !== latest.open
+      || Math.abs(num(latestSnapshot.deployed, 0) - num(latest.deployed, 0)) > 1e-9
+      || Math.abs(num(latestSnapshot.equity, 0) - num(latest.equity, 0)) > 1e-9
+    );
+    return materiallyDifferent ? [...portfolio, latest] : portfolio;
+  })();
+
+  let peak = portfolioForDisplay[0]?.equity || 0;
+  let maxDd = 0;
+  let maxDdPct = 0;
+  for (const pt of portfolioForDisplay) {
+    peak = Math.max(peak, pt.equity);
+    if (peak > 0) {
+      const dd = peak - pt.equity;
+      maxDd = Math.max(maxDd, dd);
+      maxDdPct = Math.max(maxDdPct, dd / peak);
+    }
+  }
+  const paperObjective = realized / Math.max(1, maxDd);
+  const latestEquity = latest.equity ?? initialEquity;
+  const equityDelta = latestEquity - initialEquity;
+
   for (const row of exposure(latest.openRaw)) {
     const tickerStats = tickerMap.get(row.ticker) || {
       ticker: row.ticker,
@@ -666,12 +980,6 @@ function analyze(signalRows, executionRows) {
     tickerMap.set(row.ticker, tickerStats);
   }
 
-  for (const row of tauRows) {
-    row.winRate = row.settled ? row.wins / row.settled : 0;
-    row.expectancy = row.settled ? row.realized / row.settled : 0;
-  }
-
-  const claimCount = [...decisions.values()].filter((d) => d.claimedAt).length;
   const sideSummary = ["YES", "NO"].map((side) => {
     const stats = sideStats[side];
     return {
@@ -703,7 +1011,7 @@ function analyze(signalRows, executionRows) {
     blockedMissingQuote: num(blockCounts.get("missing_quote"), 0),
     blockedStaleQuote: num(blockCounts.get("stale_quote"), 0),
     blockedCrossedQuote: num(blockCounts.get("crossed_quote"), 0),
-    recent: [...decisions.values()]
+    recent: decisionValues
       .sort((a, b) => new Date(b.claimedAt || b.approvedAt || 0) - new Date(a.claimedAt || a.approvedAt || 0))
       .slice(0, 40),
     settled,
@@ -724,9 +1032,9 @@ function analyze(signalRows, executionRows) {
     worstTrade,
     maxDd,
     maxDdPct,
-    portfolio,
+    portfolio: portfolioForDisplay,
     latest,
-    openExposure: exposure(latest.openRaw),
+    openExposure: buildOpenExposure(latest.openRaw, decisions),
     tickerBreakdown: [...tickerMap.values()].sort((a, b) => b.realized - a.realized),
     timeline: timeline.slice(0, 80),
     sideSummary,
@@ -1292,12 +1600,12 @@ function updateDashboardChrome(modelName, summary, loadedMeta = {}, modelCount =
   });
   $("source-caption").textContent = loadedMeta.caption
     || "Choose a run folder or snapshot first. The dashboard can read both shadow and live execution logs, and it now distinguishes runs instead of assuming one fixed folder shape.";
-  sync(
-    summary
-      ? `Dashboard synced | ${fmtCount(modelCount)} models | ${summary.mode || "unknown"} mode | focused ${modelName}`
-      : "Waiting for logs",
-    summary ? "ok" : "warn",
-  );
+  const syncLabel = summary
+    ? loadedMeta.sourceKind === "snapshot"
+      ? `Snapshot loaded | ${fmtCount(modelCount)} models | ${summary.mode || "unknown"} mode | re-upload snapshot to see new writes`
+      : `Dashboard synced | ${fmtCount(modelCount)} models | ${summary.mode || "unknown"} mode | focused ${modelName}`
+    : "Waiting for logs";
+  sync(syncLabel, summary ? "ok" : "warn");
 }
 
 function renderSelectedModel(modelName, summary, meta, modelCount, loadedMeta, aggregate) {
@@ -1506,6 +1814,7 @@ function restartTimer() {
     state.timer = null;
   }
   if (!state.autoRefresh) return;
+  if (state.sourceKind === "snapshot") return;
   state.timer = setInterval(refresh, state.refreshSeconds * 1000);
 }
 
@@ -1574,7 +1883,10 @@ $("snapshot-input").addEventListener("change", async (e) => {
   state.runHandleMap = new Map();
   state.sourceKind = "snapshot";
   state.sourceLabel = state.snapshotFiles.length ? "uploaded snapshot" : "snapshot";
+  state.autoRefresh = false;
+  $("auto-refresh").value = "off";
   await populateEnvs();
+  restartTimer();
   await refresh();
 });
 document.querySelectorAll("[data-tab]").forEach((button) => {
